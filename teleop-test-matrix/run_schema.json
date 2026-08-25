@@ -1,0 +1,419 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://t-mobile.com/teleop-test-matrix/run_schema.json",
+  "title": "Teleoperation test run record (LiveKit Rust SDK)",
+  "description": "One record per run, written as JSONL to runs/<suite>.jsonl. The conditions block and the metrics block MUST travel together: a metrics blob without the conditions that produced it is unanalyzable, and that is the single most common way a test matrix rots. Requested and actual are both first-class — a cell labelled av1 that silently fell back to another codec is the worst data point this matrix can produce, and this schema exists to catch it. Field authority: docs/MEASUREMENT-DESIGN.md §11.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "suite",
+    "cell_id",
+    "repeat_index",
+    "started_utc",
+    "duration_s",
+    "conditions",
+    "environment",
+    "harness",
+    "metrics",
+    "validity"
+  ],
+
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "Stable unique id: <suite>__<cell_id>__r<repeat_index>__<epoch>. Deterministic prefix so repeats of one cell group by string prefix.",
+      "minLength": 1
+    },
+    "suite": {
+      "type": "string",
+      "enum": [
+        "T1_video_floor",
+        "T2_loss_collapse",
+        "T3_jitter_tolerance",
+        "T4_capacity",
+        "T5_availability",
+        "Q7_latency_definition"
+      ]
+    },
+    "cell_id": {
+      "type": "string",
+      "description": "Comma-joined swept axis assignments, e.g. 'video_codec=av1,buffering_mode=zero_jitter'. Identifies the cell across repeats.",
+      "minLength": 1
+    },
+    "repeat_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "0-based. >=3 repeats per cell (matrix.yaml meta.parameters.default_repeats). A single run of a noisy link proves nothing; a breakpoint whose repeats disagree is reported as a range, not a point."
+    },
+    "started_utc": { "type": "string", "format": "date-time" },
+    "ended_utc": { "type": ["string", "null"], "format": "date-time" },
+    "duration_s": { "type": "number", "exclusiveMinimum": 0 },
+    "tier": {
+      "type": "integer",
+      "enum": [0, 1, 2],
+      "description": "0 = MacBook, live SFU, no shaping. 1 = Linux host with root and netem (the full matrix). 2 = external camera and NVENC-class GPU. A reader must never have to guess which tier produced a number."
+    },
+
+    "conditions": {
+      "type": "object",
+      "description": "The independent variables AS APPLIED, not as requested. netem clamps and shapers round; store the real value and the verbatim tc command. Every axis in matrix.yaml appears here, including the ones the suite held at their default — a held value is still a condition.",
+      "additionalProperties": false,
+      "required": [
+        "video_codec_requested",
+        "video_codec_actual",
+        "buffering_mode",
+        "control_transport",
+        "video_profile",
+        "loss_pct",
+        "owd_ms",
+        "jitter_ms",
+        "uplink_mbps",
+        "concurrency",
+        "control_rate_hz"
+      ],
+      "properties": {
+        "video_codec_requested": {
+          "type": "string",
+          "enum": ["av1", "vp9", "vp8", "h264"],
+          "description": "H265 is excluded from the matrix: it is the one codec with an automatic fallback (publisher.rs:1210-1224), so an h265 cell silently becomes an h264 cell."
+        },
+        "video_codec_actual": {
+          "type": ["string", "null"],
+          "description": "Negotiated codec, parsed from RtcStats::Codec.mime_type joined via stream.codec_id. THE ANALYSIS USES THIS ONE. Mismatch against requested ⇒ INVALID (codec_fallback), never a FAIL. Null only when no codec stat was ever observed, which is itself an INVALID condition."
+        },
+        "codec_mismatch": {
+          "type": "boolean",
+          "description": "video_codec_actual != video_codec_requested. Materialized rather than left for the reader to derive, so a grep for bad cells is one field away."
+        },
+
+        "buffering_mode": {
+          "type": "string",
+          "enum": ["zero_jitter"],
+          "description": "PROCESS-GLOBAL. enable_zero_playout_delay mutates LK_RUNTIME and errors if the runtime is already up without it (lk_runtime.rs:39-49); it cannot be toggled per room or subscriber within one process. Cross-check against harness.subscriber_process_id: a zero_jitter run that shared a process with another mode is not a zero_jitter run. The room-level playout-delay HINT modes (playout_hint_floor, playout_hint_smooth) are RETIRED — see matrix.yaml buffering_mode.retired_values. Records written before that change carry those values and are not schema-valid against this revision; that is deliberate, so an old run cannot be silently pooled with a new one."
+        },
+        "playout_delay_min_ms": {
+          "type": ["integer", "null"],
+          "description": "Milliseconds, quantized to 10 ms steps rounded down. Always null now: zero_jitter does not go through the room API. Retained so records that predate the hint retirement still parse and so the field is unambiguous rather than absent."
+        },
+        "playout_delay_max_ms": { "type": ["integer", "null"], "description": "Milliseconds. See playout_delay_min_ms." },
+        "audio_buffering": {
+          "type": "string",
+          "enum": ["sdk_default"],
+          "description": "A RECORDED FACT, not a setting the harness applies. No Rust API in this checkout configures the audio jitter buffer, so audio runs at the SDK default under every buffering_mode INCLUDING zero_jitter. Present so a reader of a zero_jitter run cannot infer audio was also unbuffered."
+        },
+
+        "control_transport": {
+          "type": "string",
+          "enum": ["data_track_buf1", "dc_reliable", "dc_lossy"],
+          "description": "T-2 depends entirely on this — the transports have opposite failure signatures under loss. Never leave it implicit."
+        },
+        "control_buffer_size": {
+          "type": ["integer", "null"],
+          "description": "Frame count, not a duration (remote/mod.rs:215-221). SDK default is 16; the reference config sets 1. Null for the legacy dc_* paths."
+        },
+        "control_max_partial_frames": { "type": ["integer", "null"] },
+        "control_rate_hz": { "type": "number", "description": "PRD §7.2 mocap sample rate. Held at 200; it is the load, not a variable." },
+        "playout_window_ms": {
+          "type": ["number", "null"],
+          "description": "The application deadline control_late_pct is computed against. Null when the suite does not model one — control_late_pct is then unmeasurable and must be null, not zero."
+        },
+
+        "video_profile": { "type": "string", "enum": ["target", "tolerable", "minimum", "sub_min"] },
+        "video_width_requested": { "type": "integer" },
+        "video_height_requested": { "type": "integer" },
+        "video_width_actual": { "type": ["integer", "null"], "description": "OutboundRtp.frame_width. The SDK may downscale under quality_limitation_reason: Bandwidth — the §7.1c behavior T-1 is measuring. T-1 scores on ACTUAL." },
+        "video_height_actual": { "type": ["integer", "null"] },
+        "video_fps_requested": { "type": "number" },
+        "video_max_bitrate_bps": { "type": "integer" },
+        "simulcast": { "type": "boolean", "default": false, "description": "Fixed off for the core matrix; changes bitrate behavior substantially." },
+        "dynacast": { "type": "boolean", "default": false },
+
+        "audio_enabled": { "type": "boolean" },
+        "audio_direction": { "type": "string", "enum": ["bidirectional", "uplink", "downlink", "none"] },
+        "audio_source": { "type": "string", "enum": ["synthetic_tone", "microphone", "none"], "description": "Synthetic by default: a microphone makes audio_level environment-dependent and the runs non-reproducible." },
+
+        "loss_pct":    { "type": "number", "minimum": 0, "description": "As applied by netem, read back from tc qdisc show — not as requested." },
+        "owd_ms":      { "type": "number", "minimum": 0 },
+        "jitter_ms":   { "type": "number", "minimum": 0 },
+        "uplink_mbps": { "type": "number", "exclusiveMinimum": 0 },
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "fault_injection": { "type": ["string", "null"] },
+
+        "netem_cmd": {
+          "type": ["string", "null"],
+          "description": "The verbatim single tc command applied. ONE qdisc command per cell: delay, jitter and loss combine into a single `tc qdisc replace`, because two separate netem commands silently replace each other. Null when no shaping was applied (Tier 0)."
+        },
+        "tbf_cmd": {
+          "type": ["string", "null"],
+          "description": "Rate limiting is a SEPARATE tbf qdisc, layered deliberately on top of netem. Never merged into netem_cmd."
+        },
+        "tc_qdisc_show": {
+          "type": ["string", "null"],
+          "description": "Verbatim `tc qdisc show` output captured POST-APPLY. This is the record of what the kernel actually did, as distinct from what was asked for."
+        },
+        "shaping_applied": {
+          "type": "boolean",
+          "description": "False on Tier 0. If false while any shaping axis sits at a non-default value, the run is INVALID — that combination means a requested condition was silently not applied."
+        }
+      }
+    },
+
+    "environment": {
+      "type": "object",
+      "description": "Everything needed to decide whether two runs are comparable. The analysis never pools across video_codec, encoder_tier, buffering_mode, control_transport, ran_profile, or path.",
+      "additionalProperties": false,
+      "required": ["path", "encoder_tier", "ran_profile", "host_id", "sdk_git_sha"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "enum": ["loopback", "lan", "edge_mso", "cellular", "cloud"],
+          "description": "Loopback and lan results do NOT transfer to cellular. Tag it or the report misleads."
+        },
+        "encoder_tier": {
+          "type": "string",
+          "enum": ["sw", "videotoolbox", "vaapi", "nvenc", "jetson", "unknown"],
+          "description": "RECORDED, NEVER REQUESTED — selection is automatic. Classified from encoder_implementation and power_efficient_encoder. Apple Silicon has no AV1 hardware encoder, so --codec av1 on a MacBook is tier sw: its bitrate efficiency is representative, its encode latency, CPU load and fps ceiling are NOT. A breakpoint derived from software AV1 is labelled as such wherever it appears."
+        },
+        "encoder_requested": { "type": "string", "default": "auto", "description": "Held at auto for the whole matrix; forcing a backend would measure a configuration no robot runs." },
+        "encoder_implementation": { "type": ["string", "null"], "description": "OutboundRtp.encoder_implementation from the ACTIVE layer (selection rule: publisher.rs:406-424). Picking an arbitrary OutboundRtp gives the wrong layer." },
+        "decoder_implementation": { "type": ["string", "null"] },
+        "power_efficient_encoder": { "type": ["boolean", "null"], "description": "libwebrtc's own hw/sw signal; corroborates encoder_tier." },
+
+        "ran_profile": {
+          "type": "object",
+          "description": "RECORDED, NEVER SET BY THE HARNESS. Five settings owned by the T-Mobile network team. On path loopback or lan every field is 'n/a' and the report must state those results do not transfer to cellular. The report may never compare across profiles without saying so.",
+          "additionalProperties": false,
+          "properties": {
+            "rlc_mode":                 { "type": "string", "enum": ["AM", "UM", "unknown", "n/a"], "default": "unknown" },
+            "aqm_mode":                 { "type": "string", "enum": ["OFF", "Non-GBR", "GBR", "unknown", "n/a"], "default": "unknown" },
+            "pdcp_discard_timer_ms":    { "type": ["number", "string", "null"], "default": "unknown" },
+            "pdcp_reordering_timer_ms": { "type": ["number", "string", "null"], "default": "unknown" },
+            "rlc_reassembly_timer_ms":  { "type": ["number", "string", "null"], "default": "unknown" }
+          }
+        },
+
+        "camera_source": { "type": "string", "description": "Resolved video source: 'test_pattern' (the default for every matrix cell) or the device name the harness actually opened. Overwritten from the run_metadata record, so it is what ran rather than what was requested. A never_pool_across dimension: a lens makes bitrate depend on scene content, lighting and framing, so camera and pattern runs are different experiments and are never aggregated." },
+        "camera_device": {
+          "type": ["object", "null"],
+          "description": "The capture device a camera run resolved to, and the format it negotiated. Null for 'test_pattern'. The negotiated geometry is recorded because a device is free to downgrade a request, and a run that got 720p15 instead of 1080p30 presented the encoder with a different problem that nothing downstream could otherwise detect.",
+          "properties": {
+            "requested":          { "type": "string", "description": "The --camera-source value as given." },
+            "device_name":        { "type": "string", "description": "Human-readable device name. The portable identifier of the two." },
+            "device_index":       { "type": "string", "description": "Enumeration-order index. Positional, so it names a different camera on a different host." },
+            "device_description": { "type": "string" },
+            "negotiated_width":   { "type": "integer" },
+            "negotiated_height":  { "type": "integer" },
+            "negotiated_fps":     { "type": "integer" },
+            "negotiated_format":  { "type": "string", "description": "e.g. 'YUYV' or 'MJPEG'. MJPEG adds a decode step YUYV does not." }
+          }
+        },
+        "host_id":       { "type": "string", "description": "Hostname of the measuring host." },
+        "host_os":       { "type": ["string", "null"] },
+        "host_arch":     { "type": ["string", "null"] },
+        "load_generator_hosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "T-4 only. MUST be distinct from host_id: if generator and probe share a NIC, poll_overbudget_pct rises and client saturation is misattributed to SFU saturation."
+        },
+        "sfu_url":     { "type": ["string", "null"] },
+        "sfu_version": { "type": ["string", "null"] },
+        "sdk_git_sha": { "type": "string" },
+        "build_config": { "type": "string", "enum": ["debug", "release"], "default": "release", "description": "Debug builds blow the poll budget. Never mix build configs in one report." },
+        "clock_source": { "type": "string", "enum": ["none", "ntp", "chrony", "ptp"], "description": "Gates whether one-way numbers mean anything." }
+      }
+    },
+
+    "harness": {
+      "type": "object",
+      "description": "How the measurement itself was configured. Every field here is one an analysis-side derivation depends on and would be silently wrong without.",
+      "additionalProperties": false,
+      "required": ["video_poll_hz", "stats_poll_hz", "warmup_excluded_s", "poll_overbudget_multiplier", "subscriber_process_id"],
+      "properties": {
+        "video_poll_hz": {
+          "type": "number",
+          "description": "Keyframe service time is QUANTIZED TO THIS. T-2 commits to 10 Hz; every other suite is 1 Hz. A reader must never have to infer the resolution — keyframe_service_polls is reported in poll intervals, and this field is what converts them to a time bound."
+        },
+        "stats_poll_hz": { "type": "number", "description": "RtcStats poll cadence for everything other than the video track." },
+        "warmup_excluded_s": {
+          "type": "number",
+          "description": "Leading seconds discarded before any metric is computed. Rate windows need time to fill; including warmup biases every rate low. Sourced from matrix.yaml, recorded here so the exclusion is auditable rather than assumed."
+        },
+        "poll_overbudget_multiplier": {
+          "type": "number",
+          "description": "A poll is overbudget when actual_interval > this x nominal. Harness-derived, sourced from matrix.yaml — recorded so a threshold change is traceable and never becomes a magic number in Python."
+        },
+        "subscriber_process_id": {
+          "type": "integer",
+          "description": "PROVES THE PROCESS-PER-BUFFERING-MODE GROUPING HELD. enable_zero_playout_delay is process-global, so a zero_jitter run sharing a process id with a run at another buffering_mode is not a zero_jitter run and must be discarded. The analysis checks this; it is not decoration."
+        },
+        "publisher_process_id": { "type": ["integer", "null"] },
+        "scored_window_start_unix_us": { "type": ["integer", "null"], "description": "Post-warmup window bounds. The control_delivered_pct denominator is defined against these." },
+        "scored_window_end_unix_us":   { "type": ["integer", "null"] },
+        "playout_units_confirmed": {
+          "type": ["boolean", "null"],
+          "description": "RETIRED, always null. Was the design §4 units gate, which disambiguated whether create_room_with_playout_delay took milliseconds or 10 ms units. With the playout-hint buffering modes retired the harness never calls that API, so there is no unit to confirm — moot by construction, not unresolved. Retained so pre-retirement records still parse. Re-adding any hint mode must restore the gate."
+        },
+        "publisher_seq_log": {
+          "type": ["string", "null"],
+          "description": "Path to the publisher-side log of every emitted seq with its send timestamp. THE control_delivered_pct DENOMINATOR. Without it the metric must be null, not estimated from received sequence numbers — deriving the denominator as max_seq-min_seq+1 is self-referential and biased toward passing, because loss at a window edge shrinks the denominator by exactly the number lost and becomes invisible."
+        },
+        "harness_version": { "type": ["string", "null"] },
+        "g2g_timing_handler_installed": {
+          "type": ["boolean", "null"],
+          "description": "Whether every video subscription got its receive-side packet trailer handler installed. False means frames arrived with no capture timestamp for at least one subscription, so g2g_metadata_coverage_pct is structurally incomplete rather than merely low. The handler is created lazily and needs the track's transceiver, and subscribe_timing_events() reports no error when it installs nothing — see docs/SDK-FINDINGS.md. Null for records written before the harness recorded this."
+        },
+        "video_subscription_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Remote video subscriptions established over the run. Greater than one means the session re-subscribed mid-run, which is what a full reconnect (not a resume) does; the G2G series then spans two subscriptions. Distinguishes a full restart from a transport resume, which reconnect_count alone does not. Null for records written before the harness recorded this."
+        },
+        "harness_cmd": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Verbatim argv of the harness invocation." }
+      }
+    },
+
+    "metrics": {
+      "type": "object",
+      "description": "Flat map of metric name (keys must exist in matrix.yaml `metrics`) to value. A metric that was not measured is null — never 0, which is a measurement. Cumulative counters are differenced before any ratio; every name carries its unit suffix.",
+      "additionalProperties": { "type": ["number", "string", "boolean", "null"] }
+    },
+
+    "distributions": {
+      "type": "object",
+      "description": "Metrics whose answer is a shape, not a scalar. keyframe_service_polls lives here: it is reported as a distribution of POLL INTERVALS plus the observed maximum, never as a millisecond percentile, because the measurement resolution equals the poll period and a p95 over a handful of quantized values is just the maximum wearing a percentile's name.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "unit":   { "type": "string" },
+          "n":      { "type": "integer" },
+          "values": { "type": "array", "items": { "type": "number" } },
+          "max":    { "type": ["number", "null"] },
+          "note":   { "type": "string" }
+        }
+      }
+    },
+
+    "events": {
+      "type": "array",
+      "description": "Session lifecycle timeline for T-5. A survived reconnect is NOT a drop — §8.6b explicitly permits it, and scoring reconnects as session_drops would fail runs the PRD passes.",
+      "items": {
+        "type": "object",
+        "required": ["t_unix_us", "kind"],
+        "properties": {
+          "t_unix_us": { "type": "integer" },
+          "kind": { "type": "string", "enum": ["connected", "reconnecting", "reconnected", "disconnected", "connection_state_changed", "connection_quality_changed", "first_video_frame", "track_published", "track_subscribed"] },
+          "reason": { "type": ["string", "null"], "description": "Recorded verbatim from RoomEvent::Disconnected." },
+          "harness_initiated": { "type": "boolean", "default": false, "description": "Harness-initiated closes are excluded from session_drops." },
+          "detail": { "type": ["string", "null"] }
+        }
+      }
+    },
+
+    "raw": {
+      "type": "object",
+      "description": "Pointers to bulk artifacts, not the artifacts themselves — keeps the JSONL small enough to grep.",
+      "additionalProperties": false,
+      "properties": {
+        "snapshots_jsonl_path": { "type": ["string", "null"], "description": "Per-poll stats snapshots for the whole run: the timeseries behind every summarized metric. Differencing happens analysis-side, so a bug in it is fixable without re-running the matrix." },
+        "publisher_seq_log_path": { "type": ["string", "null"] },
+        "control_samples_path":  { "type": ["string", "null"] },
+        "frame_timing_path":     { "type": ["string", "null"] },
+        "video_sample_path":     { "type": ["string", "null"], "description": "T-1 only: recorded footage per rung, for Figure's manipulation judgment." },
+        "stdout_path":           { "type": ["string", "null"] },
+        "stderr_path":           { "type": ["string", "null"] }
+      }
+    },
+
+    "validity": {
+      "type": "object",
+      "description": "Whether this run counts. A run can be INVALID without being a FAIL, and conflating the two is how a matrix produces confident wrong answers. A run that did not measure the thing is excluded from every breakpoint, never counted as a failure.",
+      "additionalProperties": false,
+      "required": ["valid"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "invalid_reasons": {
+          "type": "array",
+          "description": "Controlled vocabulary only — a free-text reason is not analyzable. Must match matrix.yaml `invalid_reasons`.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "codec_fallback",
+              "cpu_limited_encoder",
+              "malformed_av1_bitstream",
+              "poll_overbudget",
+              "control_publish_shortfall",
+              "clock_unsynchronized",
+              "silent_audio_source",
+              "session_lost_mid_run",
+              "g2g_metadata_missing"
+            ]
+          }
+        },
+        "invalid_detail": {
+          "type": "array",
+          "description": "Human-readable elaboration, parallel to invalid_reasons. e.g. 'codec_fallback: requested av1, negotiated vp9'.",
+          "items": { "type": "string" }
+        },
+        "clock_sync_confidence": {
+          "type": "string",
+          "enum": ["none", "probe", "external"],
+          "description": "Gates whether any one-way figure may be published at all. `none` suppresses the OWD and G2G columns; the run remains VALID for RTT and video metrics."
+        },
+        "theta_ms": {
+          "type": ["number", "null"],
+          "description": "Clock offset estimate. Paired by construction: min of the OWD ring at probe completion, minus the RTT OF THAT SAME probe exchange, halved. Independently-selected window minima absorb path drift as if it were clock offset."
+        },
+        "theta_residual_bound_ms": { "type": ["number", "null"], "description": "The (d_in - d_out)/2 residual on asymmetric links — which cellular is. Corrected OWD is never presented as exact." },
+        "g2g_metadata_coverage_pct": {
+          "type": ["number", "null"],
+          "description": "frames_with_metadata / frames_received * 100. Required whenever video was subscribed. Below 95 the run is INVALID with reason g2g_metadata_missing: subscribe_timing_events() was called after NativeVideoStream was constructed, so frame_metadata arrived empty for every frame. Every other signal — fps, freeze counts, InboundRtp counters — looks healthy in that state, which is why this field must travel with the record rather than be inferred from a null g2g. It distinguishes 'G2G genuinely unmeasurable on this path' from 'the ordering was wrong'; both present as g2g: None and only one is a valid result."
+        },
+        "frames_received": { "type": ["integer", "null"] },
+        "frames_with_metadata": { "type": ["integer", "null"] },
+        "warmup_excluded_s": { "type": "number" },
+        "samples_scored": { "type": ["integer", "null"], "description": "Post-warmup sample count actually used. A run below a metric's minimum-sample precondition yields null for that metric." },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "verdict": {
+      "type": "object",
+      "description": "Filled by parse_runs.py, never by the harness. Four-way, not three-way.",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["PASS", "FAIL", "INVALID", "OBSERVE"],
+          "description": "OBSERVE is not a weaker PASS. Audio metrics score OBSERVE because total_playout_delay measures only the playout-side share of the PRD's mouth-to-ear budget; forcing a blocking verdict on a proxy that measures less than the clause describes is exactly the failure this category exists to prevent."
+        },
+        "failed_thresholds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["metric", "op", "threshold", "actual"],
+            "properties": {
+              "metric":     { "type": "string" },
+              "op":         { "type": "string", "enum": ["<=", ">=", "==", "<", ">"] },
+              "threshold":  { "type": ["number", "boolean"] },
+              "actual":     { "type": ["number", "boolean", "string", "null"] },
+              "clause":     { "type": ["string", "null"] },
+              "provenance": { "type": ["string", "null"], "description": "Carried into the verdict so a report never states a harness-derived number as a requirement. blocking != PRD MUST." },
+              "effect":     { "type": "string", "enum": ["fail", "advisory", "observe", "invalidate"] }
+            }
+          }
+        },
+        "observed": {
+          "type": "array",
+          "description": "Rows with effect: observe, reported with their measured value and the boundary of what the proxy excludes.",
+          "items": { "type": "object" }
+        },
+        "delta_from_reference": {
+          "type": "object",
+          "description": "Every result is reported as a delta from reference_config. Null on the baseline cell itself, and null across any never_pool_across boundary — a delta computed against a different codec or encoder tier is not a delta, it is two experiments subtracted.",
+          "additionalProperties": { "type": ["number", "null"] }
+        },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

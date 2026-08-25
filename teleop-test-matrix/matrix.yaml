@@ -1,0 +1,1445 @@
+# Teleoperation test matrix — LiveKit Rust SDK
+#
+# Source of truth for the whole harness. run_matrix.py expands this into runs;
+# parse_runs.py scores runs against it. Thresholds, axis values, rates, and
+# derived parameters live HERE AND NOWHERE ELSE. A number duplicated in Python
+# or Rust is a defect.
+#
+# Design authority: docs/MEASUREMENT-DESIGN.md. Every section below implements a
+# decision made there; the `design` key on a row cites the section. Do not
+# re-derive — if a value here looks wrong, the design doc is where it is argued.
+
+meta:
+  # All three pages fetched live from the Confluence REST API on 2026-08-24.
+  # Recorded verbatim so the matrix stays traceable when the pages move under it.
+  sources:
+    prd:
+      page_id: "556974310"
+      title: "Teleoperation — Product Requirements Document"
+      version: 32
+      last_modified: "2026-08-05"
+      fetched: "2026-08-24"
+      role: "Normative. Wins all conflicts of fact."
+    test_matrix:
+      page_id: "579869319"
+      title: "Teleoperation Test Matrix"
+      version: 2
+      last_modified: "2026-08-22"
+      fetched: "2026-08-24"
+      role: >
+        Governing test spec. Its threshold table is a trustworthy transcription
+        source; the C++ matrix.yaml is NOT where the two conflict (design §6 d2).
+        May make a bar stricter, never looser, and may never change a number.
+    solution_architecture:
+      page_id: "574818569"
+      title: "Teleoperation — Solution Architecture"
+      version: 1
+      last_modified: "2026-08-17"
+      fetched: "2026-08-24"
+      role: "Context."
+
+  design_doc: "docs/MEASUREMENT-DESIGN.md"
+  sdk: "livekit-rust-sdks"
+
+  # PRD §8.0, the four concurrent streams. Bandwidth Mbps. Note the audio budget
+  # is a flat one-sided 50 ms, not the "0-50" range the C++ meta block encoded.
+  streams:
+    video:      { dir: UL,   mbps: 5.0,  latency_ms: [20, 90], loss: tolerant }
+    body_state: { dir: DL,   mbps: 0.5,  latency_ms: [20, 90], loss: near_zero, rate_hz: 200 }
+    force:      { dir: UL,   mbps: 0.5,  latency_ms: [20, 90], loss: near_zero }
+    audio:      { dir: BOTH, mbps: 0.25, latency_ms_max: 50,   loss: tolerant }
+
+  # Named harness parameters. Master prompt §12 / design §6 note (f): these are
+  # engineering judgments with no external authority. They live here so a change
+  # is traceable and never becomes a magic number in Python or Rust.
+  parameters:
+    warmup_excluded_s:
+      value: 15
+      provenance: harness-derived
+      design: "§1g"
+      note: >
+        Leading seconds dropped before any metric is computed. Rate windows need
+        time to fill; including warmup biases every rate low. Recorded per run.
+    poll_overbudget_multiplier:
+      value: 1.5
+      provenance: harness-derived
+      design: "§6 note (f)"
+      note: >
+        A poll is 'overbudget' when actual_interval > 1.5 x nominal. No source
+        specifies this. Recorded in every run record so a change is traceable.
+    video_fps_tolerance_pct:
+      value: 10
+      provenance: governing-page-derived
+      design: "§6 note (e)"
+      note: >
+        The 27 fps bar is 30 fps less 10%. PRD §7.1a states the 30 fps ladder but
+        NO frame-rate threshold and no tolerance. The 27 and the 10% both come
+        from the governing page's threshold table. The report must not cite
+        'PRD §7.1a' as the authority for the number 27.
+    default_repeats:
+      value: 3
+      provenance: harness-derived
+      design: "§11"
+      note: "A single run of a noisy link proves nothing. Report dispersion."
+    stats_poll_hz_default:
+      value: 1
+      provenance: harness-derived
+      design: "§1"
+      note: "RtcStats poll cadence. T-2 overrides video polling to 10 Hz."
+    theta_owd_ring_samples:
+      value: 64
+      provenance: harness-derived
+      design: "§1d"
+    theta_min_owd_samples:
+      value: 8
+      provenance: harness-derived
+      design: "§1d — below this, clock_sync_confidence is `none` and no one-way figure publishes."
+    probe_rate_hz:
+      value: 20
+      provenance: harness-derived
+      design: "§1d"
+      note: >
+        Four-timestamp probe rate, passed to the harness as --probe-rate-hz.
+        DECOUPLED FROM THE STATS POLL, which formerly drove it and so pinned it to
+        1 Hz. A Tier 0 sweep at that rate produced only 63 usable samples across a
+        105 s scored window, and a p50 from 63 samples is not a figure to cite.
+        20 Hz is below the 200 Hz control rate (a probe rides the next control
+        sample, so the control rate is the ceiling) and yields ~2000 samples over
+        the same window. Several probes are in flight at once at this rate, which
+        is legal: the harness retires a probe only when it outlives
+        probe_lifetime_ms, never when a successor is issued.
+
+        DOES 20 Hz OF PROBING PERTURB WHAT IT MEASURES? Ruled out by construction,
+        not by assumption:
+
+        - FORWARD PATH: ZERO added bytes and zero added packets. A probe does not
+          send a packet of its own — it sets the probe_token field on the NEXT
+          control sample, which was going to be sent regardless. The payload is a
+          fixed 32 bytes whether or not the token is set, so a probe-carrying
+          sample is indistinguishable on the wire from any other. At 20 Hz against
+          a 200 Hz control rate, 10% of samples carry a token and the forward
+          stream is byte-for-byte identical to an unprobed run.
+        - REVERSE PATH: 20 Hz x 32 B = 5.12 kbps of echoes. That is 1.0% of the
+          PRD's 0.5 Mbps body_state budget and 0.1% of the 5 Mbps video budget;
+          against the old 1 Hz rate it adds 4.86 kbps. Echoes travel opposite the
+          video uplink, so they do not compete with the constrained direction.
+
+        The fixed 32-byte payload is what makes this argument hold, and it was
+        chosen so payload length could never confound loss (design §1c). Retain
+        that property if the probe rate is raised further. On a severely
+        constrained link, re-check the reverse-path figure against the actual
+        downlink budget rather than carrying the 1.0% number over.
+    connect_retries:
+      value: 2
+      provenance: harness-derived
+      design: "§11"
+      note: >
+        How many times run_matrix.py re-invokes the harness for a run whose
+        SESSION NEVER ESTABLISHED (harness exit 75). A Tier 0 sweep lost 15 of 69
+        runs — 22% — to a single transient event inside a 3-second window,
+        consecutive in plan order and spanning all four codecs, so plainly not a
+        codec fault.
+
+        RETRY IS SCOPED TO CONNECT FAILURES ONLY. A lost session or an absent
+        subscription may be exactly what the suite is measuring, and a failed AV1
+        publish is what the AV1 cell exists to detect; retrying past any of those
+        would discard the finding. The harness distinguishes them by exit code so
+        the runner never has to pattern-match stderr. Every attempt is recorded in
+        the run record under raw.harness_attempts, so a retried run is never
+        presented as a clean first-try run.
+    connect_retry_backoff_s:
+      value: 5
+      provenance: harness-derived
+      design: "§11"
+      note: >
+        Delay before the first retry, doubling on each subsequent attempt. Long
+        enough for a brief server-side rate limit to clear, short enough not to
+        distort a multi-hour sweep.
+    probe_lifetime_ms:
+      value: 2000
+      provenance: harness-derived
+      design: "§1d"
+      note: >
+        How long an unanswered probe waits before counting as lost, passed as
+        --probe-lifetime-ms. Well above any round trip expected here, so a slow
+        but genuine echo is never recorded as loss. Retiring on successor-issue
+        instead would make a raised probe rate manufacture loss and REDUCE the
+        completed-sample count — the defect this parameter replaces.
+
+        PATH-DEPENDENT: RETUNE IT WHEN THE PATH CHANGES. 2000 ms is sized for
+        LiveKit Cloud, where the app round trip runs ~60 ms, so the lifetime is
+        ~30x the typical RTT. On a 5G modem — or any bearer with RLC
+        retransmission and handover stalls — tail round trips are far longer and
+        far more variable, and this value must be re-derived from a measured RTT
+        distribution rather than carried over.
+
+        The two failure directions are NOT symmetric, so bias high when unsure:
+
+        - TOO SHORT understates RTT and overstates loss, and does so
+          SILENTLY AND WITH BIAS. It retires exactly the slowest probes, so the
+          surviving samples are truncated at the top and every percentile reads
+          low — the tail this suite exists to measure is the part discarded. The
+          resulting figure looks like a clean, fast path.
+        - TOO LONG only delays recognition of a genuinely lost probe and holds a
+          few more map entries. Percentiles are unaffected, because a probe that
+          never arrives contributes no RTT sample either way.
+
+        Rule of thumb: at least 10x the measured p99 app RTT on the path under
+        test, and never below the probe interval.
+
+# ===========================================================================
+# Reference configuration — design §5.
+#
+# The baseline cell every suite runs and every result is a delta from.
+#
+# Selection rule: the baseline must be PORTABLE ACROSS EVERY EXECUTION TIER,
+# because a delta only means something if the thing it is measured against is
+# the same experiment on a MacBook, a Linux host, and a Jetson. Where the docs'
+# lowest-latency recommendation is not portable, the baseline takes the most
+# aggressive *portable* setting and the non-portable one becomes a swept
+# treatment. This rule decides note (a).
+#
+# It does NOT decide note (c). buffering_mode is fixed at zero_jitter for the
+# whole matrix — it is not swept, so it is not a delta, so the portability rule
+# has nothing to trade off. Note (c) has the reasoning and the measurements.
+# ===========================================================================
+reference_config:
+  video:
+    track_layout: one_named_track_per_camera
+    source: camera
+    codec: h264                 # note (a)
+    encoder: auto               # encoders/: selection is automatic, no config required
+    profile: tolerable          # 1920x1080 @ 30 fps, PRD §7.1a
+    max_bitrate: 5000000        # PRD §8.0b uplink ceiling
+    max_framerate: 30
+    simulcast: false            # note (b)
+    dynacast: false
+    frame_metadata_features:    # livekit/src/room/options.rs:80-82
+      user_timestamp: true      # G2G send stamp
+      frame_id: true            # G2G frame-loss accounting
+
+  buffering_mode: zero_jitter   # note (c)
+  video_playout_delay:
+    min_ms: 0                   # zero_jitter is a true 0/0, not a room-API hint
+    max_ms: 0
+    applied_via: "livekit::webrtc::enable_zero_playout_delay()"
+    api_ref: "livekit/src/lib.rs:34, livekit/src/rtc_engine/lk_runtime.rs:39-49"
+  audio_buffering: sdk_default  # note (d) — a RECORDED FACT, not a setting
+
+  control:
+    transport: data_track_buf1
+    buffer_size: 1              # SDK default is 16 (remote/mod.rs:212) — explicit choice
+    max_partial_frames: 1       # remote/mod.rs:271 (already the default)
+    rate_hz: 200                # PRD §7.2 mocap sample rate
+    apply_policy: latest_valid_command
+    payload_bytes: 32           # seq:u64, t_send_unix_us:u64, probe_echo_token:u64, pad:u64
+
+  audio:
+    enabled: true
+    direction: bidirectional
+    target_bitrate: 250000
+    source: synthetic_tone      # not a microphone — keeps audio_level reproducible
+
+  environment:
+    path: cloud
+    encoder_tier: recorded
+    ran_profile: "n/a"
+
+  notes:
+    a: >
+      H264 is the reference codec, not AV1. AV1 has no hardware encoder on Apple
+      Silicon, so an AV1 baseline would make the Tier 0 baseline and the Tier 2
+      baseline different experiments and no delta computed against them would be
+      comparable. H264 has hardware support on every platform in the encoder
+      matrix. AV1 remains the most important SWEPT value — it is what T-1 and Q-7
+      exist to evaluate — but it is a treatment, not the control.
+    b: >
+      Simulcast and dynacast change bitrate behavior substantially. Fixed off for
+      the core matrix, recorded in the environment block, treated as a follow-on.
+    c: >
+      zero_jitter is the ONLY buffering mode in this matrix. The playout-delay
+      HINT modes (min/max via create_room_with_playout_delay) were swept in an
+      earlier revision and have been retired, on explicit direction to align the
+      matrix with LiveKit's own robotics guidance. Two independent reasons:
+
+      (1) MEASURED. Tier 0 smoke runs against LiveKit Cloud, differencing the
+      cumulative jitter_buffer_delay_s / jitter_buffer_emitted_count pair:
+      hint floor (min=0, max=10) gave jitter_buffer_delay_avg_ms ~= 5.9 ms;
+      hint smooth (min=400, max=2000) gave ~= 6.4 ms — indistinguishable, despite
+      requesting 100-400x more buffer. zero_jitter gave ~= 2.9 ms average and
+      ~= 25.7 ms target/minimum delay against ~= 43.2 ms on the floor cell:
+      lower on two independent metrics, i.e. a genuinely different mechanism.
+
+      (2) DOCUMENTED. https://docs.livekit.io/robotics/media/performance/low-latency/playout-delay/
+      states that zero jitter buffer mode "is equivalent to setting both the
+      minimum and maximum playout delay to 0 ms, which isn't supported when
+      using playout delay hints." A true 0/0 is architecturally unreachable
+      through the room-level hint API. The floor cell's ~6 ms was never a bug —
+      it is libwebrtc's natural floor under a 10 ms cap on a clean link, and
+      there was no true zero for it to reach.
+
+      This project measures TELEOPERATION, where
+      https://docs.livekit.io/robotics/media/performance/low-latency/ is explicit
+      that minimizing buffering beats playback smoothness — "an operator needs to
+      see what the robot sees now." The prior revision's argument (that a
+      treatment cannot be its own control, so the portable hint mode had to be
+      the baseline) no longer applies: buffering_mode is no longer a swept axis,
+      so there is no buffering delta to compute and nothing for a control to
+      control for. zero_jitter's portability limits are real and unchanged —
+      Rust-SDK only, subscriber-side, video-tracks-only, and process-global
+      (lk_runtime.rs:39-49) — but they now constrain the whole matrix uniformly
+      rather than splitting it, so every tier still runs the same experiment.
+    d: >
+      Audio and video have independent jitter buffers. NO RUST API IN THIS
+      CHECKOUT CONFIGURES THE AUDIO JITTER BUFFER, so audio runs at the SDK
+      default under every value of buffering_mode INCLUDING zero_jitter. This
+      field exists in the run record so a reader of a zero_jitter run cannot
+      infer that audio was also unbuffered. If audio_jitter_buffer_delay_ms
+      fails to move across buffering_mode values, that CONFIRMS the independence
+      rather than indicating a harness fault.
+
+# ===========================================================================
+# Axes.
+#
+# `shaping: required` marks an axis that cannot be applied without tc/netem.
+# run_matrix.py's Tier 0 (shaping-free) filter excludes every such axis from any
+# non-default value, and FAILS LOUDLY rather than silently skipping if a suite
+# depends on one. macOS cannot run tc; Tier 0 is the mode that must work first.
+# ===========================================================================
+axes:
+
+  # --- Rust-SDK axes. None require shaping; all are live at Tier 0. ---
+
+  video_codec:
+    values: [av1, vp9, vp8, h264]
+    shaping: none
+    design: "§3"
+    applied_via: "--codec  (PublisherCodec, examples/local_video/src/publisher.rs:46-52)"
+    note: >
+      H265 is EXCLUDED from the matrix. It is the one codec with an automatic
+      fallback path (publisher.rs:1210-1224, H265->H264 on publish failure), so
+      an H265 cell silently becomes an H264 cell — exactly the requested-vs-actual
+      confusion the schema exists to prevent, for a codec no PRD clause needs.
+
+  encoder_tier:
+    values: [sw, videotoolbox, vaapi, nvenc, jetson]
+    shaping: none
+    recorded_only: true
+    design: "§3"
+    applied_via: "read back from OutboundRtp.encoder_implementation + power_efficient_encoder"
+    note: >
+      RECORDED, NEVER REQUESTED. Selection is automatic per the encoder docs;
+      --encoder is held at `auto` for the whole matrix and its value recorded —
+      forcing a backend would measure a configuration no robot runs. Apple
+      Silicon has NO AV1 hardware encoder: on a MacBook, --codec av1 is
+      encoder_tier: sw. Analysis never pools across tiers.
+
+  buffering_mode:
+    values: [zero_jitter]
+    fixed: true
+    baseline: zero_jitter
+    shaping: none
+    process_global: true          # <-- read the note; run_matrix.py depends on this
+    design: "§3, §5 note (c)"
+    settings:
+      zero_jitter:
+        mechanism: "livekit::webrtc::enable_zero_playout_delay()"
+        api_ref: "livekit/src/lib.rs:34, livekit/src/rtc_engine/lk_runtime.rs:39-49"
+        min_ms: 0
+        max_ms: 0
+        scope: "subscriber-side, video tracks only, Rust SDK only"
+    retired_values: >
+      playout_hint_floor (min=0/max=10) and playout_hint_smooth (min=400/max=2000)
+      were swept in an earlier revision via create_room_with_playout_delay. Both
+      are RETIRED — see reference_config note (c) for the measurements and the
+      LiveKit robotics docs that justify it. Retiring them also retires the §4
+      units question (whether that API took ms or 10 ms units) and its validation
+      gate suite V0_playout_units: with no hint call in the matrix there is no
+      ambiguous unit left to disambiguate. The question is moot by construction,
+      not unresolved. Do not re-add a hint mode without re-adding that gate.
+    note: >
+      PROCESS-GLOBAL CONSTRAINT. enable_zero_playout_delay mutates LK_RUNTIME
+      state and errors with WebRtcRuntimeInitializedError if the runtime is
+      already up without it (lk_runtime.rs:39-49). It cannot be toggled per room
+      or per subscriber within one process. CONSEQUENCE FOR THE RUNNER:
+      buffering_mode is a per-process grouping key. Each run is a fresh
+      subscriber process and a zero_jitter run may NEVER share a process with
+      any other mode. Getting this wrong produces a run labelled zero_jitter that
+      silently ran with the default buffer — an unfalsifiable bad data point.
+
+  control_transport:
+    values: [data_track_buf1, dc_reliable, dc_lossy]
+    baseline: data_track_buf1
+    shaping: none
+    design: "§3"
+    settings:
+      data_track_buf1:
+        mechanism: "DataTrackSubscribeOptions::new().with_buffer_size(1)"
+        api_ref: "livekit-datatrack/src/remote/mod.rs:227-234"
+        buffer_size: 1
+        max_partial_frames: 1
+        note: >
+          Default buffer_size is 16 FRAMES, not a duration (remote/mod.rs:212,
+          :215-221). At 200 Hz, 16 frames is up to 80 ms of queued staleness —
+          precisely what §8.2b forbids. buffer_size(1) is an explicit choice.
+      dc_reliable:
+        mechanism: "publish_data(DataPacket { reliable: true, .. })"
+        api_ref: "livekit/src/room/participant/local_participant.rs:703-704"
+      dc_lossy:
+        mechanism: "publish_data(DataPacket { reliable: false, .. })"
+        api_ref: "livekit/src/room/participant/local_participant.rs:703-704"
+    note: >
+      The legacy dc_* paths are kept to reproduce the head-of-line-blocking
+      finding, which is the evidence FOR the data-track design.
+
+  ran_profile:
+    values: [unknown, "n/a"]
+    default: unknown
+    shaping: none
+    recorded_only: true
+    design: "§3"
+    fields: [rlc_mode, aqm_mode, pdcp_discard_timer_ms, pdcp_reordering_timer_ms, rlc_reassembly_timer_ms]
+    note: >
+      RECORDED, NEVER SET BY THE HARNESS. Five settings owned by the T-Mobile
+      network team. On path loopback or lan, ran_profile is `n/a` and the report
+      must state those results do not transfer to cellular. On a lab RAN where
+      they can be varied this becomes a named axis and the RAN hypothesis is
+      directly testable; until then the report may never compare across profiles
+      without saying so.
+
+  video_profile:
+    values:
+      - { name: target,    w: 1600, h: 1300, fps: 30, source: "PRD §7.1a + governing page, literal" }
+      - { name: tolerable, w: 1920, h: 1080, fps: 30, source: "governing page '1080p', literal in PRD §7.1a" }
+      - { name: minimum,   w: 1280, h: 720,  fps: 30, source: "governing page '720p', literal in PRD §7.1a" }
+      - { name: sub_min,   w: 854,  h: 480,  fps: 30, source: "HARNESS-DERIVED — see note" }
+    shaping: none
+    design: "§3"
+    note: >
+      sub_min sits below the §7.1a minimum deliberately, to verify §7.1d pause
+      behavior triggers. The governing page specifies only '480p' with no width
+      and the PRD does not mention it at all. 854x480 is this harness's
+      interpretation: 480p at the 16:9 aspect ratio the other two
+      named-by-shorthand rungs both use, rounded to an even width. The
+      alternative reading, 640x480 at 4:3, would change the pixel count by 25%
+      and would be the only non-16:9 rung in the ladder. Recorded as derived so
+      that if Figure intended 4:3, ONE VALUE IN THIS FILE changes rather than the
+      result being silently misattributed to the page.
+
+  playout_window_ms:
+    values: [5, 10, 20, 40]
+    shaping: none
+    design: "§9 T-3"
+    note: >
+      The control-path playout deadline. Not a network setting — it is the
+      application deadline against which control_late_pct is computed. T-3's
+      answer is a CURVE over this axis, not a number; Figure configures the
+      operating point (§8.2a).
+      NAME COLLISION WARNING: this is unrelated to video playout delay. It does
+      not touch the video jitter buffer, buffering_mode, or the retired
+      create_room_with_playout_delay hints. It survived their retirement because
+      it never depended on them.
+
+  control_rate_hz:
+    values: [200]
+    fixed: true
+    shaping: none
+    note: "PRD §7.2 mocap sample rate. Held fixed; it is the load, not a variable."
+
+  duration_s:
+    values: [120]
+    default: 120
+    shaping: none
+    note: "Long-run soak (§8.6) overrides to 3600."
+
+  # --- Netem axes. Tier 1 only. Every one is excluded from the Tier 0 subset. ---
+
+  loss_pct:
+    values: [0, 0.5, 1, 2, 5, 10, 15, 20, 30, 50]
+    default: 0
+    shaping: required
+    qdisc: netem
+    design: "§3"
+    note: "T-2. PRD cites ~50% collapse; C++ measured ~10% through the SFU. This sweep settles which."
+
+  owd_ms:
+    values: [0, 10, 25, 45, 70, 100]
+    default: 25
+    unshaped: 0
+    shaping: required
+    qdisc: netem
+    design: "§3"
+    note: >
+      Q-7/§8.1. One-way added delay; RTT impact is 2x. 45 ms one-way = 90 ms RTT
+      = the §8.1a ceiling. `default: 25` is the nominal Tier 1 baseline — a
+      deliberately shaped condition, not an absence of shaping. `unshaped: 0` is
+      what Tier 0 records, because on a MacBook with no shaper the ADDED delay is
+      genuinely zero and recording 25 would claim a condition never applied.
+
+  jitter_ms:
+    values: [0, 2, 5, 10, 20, 40]
+    default: 0
+    shaping: required
+    qdisc: netem
+    design: "§3"
+    note: "T-3. Applied as delay {owd} +/- {jitter} distribution normal, in the SAME netem command."
+
+  uplink_mbps:
+    values: [10, 7, 5, 3, 2, 1, 0.5]
+    default: 10
+    shaping: required
+    qdisc: tbf
+    design: "§3"
+    note: >
+      §8.0b. Rate limiting is a SEPARATE tbf qdisc layered deliberately on top of
+      netem — it is not a netem parameter and must never be merged into the
+      netem command.
+
+  concurrency:
+    values: [1, 10, 25, 50, 70]
+    default: 1
+    shaping: required
+    design: "§3, §9 T-4"
+    note: >
+      T-4/§8.7. Requires load generators on SEPARATE HOSTS from the measured
+      session; if generator and probe share a NIC, poll_overbudget_pct rises and
+      client saturation is misattributed to SFU saturation. Treated as
+      shaping-required because the multi-host load infrastructure is a Tier 1
+      capability, not because it uses tc.
+
+  fault_injection:
+    values:
+      - { name: baseline_soak,  fault: none,                            duration_s: 3600 }
+      - { name: brief_blackout, fault: "link down 500ms",               repeat: 20 }
+      - { name: fade_burst,     fault: "loss 60% for 2s",               repeat: 20 }
+      - { name: signal_drop,    fault: "kill websocket only",           repeat: 10, note: "exercises session resume; peer connections stay up" }
+      - { name: ice_restart,    fault: "flush conntrack / rebind NAT",  repeat: 10 }
+      - { name: handover_sim,   fault: "500ms delay spike + IP change", repeat: 10 }
+    shaping: required
+    design: "§9 T-5"
+
+# ===========================================================================
+# Metrics.
+#
+# `kind` is load-bearing and comes from the design doc's counter discipline (§1):
+#   raw     — read the field as-is (a level or a gauge, not a rate)
+#   delta   — difference two consecutive polls; the value is per-interval
+#   ratio   — difference BOTH numerator and denominator between the SAME two
+#             polls, then divide. Never divide two lifetime cumulatives to get
+#             an interval average — that yields a session average that hides
+#             exactly the transient the suite is looking for.
+#   app     — computed application-side by the harness; not from RtcStats
+#
+# `path` is a JSON pointer into the harness's per-poll snapshot. Units follow
+# the WebRTC stats spec as deserialized in libwebrtc/src/stats.rs: every
+# total_*_time, *_delay and jitter field is SECONDS (f64); the harness converts
+# to ms at extraction and every field name carries its unit suffix.
+# ===========================================================================
+metrics:
+
+  # --- Video receive (design §1a) ---
+  video_fps_p50:
+    path: "/video_recv/frames_per_second"
+    source: "InboundRtp.frames_per_second"
+    kind: raw
+    reduce: p50
+    unit: fps
+    higher_is_better: true
+    codec_sensitive: false
+    encoder_tier_sensitive: false
+    note: "libwebrtc-computed instantaneous gauge, already smoothed — a freeze shorter than its window is invisible. Pair with video_frame_interval_p99_ms."
+
+  video_fps_delta:
+    source: "InboundRtp.frames_decoded"
+    derived: "d(frames_decoded) / dt"
+    kind: delta
+    unit: fps
+    higher_is_better: true
+    cross_check_of: video_fps_p50
+    note: "Disagreement with video_fps_p50 by >10% ⇒ INVALID (poll stall)."
+
+  video_frame_interval_p99_ms:
+    source: "harness on_frame callback on RemoteVideoTrack"
+    derived: "p99 of wall-clock spacing between successive decoded frames"
+    kind: app
+    unit: ms
+    higher_is_better: false
+    codec_sensitive: true
+    note: "Delivery to APP, not to glass. Under zero_jitter this is the true pacing metric and where AV1 frame-assembly sensitivity appears."
+
+  video_freeze_count:      { path: "/video_recv/freeze_count", source: "InboundRtp.freeze_count", kind: delta, unit: count, higher_is_better: false }
+  video_freeze_duration_ms:
+    path: "/video_recv/total_freeze_duration"
+    source: "InboundRtp.total_freeze_duration"
+    derived: "d(total_freeze_duration) * 1000"
+    kind: delta
+    unit: ms
+    higher_is_better: false
+    note: "libwebrtc's freeze definition is fixed, so this is comparable across codecs — the loss-recovery metric of record."
+  video_pause_count:       { path: "/video_recv/pause_count", source: "InboundRtp.pause_count", kind: delta, unit: count, higher_is_better: false, note: "Distinguishes §7.1d intentional pause from a freeze." }
+
+  jitter_buffer_delay_avg_ms:
+    source: "InboundRtp.jitter_buffer_delay / jitter_buffer_emitted_count"
+    derived: "(d(jitter_buffer_delay) / d(jitter_buffer_emitted_count)) * 1000"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+    requires: "d(jitter_buffer_emitted_count) > 0"
+    note: >
+      THE BUFFERING-MODE GROUND TRUTH, and the units discriminator. Dividing
+      lifetime cumulatives instead of deltas is the single most likely defect in
+      this harness.
+  jitter_buffer_target_delay_ms:
+    source: "InboundRtp.jitter_buffer_target_delay / jitter_buffer_emitted_count"
+    derived: "(d(jitter_buffer_target_delay) / d(jitter_buffer_emitted_count)) * 1000"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+    note: "Target vs actual: the APPLIED playout-delay hint."
+
+  video_packets_lost_pct:
+    derived: "d(packets_lost) / (d(packets_lost) + d(packets_received)) * 100"
+    kind: ratio
+    unit: pct
+    higher_is_better: false
+    note: "packets_lost is i64 and MAY GO NEGATIVE on duplicates. Clamp at 0 and log; a negative delta is a reorder artifact, not a gain."
+  video_rtx_pct:
+    derived: "d(retransmitted_packets_received) / d(packets_received) * 100"
+    kind: ratio
+    unit: pct
+    higher_is_better: false
+    note: "THE RLC-AM/UM DISCRIMINATOR. Under zero_jitter a retransmit arriving after deadline is pure waste; this quantifies it."
+  video_nack_rate_per_min: { derived: "d(nack_count) / dt * 60", kind: delta, unit: count_per_min, higher_is_better: false }
+  pli_rate_per_min:        { derived: "d(pli_count) / dt * 60", kind: delta, unit: count_per_min, higher_is_better: false, codec_sensitive: true }
+  key_frames_decoded_rate: { derived: "d(key_frames_decoded) / dt * 60", kind: delta, unit: count_per_min, codec_sensitive: true }
+
+  decode_time_avg_ms:
+    derived: "(d(total_decode_time) / d(frames_decoded)) * 1000"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+    codec_sensitive: true
+    note: "THE DECODE SHARE OF G2G. This is what makes Q-7's three-column table codec-dependent."
+  assembly_time_avg_ms:
+    derived: "(d(total_assembly_time) / d(frames_assembled_from_multiple_packets)) * 1000"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+    codec_sensitive: true
+    note: "THE AV1 x ZERO_JITTER CELL'S PRIMARY METRIC. Larger, more variable AV1 frames span more packets; with no jitter buffer, assembly is where the cost lands."
+  processing_delay_avg_ms:
+    derived: "(d(total_processing_delay) / d(jitter_buffer_emitted_count)) * 1000"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+
+  decoder_implementation: { path: "/video_recv/decoder_implementation", kind: raw, unit: enum, recorded_only: true }
+  frame_width:            { path: "/video_recv/frame_width", kind: raw, unit: px, note: "ACTUAL, not requested. T-1 must score on this." }
+  frame_height:           { path: "/video_recv/frame_height", kind: raw, unit: px }
+
+  # --- Video send (design §1b) ---
+  video_bitrate_bps:
+    derived: "(d(bytes_sent + header_bytes_sent) * 8) / dt"
+    kind: delta
+    unit: bps
+    higher_is_better: false
+    codec_sensitive: true
+    note: >
+      MUST INCLUDE header_bytes_sent. Payload-only bytes understate the wire rate
+      that the §8.0b 5 Mbps ceiling is about.
+  video_target_bitrate_bps: { path: "/video_send/target_bitrate", kind: raw, unit: bps, note: "Divergence from actual ⇒ encoder cannot hit target ⇒ check quality_limitation_reason." }
+  encode_time_avg_ms:
+    derived: "(d(total_encode_time) / d(frames_encoded)) * 1000"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+    encoder_tier_sensitive: true
+    note: "THE ENCODE SHARE OF G2G. Software AV1 on Apple Silicon says nothing about NVENC AV1. Never pool."
+  quality_limitation_reason: { path: "/video_send/quality_limitation_reason", kind: raw, unit: enum }
+  quality_limitation_cpu_pct:
+    derived: "d(quality_limitation_durations['cpu']) / dt * 100"
+    kind: ratio
+    unit: pct
+    encoder_tier_sensitive: true
+    note: "Missing key ⇒ treat as 0, do not error. quality_limitation_durations is HashMap<String,f64> (stats.rs:436)."
+  quality_limitation_bandwidth_pct:
+    derived: "d(quality_limitation_durations['bandwidth']) / dt * 100"
+    kind: ratio
+    unit: pct
+    note: "The EXPECTED limiter under the uplink_mbps sweep — not an INVALID condition."
+  quality_limitation_bandwidth_poll_pct:
+    derived: "polls where quality_limitation_reason == 'bandwidth' / scored polls * 100"
+    kind: app
+    unit: pct
+    higher_is_better: false
+    note: >
+      QUALITY AT BITRATE, and CROSS-CODEC COMPARABLE — it counts an
+      encoder-reported condition in units no codec defines differently, unlike
+      qp_avg. The poll-share form, distinct from quality_limitation_bandwidth_pct
+      above, which is the duration share. This is the form that surfaced the Tier
+      0 AV1/H264 result: AV1 reported `none` for all 106 polls while H264
+      reported `bandwidth` for 62 of 106 at a similar target bitrate. OBSERVE,
+      never blocking — being bandwidth-limited is the EXPECTED state under the
+      uplink_mbps sweep, not a failure.
+  quality_limitation_poll_count:
+    derived: "count of scored polls carrying a quality_limitation_reason"
+    kind: app
+    unit: count
+    note: "Denominator for quality_limitation_bandwidth_poll_pct, so a share over few polls is visible as such."
+  qp_avg:
+    path: "/video_send/qp_sum"
+    derived: "d(qp_sum) / d(frames_encoded)"
+    kind: ratio
+    unit: qp
+    higher_is_better: false
+    codec_sensitive: true
+    note: >
+      Mean quantizer: HIGHER MEANS MORE COMPRESSION AND LOWER QUALITY. qp_sum is
+      CUMULATIVE, so it must be differenced against frames_encoded over the same
+      interval; dividing the lifetime totals gives a session average that hides
+      the transient.
+
+      NOT COMPARABLE ACROSS CODECS AT ALL — QP scales differ (design §8). Report
+      per codec, never pool, never rank two codecs by it. Its purpose is to make
+      "efficient" and "quietly degraded to fit" distinguishable within one codec,
+      which a bitrate figure alone cannot do. Pair it with
+      quality_limitation_bandwidth_poll_pct, which IS cross-codec comparable.
+  quality_limitation_resolution_changes: { derived: "d(quality_limitation_resolution_changes)", kind: delta, unit: count }
+  fps_ceiling:            { path: "/video_send/frames_per_second", kind: raw, unit: fps, encoder_tier_sensitive: true }
+  encoder_implementation:
+    path: "/video_send/encoder_implementation"
+    kind: raw
+    unit: enum
+    note: >
+      Selection rule: prefer the ACTIVE layer, fall back to first non-empty —
+      find_video_outbound_encoder, examples/local_video/src/publisher.rs:406-424.
+      Reuse it; picking an arbitrary OutboundRtp gives the wrong layer.
+  power_efficient_encoder: { path: "/video_send/power_efficient_encoder", kind: raw, unit: bool, note: "libwebrtc's own hw/sw signal; corroborates encoder_tier." }
+
+  keyframe_service_polls:
+    source: "harness, d(pli_count) triggers, d(key_frames_encoded) stops"
+    derived: "distribution of POLL COUNTS between a PLI and the next keyframe; report distribution + max"
+    kind: app
+    unit: poll_intervals
+    higher_is_better: false
+    codec_sensitive: true
+    reported_at: video_poll_hz
+    note: >
+      REPORTED IN POLL INTERVALS, NEVER AS A MILLISECOND PERCENTILE. The Rust SDK
+      exposes no PLI callback, so measurement resolution equals the poll period
+      and the value is quantized. With a handful of PLI events, a 'p95 in ms' over
+      {0, 100, 200} ms is just the maximum wearing a percentile's name. Convert to
+      ms only when quoting, and quote as a bound ("recovery within 2 polls
+      ≈ ≤200 ms at 10 Hz"). Codec comparison is valid because all codecs are
+      measured at the same video_poll_hz.
+
+  malformed_bitstream:
+    derived: "frames_encoded > 0 && packets_sent == 0"
+    kind: raw
+    unit: bool
+    note: "The condition at publisher.rs:462-466. An INVALID REASON, never a zero-bitrate FAIL."
+  actual_codec:
+    source: "RtcStats::Codec.mime_type joined via stream.codec_id"
+    derived: "parse 'video/AV1' -> av1"
+    kind: raw
+    unit: enum
+    note: "REQUESTED != ACTUAL. Mismatch ⇒ INVALID (codec_fallback)."
+
+  # --- Control path (design §1c). No SDK stats surface exists for data tracks;
+  #     every control metric is app-derived from a harness-owned seq + timestamp. ---
+  control_delivered_pct:
+    source: "harness payload seq"
+    derived: "distinct_seq_received / expected_seq_count * 100"
+    denominator: publisher_seq_log_intersected_with_scored_window
+    kind: app
+    unit: pct
+    higher_is_better: true
+    requires: "publisher_seq_log present; >=10000 samples"
+    note: >
+      THE DENOMINATOR MUST COME FROM THE PUBLISHER, not from received sequence
+      numbers. Deriving it as max_seq - min_seq + 1 is self-referential and
+      BIASED TOWARD PASSING against a 99.9% bar: if the last 40 samples of the
+      window are lost, max_seq is simply 40 lower, the denominator shrinks by
+      exactly the number lost, and the loss is invisible. A burst straddling
+      either window edge — precisely the T-2 and T-5 signature — is silently
+      discounted. Correct denominator: the count of publisher-emitted seqs whose
+      SEND TIME falls inside the scored (post-warmup) window.
+  control_publish_shortfall_pct:
+    source: "harness publisher"
+    derived: "(1 - seq_published / (control_rate_hz * scored_duration_s)) * 100"
+    kind: app
+    unit: pct
+    higher_is_better: false
+    note: "HARNESS-HEALTH. Measures the publisher failing to achieve 200 Hz at all, computed against wall clock — a different failure from control_delivered_pct."
+  control_late_pct:
+    derived: "share of received samples with owd_corrected_us > playout_window_ms * 1000"
+    kind: app
+    unit: pct
+    higher_is_better: false
+    requires: "clock_sync_confidence >= probe"
+    note: "§8.2b: a late sample IS loss. This metric is the whole of T-3."
+  control_owd_p50_ms:  { derived: "p50 of (t_recv_unix_us - t_send_unix_us) - theta", kind: app, unit: ms, higher_is_better: false, requires: "theta valid" }
+  control_owd_p99_ms:  { derived: "p99 of (t_recv_unix_us - t_send_unix_us) - theta", kind: app, unit: ms, higher_is_better: false, requires: "theta valid" }
+  control_jitter_ms:   { derived: "RFC 3550 interarrival jitter, J += (|D| - J)/16", kind: app, unit: ms, higher_is_better: false, note: "Single-clock, so skew-immune." }
+  control_effective_rate_hz:
+    derived: "distinct_seq_received / dt per poll interval"
+    kind: delta
+    unit: hz
+    higher_is_better: true
+    note: "THE T-2 COLLAPSE SIGNATURE is a RATE collapse (200 -> 40 Hz), which delivered-% alone hides."
+  control_gap_p99:     { derived: "p99 of consecutive-seq gap length", kind: app, unit: count, higher_is_better: false, note: "§7.2a: bounds how long a watchdog must tolerate stale input." }
+  control_max_gap:     { derived: "longest run of consecutive missing seq numbers", kind: app, unit: count, higher_is_better: false, note: "The worst single stall, in samples. See control_max_gap_ms for the same quantity in the unit the latency budget uses." }
+  control_max_gap_ms:
+    derived: "control_max_gap / control_rate_hz * 1000"
+    kind: app
+    unit: ms
+    higher_is_better: false
+    note: >
+      THE WORST CONTROL-PATH STALL, in milliseconds. A gap is a run of consecutive
+      missing sequence numbers and the publisher emits at a known fixed rate, so
+      the gap length IS a duration; reporting only the sample count buries a
+      transport stall in a unit no budget is written in.
+
+      OBSERVE, never blocking. Added 2026-08-25 after a Tier 0 run on LiveKit
+      Cloud showed a 121-sample gap — 605 ms at 200 Hz — with NO induced loss, a
+      healthy sampler (poll interval 1000.4 ms, not overbudget, no stats-RPC
+      failure) and the control receive rate collapsing from 191 to 10 samples/s
+      for one poll. A control path that can stall two thirds of a second
+      unprompted on a clean cloud path is directly material to a 90 ms
+      teleoperation budget.
+
+      NOTHING ELSE IN THE RECORD SURFACES IT, which is why it needs its own row:
+      121 samples out of ~21 000 is 0.58%, so control_delivered_pct absorbs it
+      entirely, and control_effective_rate_hz averages it away over the poll. It
+      is not scored because a single worst-case event is not a distribution —
+      report it alongside control_gap_p99_ms, which gives the typical gap.
+  control_gap_p99_ms:  { derived: "control_gap_p99 / control_rate_hz * 1000", kind: app, unit: ms, higher_is_better: false, note: "The typical gap in milliseconds, as a companion to control_max_gap_ms. Together they separate one long stall from many short ones." }
+  dc_messages_received:
+    path: "/data_channel/messages_received"
+    derived: "d(messages_received)"
+    kind: delta
+    unit: count
+    requires: "control_transport in [dc_reliable, dc_lossy]"
+    note: "Cross-check for the LEGACY path only. ABSENT for data_track_buf1 — data tracks do not surface in RtcStats::DataChannel."
+
+  # --- Latency probes (design §1d) ---
+  #
+  # TWO DISTINCT ROUND TRIPS, NEVER CONFLATED. They differ by roughly 2x and
+  # measure different paths, so one name for both produced a G2G/RTT ratio below
+  # 1.0 — an impossibility that only looked plausible because the label was wrong.
+  #
+  #   network_rtt_*  ICE/STUN consent round trip. The NETWORK path.
+  #   app_rtt_*      four-timestamp probe. Network PLUS application scheduling at
+  #                  both ends, over the control transport, via the SFU.
+  #
+  # Measured on Q7 av1 r0, 2026-08-25: network p50 31.0 ms, app p50 60.6 ms.
+  app_rtt_p50_ms:
+    derived: "p50 of four-timestamp rtt = (t3-t0) - (t2-t1)"
+    kind: app
+    unit: ms
+    higher_is_better: false
+    requires: ">=30 completed probes"
+    note: >
+      APPLICATION LOOP round trip, not the network round trip. The path is
+      publisher -> SFU -> subscriber -> SFU -> publisher over the control
+      transport, and it additionally includes control-publisher scheduling at the
+      sender (a probe rides the next control sample) and echo dispatch at the
+      receiver. Clock-skew immune by construction, since each difference is taken
+      on a single clock. Compare against network_rtt_p50_ms to read off the
+      application's own share of the loop.
+  app_rtt_p95_ms:
+    derived: "p95 of four-timestamp rtt"
+    kind: app
+    unit: ms
+    higher_is_better: false
+    requires: ">=30 completed probes"
+    note: >
+      OBSERVE only. NOT the metric §8.1a's 90 ms ceiling is scored against — see
+      the network_rtt_p95_ms threshold row for why the bar attaches to the network
+      round trip instead. Reported alongside it because the gap between the two is
+      the application's contribution, which is actionable in a way neither number
+      is alone.
+  app_rtt_p99_ms: { derived: "p99 of four-timestamp rtt", kind: app, unit: ms, higher_is_better: false, note: "Recorded. NOT scored against §8.1c — that clause is one-way. See thresholds note (d2)." }
+  app_rtt_sample_count: { derived: "count of completed probe round trips in the scored window", kind: app, unit: count, note: "Sample support for the percentiles above. A p95 over a few dozen samples is not a p95, which is why the percentiles are null below the >=30 precondition rather than best-effort." }
+  network_rtt_p50_ms:
+    path: "/candidate_pair/current_round_trip_time"
+    derived: "p50 of (current_round_trip_time * 1000) over scored polls"
+    kind: raw
+    unit: ms
+    higher_is_better: false
+    note: >
+      THE NETWORK round trip: ICE consent-check RTT on the selected candidate
+      pair, carrying no application scheduling. This is the denominator for Q-7's
+      g2g/RTT ratio. Sampled at the stats poll cadence, so it is a per-poll gauge
+      rather than a per-exchange measurement.
+  network_rtt_p95_ms:
+    path: "/candidate_pair/current_round_trip_time"
+    derived: "p95 of (current_round_trip_time * 1000) over scored polls"
+    kind: raw
+    unit: ms
+    higher_is_better: false
+    note: "THE METRIC §8.1a's 90 ms ceiling is scored against. See the threshold row."
+  probe_loss_pct: { derived: "probes_lost / probes_sent * 100", kind: app, unit: pct, higher_is_better: false, note: "probes_lost is the explicit aged-out count from the harness, NOT sent-minus-completed: the latter also counts every probe still in flight, which at a probe interval below the round trip is several probes at any instant." }
+  theta_ms:
+    derived: "on each probe completion: min(owd_ring) - rtt_THIS_PROBE / 2"
+    kind: app
+    unit: ms
+    note: >
+      THE TWO MINIMA MUST BE PAIRED. Taking min(rtt) over its own rolling window
+      and min(owd) over a separate one mixes measurements from different times —
+      OWD samples arrive at 200 Hz while probes complete at 1 Hz, so the two
+      windows span very different intervals and their difference absorbs
+      path-condition drift as if it were clock offset. Correct form: when a probe
+      completes, scan the current OWD ring for its minimum and pair it with the
+      RTT of THAT SAME probe exchange. Both terms are then contemporaneous by
+      construction and queueing that inflates one inflates the other.
+  clock_sync_confidence: { kind: raw, unit: enum, values: [none, probe, external], note: "Gates whether any one-way figure may be published. `none` ⇒ OWD/G2G columns suppressed; the run stays valid for RTT." }
+  ice_rtt_ms:  { path: "/candidate_pair/current_round_trip_time", derived: "median of (* 1000)", kind: raw, unit: ms, note: "Median of the same series as network_rtt_p50_ms, retained under its original name so pre-rename run records stay readable. Prefer network_rtt_p50_ms in new analysis." }
+  rtcp_rtt_ms: { path: "/remote_inbound/round_trip_time", derived: "* 1000", kind: raw, unit: ms, requires: "round_trip_time_measurements > 0", note: "RTCP-derived, ~1 s cadence, video path only. Second corroborator." }
+
+  # --- Glass-to-glass (design §1e) ---
+  g2g_p50_ms:
+    derived: "p50 of (t_recv_unix_us - metadata.user_timestamp - theta)"
+    kind: app
+    unit: ms
+    higher_is_better: false
+    requires: "clock_sync_confidence >= probe; frame_metadata_features.user_timestamp"
+    codec_sensitive: true
+    note: "CAPTURE -> APP-DELIVERY, not capture -> photons. It excludes display and compositor latency. The report must name that boundary."
+  g2g_p99_ms: { derived: "p99 of the same", kind: app, unit: ms, higher_is_better: false, requires: "clock_sync_confidence >= probe; frame_metadata_features.user_timestamp", codec_sensitive: true }
+  g2g_frame_loss_pct: { derived: "(1 - distinct frame_id received / frame_id span) * 100", kind: app, unit: pct, higher_is_better: false, note: "Distinguishes 'G2G is fine but half the frames vanished' from a genuine latency result." }
+  g2g_metadata_coverage_pct:
+    derived: "frames_with_metadata / frames_received * 100"
+    kind: app
+    unit: pct
+    higher_is_better: true
+    note: >
+      HARNESS-HEALTH, guarding the single most dangerous failure mode in the
+      harness. RemoteVideoTrack::subscribe_timing_events()
+      (remote_video_track.rs:152) allocates its transformer LAZILY ON FIRST CALL
+      and must be called BEFORE constructing NativeVideoStream (SDK doc comment,
+      :148-151). If the stream is constructed first, the transformer does not
+      exist when the stream is wired up and frame_metadata arrives EMPTY FOR
+      EVERY FRAME.
+
+      Nothing else degrades: frames are received, decoded and rendered normally,
+      and InboundRtp counters, fps and freeze metrics all look healthy. The only
+      symptom is metadata.user_timestamp being None on every frame, so every G2G
+      sample is dropped and g2g_p50_ms reports None. Phase 3 hit exactly this —
+      702 frames received, 0 with metadata, everything else green.
+
+      Without this metric such a run passes every other validity gate while
+      silently omitting the one column Q-7 exists to produce. It is what
+      distinguishes "G2G is genuinely unmeasurable on this path" from "the
+      subscribe_timing_events ordering was wrong": both present as g2g: None,
+      and only one is a valid result.
+  g2g_pixel_p50_ms:
+    kind: app
+    unit: ms
+    tier: 2
+    manual: true
+    note: >
+      The only true camera->photons measure: camera pointed at display, burned
+      timestamp vs on-screen clock. Tier 2 only, used to calibrate the offset
+      against g2g_p50_ms ONCE PER CODEC/ENCODER TIER, not per run.
+
+  # --- Session health (design §1f) ---
+  session_drops:      { derived: "count of terminal RoomEvent::Disconnected not initiated by the harness", kind: app, unit: count, higher_is_better: false, note: "Must EXCLUDE harness-initiated close. `reason` recorded verbatim." }
+  reconnect_count:    { derived: "count of RoomEvent::Reconnecting", kind: app, unit: count, note: "A SURVIVED RECONNECT IS NOT A DROP — §8.6b explicitly permits it. Scoring these as session_drops would fail runs the PRD passes." }
+  recovery_p95_ms:    { derived: "p95 of t(Reconnected) - t(Reconnecting)", kind: app, unit: ms, higher_is_better: false, requires: ">=5 events" }
+  ice_selected_pair_changes: { path: "/transport/selected_candidate_pair_changes", derived: "d(...)", kind: delta, unit: count }
+  ice_state:          { path: "/transport/ice_state", kind: raw, unit: enum, note: "IceTransportState::Failed is the ICE-failure signal. A failure shorter than the poll period is MISSED — state that limit in T-5." }
+  dtls_state:         { path: "/transport/dtls_state", kind: raw, unit: enum }
+  connection_quality: { kind: raw, unit: enum, recorded_only: true, note: "The SFU's own opinion. RECORDED, NEVER THRESHOLDED — a smoothed heuristic, not a measurement." }
+  join_to_first_video_ms: { derived: "t(first frame on RemoteVideoTrack) - t(connect() called)", kind: app, unit: ms, note: "Not a PRD clause; gates operator-takeover work." }
+  join_to_connected_ms:   { derived: "t(ConnectionState::Connected) - t(connect() called)", kind: app, unit: ms }
+
+  # --- Audio (design §7). Exercised as concurrent load and a latency-budget
+  #     check, not as a quality study. No MOS, no POLQA. ---
+  audio_playout_delay_avg_ms:
+    derived: "(d(total_playout_delay) / d(total_samples_count)) * 1000"
+    source: "MediaPlayout"
+    kind: ratio
+    unit: ms
+    higher_is_better: false
+    note: "The nearest available proxy for the 50 ms budget. PLAYOUT-SIDE DELAY ONLY, not end-to-end mouth-to-ear. Name that boundary."
+  audio_jitter_buffer_delay_ms:
+    derived: "(d(jitter_buffer_delay) / d(jitter_buffer_emitted_count)) * 1000"
+    source: "audio InboundRtp"
+    kind: ratio
+    unit: ms
+    note: >
+      Audio and video have independent jitter buffers; zero_jitter is a VIDEO
+      field trial and must not be assumed to affect this. MEASURE, DO NOT INFER.
+      If this fails to move across buffering_mode values, that confirms the
+      independence rather than indicating a harness fault.
+  audio_concealment_pct:    { derived: "d(concealed_samples) / d(total_samples_received) * 100", kind: ratio, unit: pct, higher_is_better: false, note: "The audio analogue of packet loss. Report silent_concealed_samples alongside so silence is not counted as damage." }
+  audio_concealment_events: { derived: "d(concealment_events)", kind: delta, unit: count, note: "Separates one long gap from many short ones." }
+  audio_accel_decel_pct:    { derived: "d(inserted_samples_for_deceleration + removed_samples_for_acceleration) / d(total_samples_received) * 100", kind: ratio, unit: pct, note: "NetEQ time-stretching — the earliest indicator that jitter is biting." }
+  audio_bitrate_bps:        { derived: "(d(bytes_sent + header_bytes_sent) * 8) / dt", kind: delta, unit: bps }
+  audio_synthesized_pct:    { derived: "d(synthesized_samples_duration) / d(total_samples_duration) * 100", kind: ratio, unit: pct }
+  audio_packets_lost_pct:   { derived: "as video, on the audio stream", kind: ratio, unit: pct, note: "Same negative-delta clamp as video." }
+  audio_level:              { path: "/audio_recv/audio_level", kind: raw, unit: ratio_0_1, note: "HARNESS-HEALTH. audio_level == 0 for the whole run ⇒ audio columns INVALID; the run stays valid for video and control." }
+
+  # --- Harness health: the INVALID axis (design §1g). These NEVER fail a run. ---
+  poll_overbudget_pct:
+    derived: "polls where actual_interval > poll_overbudget_multiplier * nominal, / polls_total * 100"
+    kind: app
+    unit: pct
+    higher_is_better: false
+    note: "The primary INVALID gate. A run where the client stalled measured the client, not the network."
+  poll_interval_p99_ms: { derived: "p99 of actual poll spacing", kind: app, unit: ms, recorded_only: true, note: "Context for poll_overbudget_pct." }
+
+# ===========================================================================
+# Thresholds.
+#
+# The `source` column states where each row's NORMATIVE FORCE comes from,
+# because it is not uniform. DO NOT ASSUME blocking == PRD MUST: two blocking
+# rows are governing-page-derived or PRD SHOULDs promoted by the test spec, and
+# one threshold value appears in no PRD clause at all.
+#
+# `effect`:  fail       — a breach fails the run
+#            advisory   — recorded and reported, does not change the verdict
+#            observe    — reported as OBSERVE; never blocking (proxy metric)
+#            invalidate — a breach marks the run INVALID and excludes it from
+#                         every breakpoint. NEVER a FAIL.
+#
+# Rows marked provenance: harness-derived have NO external authority behind
+# their numeric value. They are engineering judgments, open to revision on
+# evidence, and MUST NOT be presented in the report as requirements.
+# ===========================================================================
+thresholds:
+  - metric: network_rtt_p95_ms
+    op: "<="
+    value: 90
+    clause: "§8.1a"
+    provenance: prd-must
+    verbatim: "MUST NOT exceed ~90 ms"
+    effect: fail
+    note: >
+      SCORED AGAINST THE NETWORK ROUND TRIP, not the four-timestamp probe. The
+      clause's companion SHOULD is "20-50 ms", which is a network-path figure: an
+      application loop RTT that includes 200 Hz control-publisher scheduling at
+      both ends cannot plausibly sit in 20-50 ms, so the clause is describing the
+      network. Scoring app_rtt_p95_ms here would apply a network bar to a number
+      that includes harness scheduling — the same class of error as note (d2),
+      where the C++ matrix scored a round-trip against a one-way clause.
+      app_rtt_p95_ms is reported alongside as OBSERVE, never as this bar.
+
+  - metric: network_rtt_p50_ms
+    op: "<="
+    value: 50
+    clause: "§8.1a"
+    provenance: prd-should
+    verbatim: "SHOULD stay within 20-50 ms"
+    effect: advisory
+    note: "The lower bound is not a floor to enforce. 20-50 is a SHOULD RANGE; measuring below 20 ms on loopback is not a violation. Only upper bounds are scored. Same network-path reasoning as the p95 row above."
+
+  - metric: g2g_p50_ms
+    op: "<="
+    value: 100
+    clause: "§8.1b"
+    provenance: prd-should-promoted-by-governing-page
+    verbatim: "E2E latency, camera to headset, SHOULD stay under 100 ms"
+    effect: fail
+    note: >
+      KEPT BLOCKING: G2G is the number Q-7 exists to settle and the suite is
+      worthless if a breach is only advisory. The report MUST state the bar is a
+      PRD SHOULD promoted by the test spec, not a PRD MUST. This is the one row
+      where the governing page's stricter treatment is adopted over the PRD's
+      modal verb — not a conflict of fact, since both sources agree the number is
+      100. The governing page may make a bar harder, never looser, and may never
+      change a number.
+
+  - metric: control_owd_p99_ms
+    op: "<="
+    value: 100
+    clause: "§8.1c"
+    provenance: prd-should
+    verbatim: "The p99 of the robot -> TC SHOULD stay under 100 ms"
+    effect: advisory
+    note: >
+      CORRECTION vs the C++ matrix, which scored rtt_p99_ms against this clause.
+      §8.1c is a ONE-WAY figure; applying it to a round-trip number is roughly 2x
+      too strict. Test Matrix v2 already scores it correctly as one-way/advisory,
+      so the C++ matrix.yaml diverged from its own governing spec — which is why
+      the governing page, not the C++ file, is this matrix's transcription source.
+
+  - metric: control_delivered_pct
+    op: ">="
+    value: 99.9
+    clause: "§8.3a"
+    provenance: prd-must-value-from-governing-page
+    verbatim: "control and force paths MUST run at near-zero loss"
+    effect: fail
+
+  - metric: control_late_pct
+    op: "<="
+    value: 0.1
+    clause: "§8.2b"
+    provenance: prd-must-value-from-governing-page
+    verbatim: "A control sample that misses its playout deadline MUST be dropped"
+    effect: fail
+
+  - metric: video_bitrate_bps
+    op: "<="
+    value: 5000000
+    clause: "§8.0b"
+    provenance: prd-stated-target
+    verbatim: "the sustained uplink target is <= 5 Mbps"
+    effect: fail
+
+  - metric: video_fps_p50
+    op: ">="
+    value: 27
+    clause: "§7.1a"
+    provenance: governing-page-derived
+    derived_from: "30 fps ladder less parameters.video_fps_tolerance_pct"
+    verbatim: "Video frame rate >= 27 fps"
+    effect: fail
+    note: >
+      NO PRD BASIS FOR THE NUMBER. PRD §7.1a gives the resolution/fps ladder but
+      states no frame-rate threshold and no tolerance figure. Both the 27 and the
+      10% come from the governing page's threshold table. Kept blocking, but the
+      report must not cite 'PRD §7.1a' as the authority for 27.
+
+  - metric: session_drops
+    op: "=="
+    value: 0
+    clause: "§8.6a"
+    provenance: prd-must
+    verbatim: "a session MUST NOT drop from network causes"
+    effect: fail
+    note: "reconnect_count is NOT scored here — §8.6b explicitly permits a survived reconnect."
+
+  # --- Audio: OBSERVE, never blocking. Design §7. ---
+  - metric: audio_playout_delay_avg_ms
+    op: "<="
+    value: 50
+    clause: "§8.0 (audio row), §7.4"
+    provenance: prd-literal-value
+    effect: observe
+    note: >
+      OBSERVE ON PURPOSE. The PRD's 50 ms is a MOUTH-TO-EAR budget and
+      total_playout_delay measures only the playout-side share. Making a blocking
+      verdict turn on a proxy that measures less than the clause describes would
+      produce confident wrong answers — the exact failure the four-verdict model
+      exists to prevent. The report states the measured share and names what it
+      excludes.
+
+  - metric: audio_concealment_pct
+    op: "<="
+    value: 5
+    clause: "§8.3b"
+    provenance: harness-derived
+    effect: observe
+    note: >
+      THE WEAKEST-SOURCED NUMBER IN THE DESIGN, labelled as such deliberately.
+      PRD §8.3b says only that "video and audio tolerate loss and adapt" — no
+      audio loss or concealment figure, and the governing page gives none either.
+      5% is an engineering judgment chosen as a visible starting point. It must be
+      reported as an observation against a harness-chosen reference, NEVER as a
+      PRD threshold, and revised once real distributions exist.
+
+  # --- Validity gates. These INVALIDATE; they never FAIL. Design §1g. ---
+  - metric: poll_overbudget_pct
+    op: "<="
+    value: 5
+    clause: "governing page §3"
+    provenance: governing-page
+    effect: invalidate
+    invalid_reason: poll_overbudget
+
+  - metric: control_publish_shortfall_pct
+    op: "<="
+    value: 2
+    clause: "design §1c"
+    provenance: harness-derived
+    effect: invalidate
+    invalid_reason: control_publish_shortfall
+
+  - metric: quality_limitation_cpu_pct
+    op: "<="
+    value: 10
+    clause: "design §1b"
+    provenance: harness-derived
+    effect: invalidate
+    invalid_reason: cpu_limited_encoder
+    note: "A bitrate produced by a CPU-starved encoder is not a measurement of the network."
+
+  - metric: malformed_bitstream
+    op: "=="
+    value: false
+    clause: "publisher.rs:462-466"
+    provenance: harness-validity
+    effect: invalidate
+    invalid_reason: malformed_av1_bitstream
+    note: "An INVALID reason, NOT a silent zero-bitrate FAIL."
+
+  - metric: g2g_metadata_coverage_pct
+    op: ">="
+    value: 95
+    clause: "design §1e"
+    provenance: harness-derived
+    effect: invalidate
+    invalid_reason: g2g_metadata_missing
+    note: >
+      Catches the subscribe_timing_events ordering fault, which is otherwise
+      SILENT — every other gate passes while G2G is empty. A run cannot report
+      g2g: None and still be scored; that is the confident-wrong-answer path.
+      The 95% allows for the handful of frames that legitimately arrive before
+      the timing transformer is wired up, without tolerating a systematic
+      failure.
+
+  - metric: codec_mismatch
+    op: "=="
+    value: false
+    clause: "design §4"
+    provenance: harness-validity
+    effect: invalidate
+    invalid_reason: codec_fallback
+    note: "A cell labelled av1 that fell back is the worst data point the matrix can produce."
+
+# Vocabulary for run_record.validity.invalid_reasons. parse_runs.py must emit
+# only these; a free-text reason is not analyzable.
+#
+# SCOPING (design §1g, §11). This list defines which strings are LEGAL, not where
+# each may appear. Two entries are not unconditionally run-level:
+#
+#   silent_audio_source  - NEVER emitted at run level. Column-scoped only: suppress
+#                          the audio rows, record it in validity.invalid_detail, and
+#                          leave validity.invalid_reasons empty. Audio is scored
+#                          OBSERVE and never blocking, so a silent source does not
+#                          stop a run answering its suite's question. (§1g rule ii)
+#
+#   clock_unsynchronized - Run level ONLY when the suite's `primary` set contains a
+#                          one-way or G2G metric; otherwise column-scoped via
+#                          invalid_detail. Compute it, do not hardcode a suite list:
+#                          intersect the suite's `primary` with the metrics whose
+#                          `requires` mentions clock_sync_confidence or theta.
+#                          Non-empty => run-level INVALID. Deliberately not listing
+#                          which suites qualify: that is the rule's output, it
+#                          changes whenever a `primary` set changes, and an earlier
+#                          hand-written list here was wrong. (§1g rule i)
+#
+# Both stay in this list because both are legal invalid_detail values and detail
+# strings validate against the same vocabulary.
+invalid_reasons:
+  - codec_fallback
+  - cpu_limited_encoder
+  - malformed_av1_bitstream
+  - poll_overbudget
+  - control_publish_shortfall
+  - clock_unsynchronized
+  - silent_audio_source
+  - session_lost_mid_run
+  - g2g_metadata_missing
+
+# Design §8. Pooling across either dimension produces an average describing no
+# real configuration. parse_runs.py must refuse to aggregate across these.
+never_pool_across:
+  - video_codec
+  - encoder_tier
+  - buffering_mode
+  - control_transport
+  - ran_profile
+  - path
+  # A camera makes bitrate depend on scene content, lighting and framing; the
+  # synthetic pattern presents every host with an identical encoding problem.
+  # They are different experiments, not two samples of one. Camera is opt-in via
+  # the harness's --camera-source and is never a cell default or a swept axis.
+  - camera_source
+
+# ===========================================================================
+# Suites.
+#
+# Runs = cross product of `sweep` x `repeats`, with everything in `hold` held.
+# `tier0: true` marks a suite with a non-empty shaping-free subset.
+# `required_cells` are cells that MUST appear and MUST NOT be dropped by any
+# filter — run_matrix.py asserts their presence.
+# ===========================================================================
+suites:
+
+  # RETIRED: V0_playout_units. It was the §4 validation gate that disambiguated
+  # whether create_room_with_playout_delay takes milliseconds or 10 ms units, by
+  # asserting a 10x-separated prediction on the playout_hint_smooth cell. With
+  # the hint modes retired from buffering_mode, the harness never calls that API,
+  # so there is no unit to disambiguate — the question is moot by construction,
+  # not unanswered. There is now NO validation gate in this matrix; parse_runs.py
+  # scores every suite directly. Re-adding any playout-hint mode MUST re-add this
+  # suite and its gate. See buffering_mode.retired_values.
+
+  T1_video_floor:
+    question: "T-1: what bitrate each profile x codec x encoder emitted under the §8.0b 5 Mbps ceiling at >= 27 fps, AT WHATEVER QUALITY ITS RATE CONTROL CHOSE"
+    scope_limit: >
+      AS BUILT, T-1 DOES NOT ANSWER 'WHICH CODEC FITS' ACROSS CODECS. Every cell
+      is encoded to a BITRATE TARGET, so quality is an output, not a control, and
+      each codec's rate control picked its own operating point. Two cells at
+      different qp_avg are two different pictures and their bitrates are not
+      comparable — measured on 2026-08-25, av1 ran QP 40.0 against h264 QP 25-27
+      on comparable frame counts.
+
+      Within one codec the comparison is sound, because rate control faced the
+      same problem at every rung. Across codecs it is not, and no efficiency claim
+      may be drawn from this suite as currently specified.
+
+      Answering the codec question needs FIXED-QUALITY encoding (pin QP/CQ, measure
+      the resulting bitrate), which inverts what is controlled and what is measured.
+      That is a suite redesign, and the SDK does not expose a quality target today
+      — see MEASUREMENT-DESIGN §9 and SDK-FINDINGS SDK-2.
+    clause: "§7.1a, §8.0b"
+    sweep: [video_profile, video_codec, uplink_mbps]
+    hold: { loss_pct: 0, owd_ms: 25, jitter_ms: 0, concurrency: 1, buffering_mode: zero_jitter, control_transport: data_track_buf1 }
+    primary: [video_bitrate_bps, video_fps_p50, frame_width, frame_height, video_frame_interval_p99_ms, g2g_p50_ms, encode_time_avg_ms, quality_limitation_bandwidth_pct, quality_limitation_bandwidth_poll_pct, qp_avg]
+    tier0: true
+    tier0_note: "video_profile x video_codec is live at Tier 0; uplink_mbps collapses to its default."
+    answers: >
+      The profile -> codec -> encoder -> bitrate -> qp -> fps table. WITHIN A
+      SINGLE CODEC the bitrate comparison across rungs is sound, because rate
+      control faced the same problem at every rung. Report the table, never a
+      single floor.
+
+      A more efficient codec would put a HIGHER resolution rung inside the 5 Mbps
+      budget, which would move the video floor — but THIS SUITE CANNOT ESTABLISH
+      THAT, see cannot_answer. Any such claim needs matched quality first.
+    cannot_answer: >
+      Whether any rung supports fine manipulation. That is a human judgment
+      (Figure - Arun). The harness supplies the table and recorded footage per
+      rung; it must never imply a floor.
+
+      AND WHICH CODEC IS MORE EFFICIENT. Cells are encoded to a bitrate TARGET, so
+      quality is an output and each codec's rate control chose its own operating
+      point; two cells at different qp_avg are two different pictures and their
+      bitrates are not comparable. Measured 2026-08-25: av1 QP 40.0 against h264
+      QP 25-27 on comparable frame counts. An earlier reading of that sweep as
+      evidence of AV1 efficiency is RETRACTED. Requires the fixed-quality redesign
+      in MEASUREMENT-DESIGN, which is blocked on SDK-FINDINGS SDK-2.
+
+  T2_loss_collapse:
+    question: "T-2: the loss at which control breaks, per transport"
+    clause: "§8.3"
+    sweep: [loss_pct, control_transport, video_codec]
+    hold: { owd_ms: 25, jitter_ms: 0, video_profile: tolerable, concurrency: 1 }
+    video_poll_hz: 10
+    video_poll_hz_note: >
+      T-2 polls the VIDEO track at 10 Hz, not 1 Hz — keyframe recovery after a
+      loss burst is a primary metric here and 100 ms is the minimum resolution
+      that makes recovery timing meaningful. Every other suite stays at 1 Hz.
+      Recorded per run as video_poll_hz so a reader never has to infer the
+      resolution. It raises poll_overbudget_pct risk, which the existing INVALID
+      gate catches rather than silently absorbing.
+    primary: [control_delivered_pct, control_late_pct, control_effective_rate_hz, control_gap_p99, control_gap_p99_ms, control_max_gap_ms, probe_loss_pct, video_fps_p50, video_freeze_count, pli_rate_per_min, keyframe_service_polls, video_rtx_pct, audio_concealment_pct, audio_accel_decel_pct]
+    tier0: false
+    tier0_note: >
+      loss_pct is netem-only, so T-2's own question is not answerable at Tier 0.
+      The mandatory av1 cell IS runnable at Tier 0 at loss_pct 0 and is retained
+      there — it needs no netem. Every run is zero_jitter now, so that cell is
+      still the av1-under-no-jitter-buffer cell design §3 requires.
+    required_cells:
+      - { video_codec: av1, reason: "design §3 required cell — AV1 frame-assembly sensitivity under no jitter buffer (every cell is zero_jitter)" }
+    critical_note: >
+      EVERY LOSS STEP RUNS ONCE PER control_transport. On dc_reliable, SCTP
+      retransmits, so loss shows up as LATENCY (head-of-line blocking), not as
+      missing samples: control_delivered_pct stays ~100% while control_late_pct
+      explodes. On dc_lossy and data_track_buf1, samples vanish outright. These
+      are OPPOSITE FAILURE SIGNATURES and the PRD's ~10% number almost certainly
+      came from one specific configuration. Recording which one is the point.
+    answers: "The collapse loss per transport, reported as effective control RATE (Hz) as well as delivered %."
+    cannot_answer: "Whether the PRD's original figures came from either configuration measured here. It resolves what the number IS, not what the historical number WAS."
+
+  T3_jitter_tolerance:
+    question: "T-3: the jitter that keeps late-arrival loss near zero, as a curve over playout window"
+    clause: "§8.2"
+    sweep: [jitter_ms, playout_window_ms, control_transport]
+    hold: { loss_pct: 0, owd_ms: 25, video_profile: tolerable, concurrency: 1, buffering_mode: zero_jitter }
+    primary: [control_late_pct, control_jitter_ms, control_owd_p50_ms, control_owd_p99_ms, control_gap_p99, jitter_buffer_delay_avg_ms]
+    tier0: false
+    tier0_note: "jitter_ms is netem-only. Nothing in T-3 is answerable without shaping."
+    buffering_note: >
+      T-3 SURVIVES THE buffering_mode COLLAPSE UNCHANGED, and it is worth being
+      explicit about why, because the names collide. playout_window_ms is the
+      CONTROL-path application deadline — the threshold control_late_pct is
+      computed against (see the metric's `derived` expression) — and it is a
+      harness/application parameter with no relationship to the video jitter
+      buffer or to the retired create_room_with_playout_delay hints. It was never
+      a function of buffering_mode: the earlier revision merely HELD buffering at
+      the hint floor while sweeping it. So the T-3 curve, late-arrival control
+      loss vs jitter, parameterized by the control playout window, is exactly as
+      well-defined under zero_jitter as before. Only the held value changed.
+      What DID narrow: jitter_buffer_delay_avg_ms is retained as a secondary
+      observation rather than a swept response — under zero_jitter it should stay
+      near the floor at every jitter step, and if it does not, network jitter is
+      defeating the field trial, which is itself a finding worth seeing.
+    answers: "A CURVE — max tolerable jitter as a function of the CONTROL playout window."
+    cannot_answer: "The operating point. Figure configures the window (§8.2a); the harness delivers the curve."
+
+  T4_capacity:
+    question: "T-4: the SFU-side concurrent session limit on one instance"
+    clause: "§8.7"
+    sweep: [concurrency]
+    hold: { loss_pct: 0, owd_ms: 25, jitter_ms: 0, video_profile: tolerable, buffering_mode: zero_jitter, control_transport: data_track_buf1 }
+    primary: [network_rtt_p95_ms, app_rtt_p95_ms, control_late_pct, control_delivered_pct, video_fps_p50, session_drops, audio_playout_delay_avg_ms, audio_concealment_pct, poll_overbudget_pct]
+    tier0: false
+    tier0_note: "concurrency needs load generators on separate hosts — a Tier 1 capability."
+    answers: "The SFU-side session limit on one instance. Audio metrics are PRIMARY here — this is where a fourth stream competing for the same uplink actually shows."
+    cannot_answer: >
+      CELL UPLINK CAPACITY, AND THEREFORE PER-SITE CAPACITY. §8.7a requires the
+      tighter of two limits and this harness measures one. A site number needs
+      real RAN measurement (Numan Suri / Scott Jacka).
+    caveat: >
+      Load generators MUST run on separate hosts from the measured session. If
+      generator and probe share a NIC, poll_overbudget_pct rises and client
+      saturation is misattributed to SFU saturation.
+
+  T5_availability:
+    question: "T-5: availability SLO and recovery time"
+    clause: "§8.6"
+    sweep: [fault_injection]
+    hold: { video_profile: tolerable, concurrency: 1, buffering_mode: zero_jitter, control_transport: data_track_buf1 }
+    primary: [session_drops, reconnect_count, recovery_p95_ms, ice_state, ice_selected_pair_changes, join_to_first_video_ms, join_to_connected_ms, control_delivered_pct]
+    tier0: false
+    tier0_note: "Every fault class except baseline_soak requires link manipulation."
+    answers: "The fraction of each fault class survived by resume vs ending the session, and the outage-duration distribution."
+    cannot_answer: >
+      Real radio events. Netem fault injection approximates a fade; it is not a
+      fade. ICE failures shorter than the 1 Hz poll are invisible (design gap 8).
+
+  Q7_latency_definition:
+    question: "Q-7: which latency measure the 20-90 ms range applies to"
+    clause: "§8.1, §3 KPI"
+    sweep: [owd_ms, video_codec]
+    hold: { loss_pct: 0, jitter_ms: 0, video_profile: tolerable, concurrency: 1, control_transport: data_track_buf1 }
+    primary: [network_rtt_p50_ms, network_rtt_p95_ms, app_rtt_p50_ms, app_rtt_p95_ms, control_owd_p50_ms, control_owd_p99_ms, g2g_p50_ms, g2g_p99_ms, encode_time_avg_ms, assembly_time_avg_ms, decode_time_avg_ms, jitter_buffer_delay_avg_ms, theta_ms]
+    tier0: true
+    tier0_note: "video_codec is live at Tier 0; owd_ms collapses to its default. The three-column table is measurable without shaping at the unshaped operating point."
+    required_cells:
+      - { video_codec: av1, reason: "design §3 required cell — the AV1 decode/assembly share of G2G under no jitter buffer (every cell is zero_jitter)" }
+    answers: >
+      The three-column table — network RTT, one-way, glass-to-glass — measured
+      SIMULTANEOUSLY under the same injected delay, PER CODEC, with the G2G
+      decomposition (encode + transport + assembly + jitter buffer + decode).
+      The ratio between columns is the answer.
+    cannot_answer: >
+      Which measure the PRD authors intended. It supplies the evidence; Sid and
+      Michael make the call. And g2g_p50_ms is capture -> app-delivery, not
+      camera -> photons; the pixel measurement is Tier 2 only.
+
+# ===========================================================================
+# Shaping. ONE qdisc command per cell — two separate netem commands silently
+# replace each other, so delay, jitter and loss combine into a single
+# `tc qdisc replace`. Rate limiting is a separate tbf layered deliberately.
+# ===========================================================================
+shaping:
+  iface_default: eth0
+  netem_template: "tc qdisc replace dev {iface} root netem {params}"
+  netem_clear: "tc qdisc del dev {iface} root || true"
+  tbf_template: "tc qdisc replace dev {iface} parent 1:1 handle 10: tbf rate {rate}mbit burst 32kbit latency 400ms"
+  verify: "tc qdisc show dev {iface}"
+  note: >
+    The verbatim applied command and the verbatim `tc qdisc show` output are both
+    recorded in every run record. netem clamps and shapers round; the run record
+    stores what was APPLIED, not what was requested.
+  unavailable_on: [darwin]
+  unavailable_note: >
+    macOS cannot run tc/netem. run_matrix.py must FAIL LOUDLY rather than silently
+    skip if a requested suite depends on a shaping axis at a non-default value.
