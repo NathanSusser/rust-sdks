@@ -1579,6 +1579,23 @@ def test_redaction_leaves_a_credentialless_source_byte_identical():
         assert rm.redact_camera_source(value) == value
 
 
+def test_the_recorded_harness_cmd_carries_no_credential():
+    """harness_cmd is the verbatim argv, and the argv contains --camera-source. Writing
+    it unredacted put an RTSP password into every committed run record -- the record is
+    the single most durable place a credential can land, since it is committed to git."""
+    import run_matrix as rm
+    argv = ["./teleop-harness", "--room-name", "r",
+            "--camera-source", "rtsp://admin:hunter2@192.168.100.123/full1080p",
+            "--rtsp-transport", "tcp"]
+    recorded = [rm.redact_camera_source(a) for a in argv]
+    assert not any("hunter2" in a for a in recorded), recorded
+    assert "rtsp://***@192.168.100.123/full1080p" in recorded
+    # Every other argument must survive byte-for-byte, or the record stops being a
+    # faithful account of what was invoked.
+    assert recorded[:4] == argv[:4]
+    assert recorded[5:] == argv[5:]
+
+
 def test_the_python_and_rust_redactions_agree():
     """Two implementations of one rule drift. The harness redacts what it records
     and the runner redacts what it plans; if they disagree, one record in a pair
@@ -1587,6 +1604,10 @@ def test_the_python_and_rust_redactions_agree():
     binary = HERE.parent / "target" / "release" / "teleop-harness"
     if not binary.exists():
         return  # no release build here; the Rust-side unit tests still cover it
+    # NOTE: this compares against whatever binary is on disk. A STALE binary fails this
+    # test even when the source is correct -- rebuild with
+    # `cargo build -p teleop-test-matrix --release` before reading a failure here as a
+    # real leak.
     url = "rtsp://admin:hunter2@192.168.100.123/full1080p"
     out = subprocess.run(
         [str(binary), "--room-name", "r", "--duration-s", "1",

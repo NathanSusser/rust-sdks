@@ -784,7 +784,10 @@ def build_run_record(matrix: dict, run: dict, args, *, netem: str | None,
             "playout_units_confirmed": None,
             "publisher_seq_log": str(SNAPSHOTS_DIR / f"{run['run_id']}.seq.jsonl"),
             "harness_version": None,
-            "harness_cmd": harness_cmd,
+            # Redacted argv: an rtsp:// --camera-source embeds user:pass and this
+            # record is committed and shared. The invocation stays reproducible --
+            # only the credential is replaced.
+            "harness_cmd": [redact_camera_source(a) for a in harness_cmd],
         },
         # Extraction is parse_runs.py's job, not the runner's: making
         # differencing an analysis-side operation means a bug in it is fixable

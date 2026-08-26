@@ -48,5 +48,13 @@ broken camera rather than as the network problem it is.
 
 The run record self-identifies an RTSP run — `camera_device.kind` is `rtsp` and
 `camera_source` is `rtsp:<url>` — which is what `never_pool_across` needs to keep the three
-sources from being aggregated. Credentials embedded in the URL are stripped everywhere the
-source is logged or recorded, in both the harness and `run_matrix.py`.
+sources from being aggregated.
+
+Credentials embedded in the URL cannot reach any output. `RtspSelector`'s `Display` and
+`Debug` are both hand-written and redacting, so ordinary formatting — including `{:?}` on a
+struct that merely contains one — is safe by construction, and the raw form is reachable
+only through `url_with_credentials()`, which has exactly one caller. Five paths carried the
+credential and all are closed: the recorded source fields, `--validate-args`, `run_matrix.py`'s
+recorded value and `--dry-run` output, the verbatim `harness_cmd` argv in the run record, and
+ffmpeg's own stderr — which echoes the input URL in its diagnostics and is replayed into every
+error, so lines are scrubbed on the way into the tail and before being logged.

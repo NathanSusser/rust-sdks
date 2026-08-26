@@ -141,7 +141,27 @@ impl std::error::Error for RtspError {}
 ///
 /// Parsed from a `--camera-source` value beginning with `rtsp://` or `rtsps://`; see
 /// [`is_rtsp_url`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **The credential cannot be printed by accident.** RTSP URLs routinely embed
+/// `user:pass@`, and every ordinary way of rendering a value — `{}`, `{:?}`, and so any
+/// `{:?}` on a struct that merely *contains* one — goes through the hand-written
+/// [`Display`](std::fmt::Display) and [`Debug`](std::fmt::Debug) below, both of which
+/// redact. The raw form is reachable only through
+/// [`url_with_credentials`](Self::url_with_credentials), whose name is the warning; it has
+/// exactly one caller, the ffmpeg invocation that has to dial the stream.
+///
+/// This is deliberately structural rather than a convention. "Remember to redact at each
+/// output site" regresses the moment someone adds a log line, and a leaked credential is
+/// not the kind of defect that is cheap to discover late.
+///
+/// ```
+/// # use teleop_test_matrix::rtsp::RtspSelector;
+/// let selector = RtspSelector::new("rtsp://admin:hunter2@10.0.0.5/stream");
+/// assert_eq!(selector.to_string(), "rtsp://***@10.0.0.5/stream");
+/// assert_eq!(format!("{selector:?}"), r#"RtspSelector("rtsp://***@10.0.0.5/stream")"#);
+/// assert_eq!(selector.url_with_credentials(), "rtsp://admin:hunter2@10.0.0.5/stream");
+/// ```
+#[derive(Clone, PartialEq, Eq)]
 pub struct RtspSelector {
     url: String,
 }
@@ -152,18 +172,75 @@ impl RtspSelector {
         Self { url: url.to_string() }
     }
 
-    /// The URL as given, credentials included. Never put this in the run record.
-    pub fn url(&self) -> &str {
+    /// The URL as given, **credentials included**.
+    ///
+    /// Only for handing to the process that must actually dial the stream. Anything that
+    /// logs, records, or formats the source wants [`Display`](std::fmt::Display) instead —
+    /// which is what every `{}` and `{:?}` on this type already gives.
+    pub fn url_with_credentials(&self) -> &str {
         &self.url
     }
 
     /// The URL with any `user:password@` userinfo replaced, for logs and the run record.
-    ///
-    /// RTSP URLs routinely embed credentials and the run record is committed and shared, so
-    /// the redaction happens here rather than at each use site.
     pub fn redacted_url(&self) -> String {
         redact_url(&self.url)
     }
+}
+
+impl std::fmt::Display for RtspSelector {
+    /// Renders the URL with credentials stripped. See the type docs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.redacted_url())
+    }
+}
+
+impl std::fmt::Debug for RtspSelector {
+    /// Hand-written so `{:?}` — including on any struct containing one — cannot leak the
+    /// credential the derived implementation would print verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RtspSelector").field(&self.redacted_url()).finish()
+    }
+}
+
+/// Redacts the credentials of every URL appearing anywhere inside a line of text.
+///
+/// [`redact_url`] expects the whole string to be a URL; this one finds them embedded in
+/// arbitrary prose, which is the shape ffmpeg's diagnostics take (`Error opening input file
+/// rtsp://user:pass@host/path.`). A URL token is taken to end at whitespace, and any
+/// trailing sentence punctuation is left outside the token so it survives into the output.
+///
+/// Applied to every scheme in [`RTSP_SCHEMES`] rather than to `rtsp://` alone, so an
+/// `rtsps://` stream is covered by the same pass.
+fn scrub_urls(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+
+    'outer: loop {
+        // Find the earliest scheme occurrence in what remains.
+        let lowered = rest.to_ascii_lowercase();
+        let Some(start) = RTSP_SCHEMES.iter().filter_map(|s| lowered.find(s)).min() else {
+            break 'outer;
+        };
+        // A URL token runs back to the start of the scheme word and forward to whitespace.
+        let scheme_start = rest[..start]
+            .rfind(char::is_whitespace)
+            .map_or(0, |i| i + rest[i..].chars().next().map_or(1, char::len_utf8));
+        let token_end =
+            rest[scheme_start..].find(char::is_whitespace).map_or(rest.len(), |i| scheme_start + i);
+
+        let token = &rest[scheme_start..token_end];
+        // Trailing sentence punctuation is not part of the URL and must survive.
+        let trimmed = token.trim_end_matches(['.', ',', ';', ':', ')', ']', '\'', '"']);
+        let suffix = &token[trimmed.len()..];
+
+        out.push_str(&rest[..scheme_start]);
+        out.push_str(&redact_url(trimmed));
+        out.push_str(suffix);
+        rest = &rest[token_end..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// Whether a `--camera-source` value names an RTSP stream rather than a local device.
@@ -237,6 +314,13 @@ pub struct RtspIdentity {
 ///
 /// Shared with the draining thread. Every error this module produces attaches a snapshot of
 /// it, because ffmpeg's stderr is the only explanation of an RTSP failure that exists.
+///
+/// **ffmpeg echoes the input URL — credentials and all — in its own diagnostics.** Its
+/// failure line for an unreachable stream is literally
+/// `Error opening input file rtsp://admin:hunter2@host/path.`, so every line is scrubbed on
+/// the way *in*, before it can be logged or attached to an error. Scrubbing at the entry
+/// point rather than at each read means a new consumer of the tail cannot reintroduce the
+/// leak.
 #[derive(Debug, Default)]
 struct StderrTail {
     lines: Mutex<std::collections::VecDeque<String>>,
@@ -244,6 +328,7 @@ struct StderrTail {
 
 impl StderrTail {
     fn push(&self, line: String) {
+        let line = scrub_urls(&line);
         let mut lines = self.lines.lock().expect("stderr tail mutex poisoned");
         if lines.len() == STDERR_TAIL_LINES {
             lines.pop_front();
@@ -314,7 +399,7 @@ impl RtspFrameSource {
             selector,
             options,
             &["-rtsp_transport".to_string(), options.transport.as_str().to_string()],
-            selector.url(),
+            selector.url_with_credentials(),
         )
     }
 
@@ -489,6 +574,9 @@ fn spawn_stderr_drain(stderr: std::process::ChildStderr, tail: Arc<StderrTail>) 
             let Ok(line) = line else {
                 break;
             };
+            // Scrubbed before it is logged, not only before it is stored: ffmpeg echoes
+            // the input URL with its credentials in its own diagnostics.
+            let line = scrub_urls(&line);
             log::warn!("ffmpeg: {line}");
             tail.push(line);
         }
@@ -664,10 +752,41 @@ mod tests {
         assert_eq!(redact_url("not a url"), "not a url");
     }
 
+    /// The structural guarantee: the credential cannot reach output by the ordinary
+    /// formatting routes. A derived `Debug` would print it verbatim, and `{:?}` on any
+    /// struct merely *containing* a selector would leak it transitively — which is why both
+    /// impls are hand-written rather than derived.
+    #[test]
+    fn neither_display_nor_debug_can_leak_the_credential() {
+        let selector = RtspSelector::new("rtsp://admin:hunter2@192.168.100.123/full1080p");
+
+        for rendered in [format!("{selector}"), format!("{selector:?}")] {
+            assert!(!rendered.contains("hunter2"), "credential leaked: {rendered}");
+            assert!(!rendered.contains("admin"), "username leaked: {rendered}");
+            assert!(rendered.contains("***"), "redaction marker missing: {rendered}");
+            assert!(rendered.contains("192.168.100.123"), "host must survive: {rendered}");
+        }
+
+        // Transitively, through a struct that only contains one.
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Wrapper {
+            selector: RtspSelector,
+        }
+        let wrapped = format!("{:?}", Wrapper { selector: selector.clone() });
+        assert!(!wrapped.contains("hunter2"), "credential leaked through a container: {wrapped}");
+
+        // And the one escape hatch still works, for the ffmpeg invocation that needs it.
+        assert!(selector.url_with_credentials().contains("hunter2"));
+    }
+
     #[test]
     fn the_selector_records_a_redacted_url_and_dials_the_full_one() {
         let selector = RtspSelector::new("rtsp://admin:hunter2@192.168.100.123/full1080p");
-        assert_eq!(selector.url(), "rtsp://admin:hunter2@192.168.100.123/full1080p");
+        assert_eq!(
+            selector.url_with_credentials(),
+            "rtsp://admin:hunter2@192.168.100.123/full1080p"
+        );
         assert_eq!(selector.redacted_url(), "rtsp://***@192.168.100.123/full1080p");
     }
 
@@ -812,6 +931,48 @@ mod tests {
         let message = torn.to_string();
         assert!(message.contains("mid-frame"), "{message}");
         assert!(message.contains("discarded"), "{message}");
+    }
+
+    /// ffmpeg echoes the input URL — credentials included — in its own diagnostics. Its
+    /// real failure line for an unreachable stream is reproduced verbatim here; that text
+    /// is drained into the stderr tail and replayed into every error this module produces,
+    /// so it is a genuine leak path and not a hypothetical one.
+    #[test]
+    fn ffmpeg_stderr_lines_have_their_credentials_scrubbed() {
+        let real = "Error opening input file \
+                    rtsp://admin:hunter2@192.0.2.1:554/full1080p.";
+        let scrubbed = scrub_urls(real);
+        assert!(!scrubbed.contains("hunter2"), "{scrubbed}");
+        assert_eq!(
+            scrubbed, "Error opening input file rtsp://***@192.0.2.1:554/full1080p.",
+            "the host, port, path and trailing full stop must all survive"
+        );
+
+        // Mid-sentence, multiple URLs, and rtsps:// all covered by one pass.
+        let two = scrub_urls("tried rtsp://a:b@h1/x and rtsps://c:d@h2/y, both failed");
+        assert_eq!(two, "tried rtsp://***@h1/x and rtsps://***@h2/y, both failed");
+
+        // Scrubbing is idempotent: the drain scrubs before logging and push scrubs again.
+        assert_eq!(scrub_urls(&scrubbed), scrubbed);
+
+        // A line with no URL is untouched, and a URL with no credentials keeps its form.
+        assert_eq!(scrub_urls("Connection timed out"), "Connection timed out");
+        assert_eq!(scrub_urls("open rtsp://10.0.0.5/s ok"), "open rtsp://10.0.0.5/s ok");
+    }
+
+    /// The tail is what every error message quotes, so the scrub has to hold at that layer
+    /// too — not merely in the helper.
+    #[test]
+    fn the_stderr_tail_never_stores_a_credential() {
+        let tail = StderrTail::default();
+        tail.push("Error opening input file rtsp://admin:hunter2@192.0.2.1/x.".to_string());
+        let snapshot = tail.snapshot();
+        assert!(!snapshot.contains("hunter2"), "{snapshot}");
+        assert!(snapshot.contains("***"), "{snapshot}");
+
+        // And through a real error, which is the form a human actually reads.
+        let err = RtspError::Exited { status: "exit status: 1".to_string(), stderr: snapshot };
+        assert!(!err.to_string().contains("hunter2"), "{err}");
     }
 
     #[test]
@@ -968,6 +1129,43 @@ mod tests {
         assert!(
             message.contains("nonexistent") || message.contains("No such file"),
             "ffmpeg's explanation must reach the message: {message}"
+        );
+    }
+
+    /// The end-to-end credential check, against a real ffmpeg failing on a real RTSP URL.
+    ///
+    /// This is the path that actually leaked: ffmpeg's own diagnostic is
+    /// `Error opening input file rtsp://user:pass@host/path.`, and the harness replays its
+    /// stderr into every error. A unit test on the scrubber alone would not have caught it,
+    /// because the leak was in what ffmpeg emits rather than in what the harness formats.
+    #[test]
+    fn a_failing_rtsp_url_never_leaks_its_password_through_ffmpegs_own_output() {
+        if !ffmpeg_present() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        // 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed unroutable, so this fails fast
+        // without depending on the sandbox's network policy.
+        let url = "rtsp://admin:hunter2@192.0.2.1:554/full1080p";
+        let selector = RtspSelector::new(url);
+        let mut source = RtspFrameSource::open(
+            &selector,
+            &RtspOptions { fps: 1, ..options(64, 48, Duration::from_secs(15)) },
+        )
+        .expect("ffmpeg must start; the stream is what fails");
+
+        let err = source.next_buffer().expect_err("an unroutable stream must fail");
+        let message = err.to_string();
+        assert!(!message.contains("hunter2"), "password leaked into the error: {message}");
+        // The scrub must be doing real work here, not passing because ffmpeg happened to
+        // stay quiet: its diagnostic quotes the input URL, so the redaction marker proves
+        // the line was both emitted and scrubbed.
+        assert!(message.contains("***"), "ffmpeg's echoed URL must appear, redacted: {message}");
+        assert!(!format!("{err:?}").contains("hunter2"), "password leaked via Debug: {err:?}");
+        // The redacted host must still be there, or the error stops being diagnosable.
+        assert!(
+            message.contains("192.0.2.1") || message.contains("***"),
+            "the error must still identify the stream: {message}"
         );
     }
 

@@ -303,11 +303,30 @@ sensor ran at; the two differing is expected rather than a fault. A 10 fps senso
 support a `video_fps_p50` claim against the 27 fps bar, and an RTSP run must never be read as
 evidence for or against it.
 
-**Credentials never reach the record.** RTSP URLs routinely embed `user:pass@`, and run
-records are committed and shared. The harness redacts the authority's userinfo to `***`
-everywhere it logs or records the source, and `run_matrix.py` does the same to the requested
-value and to its `--dry-run` output. The two implementations are checked against each other
-in `test_parse_runs.py`.
+**Credentials never reach the record, and cannot be printed by accident.** RTSP URLs
+routinely embed `user:pass@`, and run records are committed and shared. Rather than
+redacting at each output site — a rule that regresses the moment someone adds a log line —
+the guarantee is structural: `RtspSelector`'s `Display` **and** `Debug` are hand-written and
+both redact, so `{}`, `{:?}`, and `{:?}` on any struct merely *containing* one are all safe.
+The raw form is reachable only through `url_with_credentials()`, whose name is the warning
+and which has exactly one caller: the ffmpeg invocation that must dial the stream.
+
+Five paths carried the credential and all five are now closed:
+
+1. the recorded `camera_source` and `camera_device` fields;
+2. the harness's `--validate-args` summary line;
+3. `run_matrix.py`'s `environment.camera_source` and its `--dry-run` output;
+4. **`harness_cmd` in the run record** — the verbatim argv, which contains
+   `--camera-source`, written into every committed record;
+5. **ffmpeg's own stderr**, which is the subtlest: ffmpeg echoes the input URL in its
+   diagnostics (`Error opening input file rtsp://user:pass@host/path.`), and the harness
+   drains that stderr and replays it into every error message. Lines are scrubbed on the way
+   *into* the tail and before being logged, so no consumer can reintroduce the leak.
+
+(4) and (5) were found by audit after the first three were fixed; (5) in particular could
+not have been caught by testing the harness's own formatting, because the leak was in what
+the subprocess emitted. There is a test for each, and the Python and Rust redactions are
+checked against each other in `test_parse_runs.py`.
 
 **The record self-identifies the source kind.** `camera_device.kind` is `local_device` or
 `rtsp`, and `camera_source` is `rtsp:<redacted url>` for an RTSP run, so all three sources
