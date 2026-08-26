@@ -30,6 +30,39 @@ pub enum VideoSourceSelector {
     Rtsp(RtspSelector),
 }
 
+impl VideoSourceSelector {
+    /// Resolves a `--camera-source` value, or `None` for the synthetic pattern.
+    ///
+    /// The pattern comparison is case-insensitive so `Test_Pattern` cannot accidentally be
+    /// taken for a device name and open a camera on a run that meant to use the pattern.
+    /// An `rtsp://` or `rtsps://` value routes to [`crate::rtsp`]; everything else is a
+    /// local device.
+    ///
+    /// Associated with the type rather than left inside [`Args`] because `export-source`
+    /// resolves the same flag: two copies of this rule would eventually disagree about
+    /// which source a value names, and an export that came from a different source than
+    /// the run it is compared against is exactly the defect the exporter exists to avoid.
+    ///
+    /// ```
+    /// # use teleop_test_matrix::cli::VideoSourceSelector;
+    /// assert!(VideoSourceSelector::resolve("test_pattern").is_none());
+    /// assert!(matches!(
+    ///     VideoSourceSelector::resolve("rtsp://10.0.0.5/s"),
+    ///     Some(VideoSourceSelector::Rtsp(_))
+    /// ));
+    /// ```
+    pub fn resolve(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case(TEST_PATTERN_SOURCE) {
+            return None;
+        }
+        if crate::rtsp::is_rtsp_url(value) {
+            return Some(Self::Rtsp(RtspSelector::new(value)));
+        }
+        Some(Self::Device(CameraSelector::parse(value)))
+    }
+}
+
 /// Video codec requested at publish time.
 ///
 /// H.265 is deliberately absent: it is the one codec with an automatic publish-time
@@ -423,14 +456,7 @@ impl Args {
     /// An `rtsp://` or `rtsps://` value routes to [`crate::rtsp`]; everything else is a
     /// local device.
     pub fn video_source_selector(&self) -> Option<VideoSourceSelector> {
-        let value = self.camera_source.trim();
-        if value.eq_ignore_ascii_case(TEST_PATTERN_SOURCE) {
-            return None;
-        }
-        if crate::rtsp::is_rtsp_url(value) {
-            return Some(VideoSourceSelector::Rtsp(RtspSelector::new(value)));
-        }
-        Some(VideoSourceSelector::Device(CameraSelector::parse(value)))
+        VideoSourceSelector::resolve(&self.camera_source)
     }
 
     /// The `--camera-source` value with any RTSP credentials stripped.

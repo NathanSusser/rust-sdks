@@ -8,6 +8,12 @@ publish = false
 name = "teleop-harness"
 path = "src/main.rs"
 
+# Writes the harness's video source to a Y4M file so `webrtc-vmaf` can encode the same
+# content the matrix transports. Joins no room and needs no credentials; see vmaf/README.md.
+[[bin]]
+name = "export-source"
+path = "src/bin/export_source.rs"
+
 [dependencies]
 livekit = { workspace = true, features = ["rustls-tls-native-roots"] }
 livekit-api = { workspace = true }

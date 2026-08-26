@@ -176,7 +176,11 @@ impl FrameSource {
     ///
     /// A capture failure is logged and ends the loop rather than being retried: frames
     /// stop, the stats show it, and the run is not silently padded with stale content.
-    fn next_buffer(&mut self) -> Option<I420Buffer> {
+    ///
+    /// Visible to the crate rather than to this module alone so [`crate::export`] can drive
+    /// the same sources to a file. That sharing is the point: a VMAF comparison against a
+    /// separately-generated pattern would be measuring some other video.
+    pub(crate) fn next_buffer(&mut self) -> Option<I420Buffer> {
         match self {
             Self::Synthetic(s) => Some(s.next_buffer()),
             Self::Camera(c) => match c.next_buffer() {

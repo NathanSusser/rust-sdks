@@ -394,6 +394,86 @@ to sacrifice under pressure but sets no quality floor. So the redesign cannot be
 against this SDK as it stands — it needs an upstream change, a per-codec field trial, or
 an out-of-band encoder configuration path.
 
+> **Superseded in part, 2026-08-26.** The codec-efficiency question is no longer blocked;
+> see the amendment immediately below. The SDK gap described above is still real and still
+> blocks fixed-quality *live* encoding — it is simply no longer the only route to the
+> answer. The reasoning above is kept because it is why we believed this was blocked, and
+> that history is worth having.
+
+---
+
+## Amendment 2026-08-26 — the codec question is unblocked by VMAF, from the other direction
+
+**The efficiency question no longer needs an SDK change.** The amendment above concluded
+that comparing codecs required pinning a quality target, that this SDK exposes none, and
+that T-1 was therefore blocked pending an upstream change. The first two clauses stand.
+The conclusion does not.
+
+LiveKit maintains [`webrtc-vmaf`](https://github.com/livekit/webrtc-vmaf), which inverts
+the experiment the other way: **fix the bitrate, encode one source with each codec, and
+measure the resulting quality as VMAF.** That is the same question — "which codec gets more
+picture per bit" — approached from the axis the SDK does not control. Because the encoding
+happens offline in ffmpeg rather than in a live session, **no quality-target API is
+required at all**, and the SDK gap stops being on the critical path.
+
+Concretely, it turns the retracted claim into a measurable one: instead of "AV1 used fewer
+bits" (at an unknown and, as it turned out, much worse quality), the claim becomes "at
+2 Mbps, AV1 scores VMAF 92 where H.264 scores 78" — a fixed point on both axes.
+
+### What was built
+
+Glue only, in `vmaf/`. `webrtc-vmaf` is **not vendored or forked**: it stays a separate
+clone, because a locally forked measurement instrument produces numbers nobody else can
+reproduce.
+
+- **`export-source`**, a second binary in this crate, writes a video source to Y4M. It
+  drives the harness's own `SyntheticFrameSource` rather than reimplementing the pattern —
+  a second generator would drift from the first and nothing in either output would show
+  it. Camera and RTSP sources reuse `CameraFrameSource`/`RtspFrameSource` for the same
+  reason. Y4M rather than raw `.yuv` because it is self-describing: a geometry mismatch
+  fails at `ffprobe` instead of silently scoring a sheared image.
+- **`vmaf/run_vmaf.py`** sweeps bitrate x codec through the user's clone and tabulates the
+  result. Bitrates top out at the §8.0b 5 Mbps ceiling.
+
+### What this does not change
+
+- **T-1 stays as amended above.** It still encodes to a bitrate target, its bitrate column
+  still may not be compared across codecs, and `qp_avg` still sits adjacent to it. VMAF
+  does not repair T-1; it answers the codec question elsewhere.
+- **VMAF and harness results must never be pooled.** They come from different encoders
+  (ffmpeg with WebRTC-like settings, versus libwebrtc's possibly-hardware encoders) over
+  different paths (no network, versus a real one). VMAF measures offline encode quality
+  and says nothing about transport, latency, jitter or the SFU. See `vmaf/README.md`.
+- **Fixed-quality live encoding is still blocked** on SDK-FINDINGS SDK-2, for anyone who
+  needs the encoder itself to hold a quality target during a session.
+
+### A measured limitation, recorded because it will otherwise be rediscovered
+
+**The synthetic pattern saturates VMAF at low bitrates.** Measured here with `libx264`
+baseline against an exported pattern:
+
+| resolution | 500 kbps | 1000 kbps | 2000 kbps | 5000 kbps |
+|---|---|---|---|---|
+| 640x360 | 99.95 | — | — | — |
+| 1920x1080 | — | 66.38 | 98.66 | 99.95 |
+
+The pattern is deliberately simple because the harness needs determinism, not realism. At
+360p it is near-losslessly encoded by 500 kbps, and even at 1080p it saturates by ~2 Mbps —
+so most of the PRD-relevant range would produce a table of 99.9s that reads exactly like a
+real result. Two consequences, both enforced in the tooling rather than left to memory:
+
+- VMAF sweeps run at **1080p**, and the low rungs are the informative ones.
+- `run_vmaf.py` emits a **saturation warning** when most cells clear 98 VMAF. It is a
+  warning about measurement validity, not a threshold on the measurement — consistent with
+  the no-thresholds-in-tooling rule, no scoring is derived from it.
+
+For a codec comparison meant to inform a deployment decision, a **camera export** or a
+standard xiph.org clip is the better input: real content has the complexity the pattern
+lacks. A camera export carries its own caveat — the Tier 2 Muscat delivers H.264, so the
+export is a re-encode of already-compressed source and its absolute scores are depressed by
+generation loss, though the cross-codec ranking should survive. The synthetic pattern's
+value is traceability: it is exactly what the harness sends.
+
 ---
 
 ## 1. Metric → API mapping
