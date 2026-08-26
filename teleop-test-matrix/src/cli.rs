@@ -7,6 +7,7 @@ use clap::{Parser, ValueEnum};
 use livekit::options::{VideoCodec, VideoEncoderBackend};
 
 use crate::camera::CameraSelector;
+use crate::rtsp::{RtspSelector, RtspTransport};
 
 /// The `--camera-source` value selecting the deterministic generated pattern.
 ///
@@ -14,6 +15,20 @@ use crate::camera::CameraSelector;
 /// value already written into every existing run record, so a record produced before the
 /// camera path existed reads identically to one produced after it.
 pub const TEST_PATTERN_SOURCE: &str = "test_pattern";
+
+/// What a `--camera-source` value resolved to.
+///
+/// One flag carries all three sources rather than three competing flags, so that
+/// `run_matrix.py` keeps emitting exactly one and `environment.camera_source` keeps naming
+/// exactly what ran. The variant is decided by the value's shape: a URL scheme routes to
+/// RTSP, anything else to a local device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoSourceSelector {
+    /// A local capture device, by enumeration index or name.
+    Device(CameraSelector),
+    /// An IP camera reached over RTSP.
+    Rtsp(RtspSelector),
+}
 
 /// Video codec requested at publish time.
 ///
@@ -250,10 +265,11 @@ pub struct Args {
     #[arg(long, default_value_t = 30)]
     pub fps: u32,
 
-    /// Video source: `test_pattern` (the matrix default), or a capture device given as an
-    /// enumeration index or a substring of its name.
+    /// Video source: `test_pattern` (the matrix default), a local capture device given as
+    /// an enumeration index or a substring of its name, or an `rtsp://` / `rtsps://` URL
+    /// for an IP camera.
     ///
-    /// Camera is an opt-in realism spot-check and is never a matrix default or a swept
+    /// Every camera is an opt-in realism spot-check and never a matrix default or a swept
     /// axis: a lens makes bitrate depend on scene content, lighting and framing, which
     /// breaks the cross-host comparability every cell rests on. A camera that cannot be
     /// opened fails the run rather than falling back — a run labelled `camera` that
@@ -261,6 +277,22 @@ pub struct Args {
     /// detected afterwards.
     #[arg(long = "camera-source", default_value = TEST_PATTERN_SOURCE)]
     pub camera_source: String,
+
+    /// RTSP media transport, used only when `--camera-source` is an RTSP URL.
+    ///
+    /// TCP by default: UDP RTSP degrades by silently dropping media on a filtered or
+    /// congested path, which reaches the record as a camera producing missing frames rather
+    /// than as the network problem it is.
+    #[arg(long = "rtsp-transport", value_enum, default_value_t = RtspTransport::Tcp)]
+    pub rtsp_transport: RtspTransport,
+
+    /// Seconds a single RTSP frame read may take before the stream counts as stalled.
+    ///
+    /// A wedged RTSP session leaves ffmpeg alive with its pipe open and no bytes flowing,
+    /// which is indistinguishable from a slow stream without a deadline. Sourced from
+    /// `matrix.yaml` `meta.parameters.rtsp_stall_timeout_s`.
+    #[arg(long = "rtsp-stall-timeout-s", default_value_t = crate::rtsp::DEFAULT_STALL_TIMEOUT_S)]
+    pub rtsp_stall_timeout_s: u64,
 
     /// Encoder bitrate ceiling in bps.
     #[arg(long = "max-bitrate", default_value_t = 5_000_000)]
@@ -384,16 +416,35 @@ impl Args {
         self.probe_lifetime_ms.saturating_mul(1_000)
     }
 
-    /// The capture device this run was asked for, or `None` for the synthetic pattern.
+    /// The video source this run was asked for, or `None` for the synthetic pattern.
     ///
-    /// The comparison is case-insensitive so `Test_Pattern` cannot accidentally be taken
-    /// for a device name and open a camera on a run that meant to use the pattern.
-    pub fn camera_selector(&self) -> Option<CameraSelector> {
+    /// The pattern comparison is case-insensitive so `Test_Pattern` cannot accidentally be
+    /// taken for a device name and open a camera on a run that meant to use the pattern.
+    /// An `rtsp://` or `rtsps://` value routes to [`crate::rtsp`]; everything else is a
+    /// local device.
+    pub fn video_source_selector(&self) -> Option<VideoSourceSelector> {
         let value = self.camera_source.trim();
         if value.eq_ignore_ascii_case(TEST_PATTERN_SOURCE) {
             return None;
         }
-        Some(CameraSelector::parse(value))
+        if crate::rtsp::is_rtsp_url(value) {
+            return Some(VideoSourceSelector::Rtsp(RtspSelector::new(value)));
+        }
+        Some(VideoSourceSelector::Device(CameraSelector::parse(value)))
+    }
+
+    /// The `--camera-source` value with any RTSP credentials stripped.
+    ///
+    /// Everything that logs or records the source goes through this: an RTSP URL commonly
+    /// embeds `user:pass@`, and both the run record and the runner's log are shared. A
+    /// non-URL value is returned unchanged.
+    pub fn redacted_camera_source(&self) -> String {
+        crate::rtsp::redact_url(&self.camera_source)
+    }
+
+    /// How long a single RTSP frame read may take before the stream counts as stalled.
+    pub fn rtsp_stall_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.rtsp_stall_timeout_s.max(1))
     }
 }
 
@@ -470,7 +521,7 @@ mod tests {
         assert_eq!(args.codec, Codec::Av1);
         // The matrix always runs the pattern. A camera would make bitrate depend on
         // scene content and break comparability across hosts.
-        assert_eq!(args.camera_selector(), None);
+        assert_eq!(args.video_source_selector(), None);
         assert_eq!(args.buffering_mode, BufferingMode::ZeroJitter);
         assert_eq!(args.control_transport, ControlTransport::DataTrackBuf1);
         assert!(args.attach_timestamp && args.attach_frame_id && args.audio);
@@ -579,6 +630,7 @@ mod tests {
             ],
             Encoder::as_str,
         );
+        assert_round_trip(&[RtspTransport::Tcp, RtspTransport::Udp], RtspTransport::as_str);
     }
 
     #[test]
@@ -667,39 +719,118 @@ mod tests {
         ])
         .expect("parse");
         assert_eq!(args.camera_source, TEST_PATTERN_SOURCE);
-        assert_eq!(args.camera_selector(), None);
+        assert_eq!(args.video_source_selector(), None);
+    }
+
+    /// Parses a `--camera-source` value through the full CLI, as the matrix would.
+    fn selector_for(value: &str) -> Option<VideoSourceSelector> {
+        Args::try_parse_from([
+            "teleop-harness",
+            "--room-name",
+            "r",
+            "--duration-s",
+            "10",
+            "--snapshots-out",
+            "/tmp/c.jsonl",
+            "--camera-source",
+            value,
+        ])
+        .expect("parse")
+        .video_source_selector()
     }
 
     /// A camera is addressable by index or by name. The name is what survives moving to
     /// another host, where the same index is a different lens.
     #[test]
     fn a_camera_source_resolves_to_a_selector() {
-        fn selector_for(value: &str) -> Option<CameraSelector> {
-            Args::try_parse_from([
-                "teleop-harness",
-                "--room-name",
-                "r",
-                "--duration-s",
-                "10",
-                "--snapshots-out",
-                "/tmp/c.jsonl",
-                "--camera-source",
-                value,
-            ])
-            .expect("parse")
-            .camera_selector()
-        }
-
-        assert_eq!(selector_for("0"), Some(CameraSelector::Index(0)));
+        assert_eq!(selector_for("0"), Some(VideoSourceSelector::Device(CameraSelector::Index(0))));
         assert_eq!(
             selector_for("FaceTime HD Camera"),
-            Some(CameraSelector::Name("FaceTime HD Camera".to_string()))
+            Some(VideoSourceSelector::Device(CameraSelector::Name(
+                "FaceTime HD Camera".to_string()
+            )))
         );
         // Surrounding whitespace comes from shell quoting, not from an operator naming a
         // device with a leading space.
         assert_eq!(selector_for("  test_pattern  "), None);
         // Case must not be the difference between the pattern and a device open.
         assert_eq!(selector_for("TEST_PATTERN"), None);
+    }
+
+    /// One flag serves all three sources, so the URL scheme is what routes an IP camera
+    /// away from local device enumeration — `nokhwa` cannot open a network stream and would
+    /// report the URL as a missing device.
+    #[test]
+    fn an_rtsp_url_routes_to_the_rtsp_source() {
+        let url = "rtsp://192.168.100.123/full1080p";
+        assert_eq!(selector_for(url), Some(VideoSourceSelector::Rtsp(RtspSelector::new(url))));
+        assert_eq!(
+            selector_for("rtsps://cam.local/4k"),
+            Some(VideoSourceSelector::Rtsp(RtspSelector::new("rtsps://cam.local/4k")))
+        );
+        // Shell quoting again; the URL itself is left byte-for-byte, since RTSP paths are
+        // case-sensitive on many cameras.
+        assert_eq!(
+            selector_for("  rtsp://192.168.100.123/Full1080p  "),
+            Some(VideoSourceSelector::Rtsp(RtspSelector::new("rtsp://192.168.100.123/Full1080p")))
+        );
+        // A local device whose name merely mentions a scheme is still a device.
+        assert!(matches!(selector_for("rtsp camera"), Some(VideoSourceSelector::Device(_))));
+    }
+
+    /// TCP transport and a bounded read are what turn a wedged RTSP session into an error
+    /// rather than a run that hangs to its duration with nothing in the log.
+    #[test]
+    fn rtsp_transport_and_stall_timeout_have_safe_defaults() {
+        let args = Args::try_parse_from([
+            "teleop-harness",
+            "--room-name",
+            "r",
+            "--duration-s",
+            "10",
+            "--snapshots-out",
+            "/tmp/c.jsonl",
+            "--camera-source",
+            "rtsp://192.168.100.123/full1080p",
+        ])
+        .expect("parse");
+        assert_eq!(args.rtsp_transport, RtspTransport::Tcp);
+        assert_eq!(args.rtsp_stall_timeout(), std::time::Duration::from_secs(15));
+
+        let explicit = Args::try_parse_from([
+            "teleop-harness",
+            "--room-name",
+            "r",
+            "--duration-s",
+            "10",
+            "--snapshots-out",
+            "/tmp/c.jsonl",
+            "--camera-source",
+            "rtsp://192.168.100.123/4k",
+            "--rtsp-transport",
+            "udp",
+            "--rtsp-stall-timeout-s",
+            "30",
+        ])
+        .expect("parse");
+        assert_eq!(explicit.rtsp_transport, RtspTransport::Udp);
+        assert_eq!(explicit.rtsp_stall_timeout(), std::time::Duration::from_secs(30));
+
+        // A zero timeout would make every read stall instantly; it degrades to one second
+        // rather than to an unbounded wait.
+        let zero = Args::try_parse_from([
+            "teleop-harness",
+            "--room-name",
+            "r",
+            "--duration-s",
+            "10",
+            "--snapshots-out",
+            "/tmp/c.jsonl",
+            "--rtsp-stall-timeout-s",
+            "0",
+        ])
+        .expect("parse");
+        assert_eq!(zero.rtsp_stall_timeout(), std::time::Duration::from_secs(1));
     }
 
     /// Only `zero_jitter` touches the process-global field trial. Getting this wrong

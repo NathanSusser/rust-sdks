@@ -193,19 +193,20 @@
           }
         },
 
-        "camera_source": { "type": "string", "description": "Resolved video source: 'test_pattern' (the default for every matrix cell) or the device name the harness actually opened. Overwritten from the run_metadata record, so it is what ran rather than what was requested. A never_pool_across dimension: a lens makes bitrate depend on scene content, lighting and framing, so camera and pattern runs are different experiments and are never aggregated." },
+        "camera_source": { "type": "string", "description": "Resolved video source: 'test_pattern' (the default for every matrix cell), the local device name the harness actually opened, or 'rtsp:<url>' with credentials stripped for an IP camera. Overwritten from the run_metadata record, so it is what ran rather than what was requested. A never_pool_across dimension: a lens makes bitrate depend on scene content, lighting and framing, so camera and pattern runs are different experiments and are never aggregated. The three source kinds are distinguishable from this string alone, which is what that grouping requires." },
         "camera_device": {
           "type": ["object", "null"],
-          "description": "The capture device a camera run resolved to, and the format it negotiated. Null for 'test_pattern'. The negotiated geometry is recorded because a device is free to downgrade a request, and a run that got 720p15 instead of 1080p30 presented the encoder with a different problem that nothing downstream could otherwise detect.",
+          "description": "The capture device or RTSP stream a camera run resolved to, and the format it negotiated. Null for 'test_pattern'. The negotiated geometry is recorded because a source is free to downgrade a request, and a run that got 720p15 instead of 1080p30 presented the encoder with a different problem that nothing downstream could otherwise detect. One shape serves both camera kinds; 'kind' says which.",
           "properties": {
-            "requested":          { "type": "string", "description": "The --camera-source value as given." },
-            "device_name":        { "type": "string", "description": "Human-readable device name. The portable identifier of the two." },
-            "device_index":       { "type": "string", "description": "Enumeration-order index. Positional, so it names a different camera on a different host." },
-            "device_description": { "type": "string" },
+            "kind":               { "type": "string", "enum": ["local_device", "rtsp"], "description": "Which capture path produced the frames." },
+            "requested":          { "type": "string", "description": "The --camera-source value as given, with any RTSP credentials stripped -- this record is committed and shared, and RTSP URLs commonly embed user:pass." },
+            "device_name":        { "type": "string", "description": "Human-readable device name, or the redacted RTSP URL. The portable identifier." },
+            "device_index":       { "type": "string", "description": "Enumeration-order index for a local device, positional so it names a different camera on a different host. For RTSP, the media transport ('tcp' or 'udp') -- the same host-local detail that changes what one URL delivers." },
+            "device_description": { "type": "string", "description": "Backend-supplied extra identification, or the redacted RTSP URL." },
             "negotiated_width":   { "type": "integer" },
             "negotiated_height":  { "type": "integer" },
-            "negotiated_fps":     { "type": "integer" },
-            "negotiated_format":  { "type": "string", "description": "e.g. 'YUYV' or 'MJPEG'. MJPEG adds a decode step YUYV does not." }
+            "negotiated_fps":     { "type": "integer", "description": "For RTSP this is the rate the decoder was told to emit, not the sensor's rate: a slower camera has its frames duplicated to reach it. The Tier 2 Muscat runs ~10 fps at 1080p against a 30 fps request, so the two differing is expected." },
+            "negotiated_format":  { "type": "string", "description": "e.g. 'YUYV', 'MJPEG' or 'yuv420p'. MJPEG adds a decode step YUYV does not." }
           }
         },
         "host_id":       { "type": "string", "description": "Hostname of the measuring host." },

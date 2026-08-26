@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::audio::AudioToneLoop;
 use crate::camera::CameraFrameSource;
-use crate::cli::Args;
+use crate::cli::{Args, VideoSourceSelector};
 use crate::clock::RunClock;
 use crate::control::payload::{ControlSample, ProbeEcho};
 use crate::control::publisher::{ControlPublisher, PublisherCounters};
@@ -62,6 +62,12 @@ pub enum RunError {
     /// actually carried the pattern would be pooled with pattern runs and there would be
     /// nothing in the record to catch it.
     Camera(crate::camera::CameraError),
+    /// An RTSP stream was requested and could not be started.
+    ///
+    /// Fatal for the same reason as [`Self::Camera`], and kept a separate variant because
+    /// the two fail for entirely unrelated reasons — device enumeration versus a network
+    /// path, credentials and an external decoder.
+    Rtsp(crate::rtsp::RtspError),
 }
 
 impl std::fmt::Display for RunError {
@@ -74,6 +80,7 @@ impl std::fmt::Display for RunError {
             }
             Self::SessionLost(reason) => write!(f, "session lost mid-run: {reason}"),
             Self::Camera(e) => write!(f, "{e}"),
+            Self::Rtsp(e) => write!(f, "{e}"),
         }
     }
 }
@@ -108,6 +115,12 @@ impl From<crate::writer::WriteError> for RunError {
 impl From<crate::camera::CameraError> for RunError {
     fn from(e: crate::camera::CameraError) -> Self {
         Self::Camera(e)
+    }
+}
+
+impl From<crate::rtsp::RtspError> for RunError {
+    fn from(e: crate::rtsp::RtspError) -> Self {
+        Self::Rtsp(e)
     }
 }
 
@@ -160,49 +173,90 @@ impl Default for SharedState {
     }
 }
 
-/// Builds the run's frame source, opening a capture device when one was requested.
+/// Builds the run's frame source, opening a camera when one was requested.
 ///
-/// Enumeration and device open are synchronous and can block for hundreds of milliseconds
-/// while a backend powers a sensor up, so they run on the blocking pool rather than
-/// stalling the runtime the rest of the run shares.
+/// Enumeration, device open and process spawn are all synchronous and can block for
+/// hundreds of milliseconds while a backend powers a sensor up or ffmpeg dials an RTSP
+/// session, so they run on the blocking pool rather than stalling the runtime the rest of
+/// the run shares.
 async fn open_frame_source(args: &Args) -> Result<FrameSource, RunError> {
-    let Some(selector) = args.camera_selector() else {
+    let Some(selector) = args.video_source_selector() else {
         return Ok(FrameSource::Synthetic(SyntheticFrameSource::new(args.width, args.height)));
     };
 
-    let (width, height, fps) = (args.width, args.height, args.fps);
-    let opened =
-        tokio::task::spawn_blocking(move || CameraFrameSource::open(&selector, width, height, fps))
-            .await;
-
-    let camera = match opened {
-        Ok(result) => result?,
-        // The blocking pool only drops a task when it panics or the runtime is shutting
-        // down. Either way no camera was opened, and continuing on the pattern would
-        // mislabel the run.
-        Err(e) => {
-            return Err(RunError::Camera(crate::camera::CameraError::Open {
-                device: args.camera_source.clone(),
-                source: format!("capture task did not complete: {e}"),
-            }))
-        }
+    let source = match selector {
+        VideoSourceSelector::Device(selector) => open_local_camera(args, selector).await?,
+        VideoSourceSelector::Rtsp(selector) => open_rtsp_stream(args, selector).await?,
     };
 
-    if camera.width() != args.width || camera.height() != args.height {
-        // Not fatal: the device's geometry is what the encoder sees and what the record
+    if source.width() != args.width || source.height() != args.height {
+        // Not fatal: the source's geometry is what the encoder sees and what the record
         // carries. Worth a warning because a downgraded capture changes the encoding
         // problem, and a bitrate from it is not comparable to one taken at the request.
         log::warn!(
-            "camera negotiated {}x{}, not the requested {}x{}; the run record carries the \
+            "video source negotiated {}x{}, not the requested {}x{}; the run record carries the \
              negotiated geometry",
-            camera.width(),
-            camera.height(),
+            source.width(),
+            source.height(),
             args.width,
             args.height
         );
     }
 
-    Ok(FrameSource::Camera(Box::new(camera)))
+    Ok(source)
+}
+
+/// Opens a local capture device on the blocking pool.
+async fn open_local_camera(
+    args: &Args,
+    selector: crate::camera::CameraSelector,
+) -> Result<FrameSource, RunError> {
+    let (width, height, fps) = (args.width, args.height, args.fps);
+    let opened =
+        tokio::task::spawn_blocking(move || CameraFrameSource::open(&selector, width, height, fps))
+            .await;
+
+    match opened {
+        Ok(result) => Ok(FrameSource::Camera(Box::new(result?))),
+        // The blocking pool only drops a task when it panics or the runtime is shutting
+        // down. Either way no camera was opened, and continuing on the pattern would
+        // mislabel the run.
+        Err(e) => Err(RunError::Camera(crate::camera::CameraError::Open {
+            device: args.redacted_camera_source(),
+            source: format!("capture task did not complete: {e}"),
+        })),
+    }
+}
+
+/// Starts the RTSP decoder subprocess on the blocking pool.
+///
+/// Note that this returning `Ok` only means ffmpeg started: an unreachable host, a rejected
+/// password or a wrong stream path all surface on the first frame read instead, carrying
+/// ffmpeg's own diagnosis. That is deliberate — waiting here for a first frame would put a
+/// second, separate timeout in front of the one the capture loop already applies.
+async fn open_rtsp_stream(
+    args: &Args,
+    selector: crate::rtsp::RtspSelector,
+) -> Result<FrameSource, RunError> {
+    let options = crate::rtsp::RtspOptions {
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        transport: args.rtsp_transport,
+        stall_timeout: args.rtsp_stall_timeout(),
+    };
+
+    let opened = tokio::task::spawn_blocking(move || {
+        crate::rtsp::RtspFrameSource::open(&selector, &options)
+    })
+    .await;
+
+    match opened {
+        Ok(result) => Ok(FrameSource::Rtsp(Box::new(result?))),
+        Err(e) => Err(RunError::Rtsp(crate::rtsp::RtspError::Pipe(format!(
+            "rtsp open task did not complete: {e}"
+        )))),
+    }
 }
 
 /// Runs one cell of the matrix end to end.
@@ -218,7 +272,7 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
         args.buffering_mode.as_str(),
         args.codec.as_str(),
         args.encoder.as_str(),
-        args.camera_source,
+        args.redacted_camera_source(),
         args.width,
         args.height,
         args.fps
@@ -392,19 +446,16 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
 /// Resolved up front so a run that fails partway through is still attributable to the
 /// source it actually ran, rather than losing the attribution along with the source.
 struct VideoSourceRecord {
-    /// `test_pattern`, or the resolved device name.
+    /// `test_pattern`, the resolved device name, or `rtsp:<redacted url>`.
     label: String,
-    /// The device and its negotiated format, absent for the synthetic pattern.
+    /// The device or stream and its negotiated format, absent for the synthetic pattern.
     device: Option<crate::snapshot::CameraDevice>,
 }
 
 impl VideoSourceRecord {
     /// Captures the source's identity before ownership moves to the capture loop.
     fn of(source: &FrameSource) -> Self {
-        Self {
-            label: source.source_label(),
-            device: source.camera_identity().map(crate::snapshot::CameraDevice::from),
-        }
+        Self { label: source.source_label(), device: source.camera_device() }
     }
 }
 

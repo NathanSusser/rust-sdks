@@ -372,40 +372,79 @@ impl AudioInbound {
     }
 }
 
-/// The capture device a camera run resolved to, and the format it negotiated.
+/// The capture device or stream a camera run resolved to, and the format it negotiated.
 ///
-/// Recorded separately from the requested geometry because a device is free to downgrade:
+/// Recorded separately from the requested geometry because a source is free to downgrade:
 /// a request for 1920x1080 served as 1280x720 is a different encoding problem, and nothing
 /// downstream can detect that from the requested values alone.
+///
+/// One shape serves both a local device and an RTSP stream. They are the same claim about a
+/// run — that the pixels came from a lens rather than the generator — and `kind`
+/// distinguishes them without giving the analysis layer two record shapes for one
+/// `never_pool_across` dimension.
 #[derive(Debug, Clone, Serialize)]
 pub struct CameraDevice {
-    /// The `--camera-source` value as given on the command line.
+    /// Which capture path produced the frames: `local_device` or `rtsp`.
+    pub kind: &'static str,
+    /// The `--camera-source` value as given on the command line, with any RTSP credentials
+    /// stripped — the record is committed and shared, and RTSP URLs commonly embed them.
     pub requested: String,
-    /// Human-readable device name. The portable identifier of the two.
+    /// Human-readable device name, or the redacted stream URL. The portable identifier.
     pub device_name: String,
     /// Device index in enumeration order. Positional, so it names a different camera on a
-    /// different host — recorded beside the name rather than instead of it.
+    /// different host — recorded beside the name rather than instead of it. For RTSP this
+    /// is the media transport (`tcp` or `udp`), which plays the same role: it is the
+    /// host-local detail that changes what the same URL delivers.
     pub device_index: String,
-    /// Backend-supplied extra identification, empty when the backend supplies none.
+    /// Backend-supplied extra identification, empty when the backend supplies none. For
+    /// RTSP, the redacted stream URL.
     pub device_description: String,
-    /// Capture width the device negotiated, which may differ from the request.
+    /// Capture width the source negotiated, which may differ from the request.
     pub negotiated_width: u32,
-    /// Capture height the device negotiated.
+    /// Capture height the source negotiated.
     pub negotiated_height: u32,
-    /// Capture frame rate the device negotiated.
+    /// Capture frame rate the source negotiated.
+    ///
+    /// For RTSP this is the rate the decoder was told to emit, not the rate the sensor ran
+    /// at: a camera slower than the request has its frames duplicated to reach it. The
+    /// Tier 2 Muscat runs ~10 fps at 1080p against a 30 fps matrix, so the two differing is
+    /// expected rather than a fault.
     pub negotiated_fps: u32,
-    /// Negotiated pixel format, e.g. `YUYV` or `MJPEG`. MJPEG adds a decode step that
-    /// YUYV does not, which shows up in the capture-to-publish interval.
+    /// Negotiated pixel format, e.g. `YUYV`, `MJPEG` or `yuv420p`. MJPEG adds a decode step
+    /// that YUYV does not, which shows up in the capture-to-publish interval.
     pub negotiated_format: String,
 }
+
+/// `kind` value for a run that opened a local USB or platform capture device.
+pub const CAMERA_KIND_LOCAL_DEVICE: &str = "local_device";
+
+/// `kind` value for a run that ingested an IP camera over RTSP.
+pub const CAMERA_KIND_RTSP: &str = "rtsp";
 
 impl From<&crate::camera::CameraIdentity> for CameraDevice {
     fn from(identity: &crate::camera::CameraIdentity) -> Self {
         Self {
+            kind: CAMERA_KIND_LOCAL_DEVICE,
             requested: identity.requested.clone(),
             device_name: identity.device_name.clone(),
             device_index: identity.device_index.clone(),
             device_description: identity.device_description.clone(),
+            negotiated_width: identity.negotiated_width,
+            negotiated_height: identity.negotiated_height,
+            negotiated_fps: identity.negotiated_fps,
+            negotiated_format: identity.negotiated_format.clone(),
+        }
+    }
+}
+
+impl From<&crate::rtsp::RtspIdentity> for CameraDevice {
+    fn from(identity: &crate::rtsp::RtspIdentity) -> Self {
+        Self {
+            kind: CAMERA_KIND_RTSP,
+            requested: identity.requested.clone(),
+            device_name: identity.url.clone(),
+            device_index: identity.transport.as_str().to_string(),
+            device_description: identity.url.clone(),
             negotiated_width: identity.negotiated_width,
             negotiated_height: identity.negotiated_height,
             negotiated_fps: identity.negotiated_fps,

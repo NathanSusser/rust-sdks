@@ -387,6 +387,71 @@ achievable fps ceiling a Jetson Orin or an NVENC-class GPU would produce.
   comparison — `matrix.yaml`'s `never_pool_across` includes `encoder_tier`
   for exactly this reason.
 
+### Video source: local device or IP camera
+
+`--camera-source` takes three kinds of value, and every one of them is opt-in.
+The matrix default is `test_pattern` and stays that way; see
+`docs/MEASUREMENT-DESIGN.md` for why a lens is never a cell default.
+
+| Value | Source |
+|---|---|
+| `test_pattern` | The generated pattern. The default for every matrix cell. |
+| `0`, `FaceTime HD Camera` | A local capture device, by enumeration index or by a case-insensitive substring of its name. |
+| `rtsp://…`, `rtsps://…` | An IP camera, decoded by an `ffmpeg` subprocess. |
+
+**The Tier 2 camera is a Pegatron "Muscat" IP camera on Ethernet.** Its working
+URLs are:
+
+```
+rtsp://192.168.100.123/full1080p    # H.264 1920x1080, ~10 fps, + AAC audio
+rtsp://192.168.100.123/4k
+```
+
+A minimal run against it:
+
+```bash
+./target/release/teleop-harness \
+  --url ws://127.0.0.1:7880 --room-name rtsp-check --duration-s 60 \
+  --codec h264 --width 1920 --height 1080 --fps 30 \
+  --attach-timestamp --attach-frame-id \
+  --camera-source rtsp://192.168.100.123/full1080p \
+  --snapshots-out snapshots/rtsp-check.jsonl
+```
+
+Or through the runner, which passes it to every run in the sweep:
+
+```bash
+python3 run_matrix.py --dry-run --tier0 \
+  --camera-source rtsp://192.168.100.123/full1080p
+```
+
+Notes for whoever runs this first — the code was written without a reachable
+camera, so these are the things to check before suspecting the harness:
+
+- **`ffmpeg` must be on `PATH`.** It is the decoder; there is no built-in one and
+  no fallback to the pattern. `ffmpeg -version` first.
+- **The camera needs a static IP on its subnet**, which needs admin rights on the
+  measuring host. Confirm with
+  `ffplay -rtsp_transport tcp rtsp://192.168.100.123/full1080p` before involving
+  the harness at all — if ffplay cannot open it, neither can this.
+- **Audio from the camera is discarded** (`-an`). The harness publishes its own
+  synthetic tone; the AAC track is irrelevant.
+- **TCP transport is the default** (`--rtsp-transport tcp|udp`). Only reach for
+  UDP if you have a reason: UDP RTSP drops media silently on a filtered path and
+  that reads as a broken camera rather than a network problem.
+- **Every frame read is bounded** by `--rtsp-stall-timeout-s` (15 s, from
+  `matrix.yaml` `meta.parameters.rtsp_stall_timeout_s`). A stall, a truncated
+  frame and a clean end of stream are three distinct errors, and each one carries
+  ffmpeg's own last stderr lines — that output is the diagnosis, so read it
+  rather than the harness's wrapper text.
+- **Credentials in the URL are stripped** from logs and from the run record. Both
+  `rtsp://user:pass@host/path` forms work; the record shows `rtsp://***@host/path`.
+- **The Muscat runs ~10 fps at 1080p while the matrix targets 30 fps**, so ffmpeg
+  duplicates frames to reach the requested rate and `negotiated_fps` records what
+  the encoder was fed, not what the sensor produced. RTSP runs are realism
+  spot-checks; they are **not matrix cells** and must not be read as evidence
+  about the 27 fps bar.
+
 ---
 
 ## Regenerating fixtures / running the analysis layer standalone

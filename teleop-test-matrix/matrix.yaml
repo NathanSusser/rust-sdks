@@ -86,6 +86,20 @@ meta:
       provenance: harness-derived
       design: "§1"
       note: "RtcStats poll cadence. T-2 overrides video polling to 10 Hz."
+    rtsp_stall_timeout_s:
+      value: 15
+      provenance: harness-derived
+      design: "§6 note (f)"
+      note: >
+        How long a single frame read from an RTSP source may take before the run
+        fails with a stall error, passed as --rtsp-stall-timeout-s. RTSP-only, so
+        it affects no matrix cell: an IP camera is an opt-in realism spot-check
+        exactly as a local camera is. A wedged RTSP session leaves ffmpeg alive
+        holding its pipe open with no bytes flowing, which is indistinguishable
+        from a merely slow stream; without this bound the capture loop blocks for
+        the rest of the run and the failure appears nowhere. 15 s covers a camera
+        reconnecting its session or emitting a slow keyframe while still failing
+        inside the cell rather than hanging the sweep.
     theta_owd_ring_samples:
       value: 64
       provenance: harness-derived

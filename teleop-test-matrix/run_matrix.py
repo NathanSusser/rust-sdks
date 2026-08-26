@@ -571,6 +571,18 @@ def harness_command(matrix: dict, run: dict, args) -> list[str]:
         "--camera-source", args.camera_source,
     ]
 
+    # RTSP-only flags, emitted only for an rtsp:// source so a pattern or local-device
+    # run's invocation is byte-identical to what it was before RTSP existed.
+    if args.camera_source.lower().startswith(("rtsp://", "rtsps://")):
+        cmd += [
+            "--rtsp-transport", args.rtsp_transport,
+            # A wedged RTSP session leaves ffmpeg alive with its pipe open and no bytes
+            # flowing; without this bound the run hangs to its full duration with nothing
+            # in the log to say why.
+            "--rtsp-stall-timeout-s",
+            str(params["rtsp_stall_timeout_s"]["value"]),
+        ]
+
     # No --playout-delay-* flags: the room-level hint modes are retired from
     # buffering_mode (matrix.yaml buffering_mode.retired_values). zero_jitter is
     # applied by the harness via enable_zero_playout_delay before runtime init,
@@ -600,6 +612,30 @@ def git_sha() -> str:
                               check=True).stdout.strip()
     except Exception:
         return "unknown"
+
+
+def redact_camera_source(value: str) -> str:
+    """Strip any user:pass@ from an RTSP --camera-source before it is recorded.
+
+    Run records are committed and shared and RTSP URLs commonly embed credentials.
+    Mirrors rtsp::redact_url in the harness: only the authority is touched, so an @
+    later in a stream path is not mistaken for a credential delimiter. A value that
+    is not a URL comes back unchanged, so this is safe to apply unconditionally.
+    """
+    marker = value.find("://")
+    if marker < 0:
+        return value
+    start = marker + 3
+    end = len(value)
+    for i in range(start, len(value)):
+        if value[i] in "/?#":
+            end = i
+            break
+    authority = value[start:end]
+    at = authority.rfind("@")
+    if at < 0:
+        return value
+    return f"{value[:start]}***@{authority[at + 1:]}{value[end:]}"
 
 
 def ran_profile_for(path: str) -> dict:
@@ -722,7 +758,9 @@ def build_run_record(matrix: dict, run: dict, args, *, netem: str | None,
             # The requested value. parse_runs.py overwrites it from the harness's
             # run_metadata record with the source that was actually opened, which is
             # what keys the never_pool_across group.
-            "camera_source": args.camera_source,
+            # The requested value, with any RTSP credentials stripped: this record is
+            # committed and shared.
+            "camera_source": redact_camera_source(args.camera_source),
             "camera_device": None,
             "host_id": platform.node(),
             "host_os": f"{platform.system()} {platform.release()}",
@@ -1017,7 +1055,11 @@ def execute(matrix: dict, args, *, dry: bool) -> int:
                 print(f"  shaping: {netem or '(none — no netem parameters at this cell)'}")
                 if tbf:
                     print(f"  tbf:     {tbf}")
-                print("  harness: " + " ".join(shlex.quote(c) for c in cmd))
+                # Credentials are stripped from the printed invocation: --dry-run output
+                # is routinely pasted into tickets and commit messages. The operator
+                # already has the URL they passed in, so nothing is lost.
+                print("  harness: " + " ".join(
+                    shlex.quote(redact_camera_source(c)) for c in cmd))
                 continue
 
             invalid: list[str] = []
@@ -1117,13 +1159,19 @@ def main() -> int:
                     choices=["debug", "release"])
     ap.add_argument("--camera-source", default="test_pattern",
                     help="video source for every run in this sweep: 'test_pattern' "
-                         "(default) or a capture device, given as an enumeration "
-                         "index or a substring of its name. NOT an axis and never a "
+                         "(default), a local capture device given as an enumeration "
+                         "index or a substring of its name, or an rtsp:// / rtsps:// "
+                         "URL for an IP camera. NOT an axis and never a "
                          "cell default -- a camera makes bitrate depend on scene "
                          "content, so camera_source is in never_pool_across and "
                          "camera runs are never aggregated with pattern runs. A "
                          "camera that cannot be opened fails the run rather than "
                          "falling back.")
+    ap.add_argument("--rtsp-transport", default="tcp", choices=["tcp", "udp"],
+                    help="RTSP media transport, used only when --camera-source is an "
+                         "rtsp:// URL. TCP by default: UDP RTSP degrades by dropping "
+                         "media silently on a filtered path, which reaches the record "
+                         "as a broken camera rather than as a network problem.")
     ap.add_argument("--load-generator-host", action="append",
                     help="T-4 only; repeatable. Must differ from this host.")
     ap.add_argument("--verbose", "-v", action="store_true")

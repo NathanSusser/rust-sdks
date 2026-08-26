@@ -1528,6 +1528,75 @@ def test_a_record_without_camera_source_is_not_pooled_with_the_pattern():
         _record_with_camera_source("test_pattern"), matrix)
 
 
+def test_the_three_video_sources_never_pool_with_each_other():
+    """An IP camera, a local lens and the generator are three different encoding
+    problems. camera_source is what keys the group, so the three must be distinct
+    strings — an RTSP run that keyed the same as a pattern run would be aggregated
+    with it and nothing downstream could detect that."""
+    matrix = pr.load_matrix()
+    keys = {
+        pr.pool_key(_record_with_camera_source(source), matrix)
+        for source in ("test_pattern",
+                       "FaceTime HD Camera",
+                       "rtsp://192.168.100.123/full1080p")
+    }
+    assert len(keys) == 3
+
+
+# ---------------------------------------------------------------------------
+# run_matrix.py credential redaction
+#
+# The run record is committed and shared and RTSP URLs commonly embed user:pass.
+# A bug here leaks a password into git history, so it is tested here rather than
+# left to the one place it is called.
+# ---------------------------------------------------------------------------
+
+
+def test_rtsp_credentials_are_stripped_from_the_recorded_source():
+    import run_matrix as rm
+    assert rm.redact_camera_source(
+        "rtsp://admin:hunter2@192.168.100.123/full1080p"
+    ) == "rtsp://***@192.168.100.123/full1080p"
+    # A bare username is still a credential.
+    assert rm.redact_camera_source(
+        "rtsp://admin@10.0.0.5:554/stream") == "rtsp://***@10.0.0.5:554/stream"
+    # A password containing an @ must not leave part of itself behind.
+    assert rm.redact_camera_source(
+        "rtsp://admin:p@ss@10.0.0.5/s") == "rtsp://***@10.0.0.5/s"
+
+
+def test_redaction_leaves_a_credentialless_source_byte_identical():
+    """Over-redacting would name a stream that does not exist, and would break the
+    never_pool_across grouping for every pattern and local-device run."""
+    import run_matrix as rm
+    for value in ("test_pattern",
+                  "0",
+                  "FaceTime HD Camera",
+                  "rtsp://192.168.100.123/full1080p",
+                  "rtsp://192.168.100.123:554/4k?profile=1",
+                  # An @ in the stream path is not a credential delimiter.
+                  "rtsp://192.168.100.123/live@2"):
+        assert rm.redact_camera_source(value) == value
+
+
+def test_the_python_and_rust_redactions_agree():
+    """Two implementations of one rule drift. The harness redacts what it records
+    and the runner redacts what it plans; if they disagree, one record in a pair
+    carries a credential the other stripped."""
+    import run_matrix as rm
+    binary = HERE.parent / "target" / "release" / "teleop-harness"
+    if not binary.exists():
+        return  # no release build here; the Rust-side unit tests still cover it
+    url = "rtsp://admin:hunter2@192.168.100.123/full1080p"
+    out = subprocess.run(
+        [str(binary), "--room-name", "r", "--duration-s", "1",
+         "--snapshots-out", "/tmp/unused.jsonl",
+         "--camera-source", url, "--validate-args"],
+        capture_output=True, text=True, check=True).stdout
+    assert "hunter2" not in out
+    assert f"camera_source={rm.redact_camera_source(url)}" in out
+
+
 # ---------------------------------------------------------------------------
 
 

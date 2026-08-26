@@ -26,7 +26,9 @@ fn main() -> ExitCode {
             args.buffering_mode.as_str(),
             args.control_transport.as_str(),
             args.audio_source.as_str(),
-            args.camera_source,
+            // Redacted: an RTSP --camera-source commonly embeds user:pass, and the runner
+            // captures this line into its log.
+            args.redacted_camera_source(),
             args.fault.map_or("none", |f| f.as_str()),
             args.width,
             args.height,

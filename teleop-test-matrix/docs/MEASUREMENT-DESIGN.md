@@ -253,6 +253,70 @@ two sources' G2G figures measurements of the same interval.
 
 ---
 
+## Amendment 2026-08-26 — RTSP / IP camera as a third source
+
+**Extends `--camera-source` to accept an `rtsp://` or `rtsps://` URL. Changes no axis, no
+cell and no default.** Everything the amendment above establishes applies unchanged: opt-in
+only, one publish path, no fallback, and `camera_source` still keys `never_pool_across`.
+
+**Why a third source at all.** The Tier 2 rig's camera is a Pegatron "Muscat" IP camera
+reachable only over Ethernet — `rtsp://192.168.100.123/full1080p` (H.264 1920x1080, ~10 fps,
+plus an AAC track) and `rtsp://192.168.100.123/4k`. `nokhwa`, which the local-device path
+uses, enumerates USB/AVFoundation/V4L2/MSMF devices and cannot open a network stream at all,
+so the existing path reports the URL as a missing device. This is a hard blocker for Tier 2,
+not a convenience.
+
+**Decoding is an `ffmpeg` subprocess**, not an in-process RTSP or H.264 crate:
+
+```
+ffmpeg -nostdin -loglevel error -rtsp_transport tcp -i <url> \
+       -an -f rawvideo -pix_fmt yuv420p -s WxH -r FPS pipe:1
+```
+
+Frames are read off stdout as fixed `w * h * 3 / 2` byte I420 blocks. Real IP cameras are
+full of quirks ffmpeg has already absorbed, and this keeps a decoder out of a build graph
+every measuring host has to compile. Audio is discarded with `-an`: the harness publishes
+its own synthetic tone, and the camera's AAC track would only add a stream to demux.
+
+**TCP transport by default** (`--rtsp-transport`, `tcp` or `udp`). UDP RTSP degrades by
+silently dropping media on a filtered or congested path, which reaches the record as a
+camera producing missing frames — indistinguishable from a genuinely bad camera. TCP turns
+the same condition into a connection error that names itself. This is the same principle as
+"no fallback": a failure mode that cannot be told apart from a result is not acceptable.
+
+**A stall is a distinct, bounded failure.** A wedged RTSP session leaves ffmpeg alive
+holding its pipe open with no bytes flowing, which is byte-for-byte indistinguishable from a
+merely slow stream. Every frame read is therefore bounded by
+`meta.parameters.rtsp_stall_timeout_s` (15 s, `--rtsp-stall-timeout-s`) and a stall is its
+own error variant. Without the bound the capture loop blocks for the run's full duration and
+the failure appears nowhere. Likewise a short read on a frame boundary ("the stream ended")
+and one part-way through a frame ("the harness holds half a frame") are separate errors, and
+a partial frame is discarded rather than published — its lower rows are uninitialised memory
+that the encoder would happily encode as content. ffmpeg's stderr is drained on a background
+thread and replayed into every one of these errors, because it is the only place an auth
+failure, an unreachable host or a wrong stream path is ever explained.
+
+**RTSP runs are realism spot-checks, not matrix cells.** The Muscat runs ~10 fps at 1080p
+while every matrix cell targets 30 fps. ffmpeg duplicates frames to reach the requested rate,
+so `camera_device.negotiated_fps` records the rate the *encoder was fed*, not the rate the
+sensor ran at; the two differing is expected rather than a fault. A 10 fps sensor cannot
+support a `video_fps_p50` claim against the 27 fps bar, and an RTSP run must never be read as
+evidence for or against it.
+
+**Credentials never reach the record.** RTSP URLs routinely embed `user:pass@`, and run
+records are committed and shared. The harness redacts the authority's userinfo to `***`
+everywhere it logs or records the source, and `run_matrix.py` does the same to the requested
+value and to its `--dry-run` output. The two implementations are checked against each other
+in `test_parse_runs.py`.
+
+**The record self-identifies the source kind.** `camera_device.kind` is `local_device` or
+`rtsp`, and `camera_source` is `rtsp:<redacted url>` for an RTSP run, so all three sources
+are distinguishable from the record alone — which is exactly what `never_pool_across`
+requires. For RTSP, `device_index` carries the media transport, since that is the host-local
+detail that changes what the same URL delivers.
+
+---
+
 ## Amendment 2026-08-25 — the AV1 efficiency claim is retracted, and T-1 needs redesign
 
 **Retracted.** The Tier 0 observation that AV1 ran `quality_limitation_reason: none` for

@@ -22,6 +22,7 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 
 use crate::camera::CameraFrameSource;
 use crate::clock::RunClock;
+use crate::rtsp::RtspFrameSource;
 
 /// A deterministic moving test pattern in I420.
 ///
@@ -118,8 +119,10 @@ fn round_up_even(value: u32) -> u32 {
 pub enum FrameSource {
     /// The deterministic moving pattern. The default for every matrix cell.
     Synthetic(SyntheticFrameSource),
-    /// A real capture device, requested explicitly.
+    /// A local capture device, requested explicitly.
     Camera(Box<CameraFrameSource>),
+    /// An IP camera reached over RTSP, requested explicitly.
+    Rtsp(Box<RtspFrameSource>),
 }
 
 impl FrameSource {
@@ -128,6 +131,7 @@ impl FrameSource {
         match self {
             Self::Synthetic(s) => s.width(),
             Self::Camera(c) => c.width(),
+            Self::Rtsp(r) => r.width(),
         }
     }
 
@@ -136,30 +140,39 @@ impl FrameSource {
         match self {
             Self::Synthetic(s) => s.height(),
             Self::Camera(c) => c.height(),
+            Self::Rtsp(r) => r.height(),
         }
     }
 
     /// The `camera_source` value for the run record.
     ///
     /// `test_pattern` for the synthetic source, matching the value `run_matrix.py`
-    /// defaults to; the resolved device name for a camera, so a run whose bitrate depended
-    /// on what a lens saw is self-identifying rather than merely flagged.
+    /// defaults to; the resolved device name for a local camera and a `rtsp:`-prefixed
+    /// redacted URL for an IP camera, so a run whose bitrate depended on what a lens saw is
+    /// self-identifying rather than merely flagged — and so the three are distinguishable
+    /// from each other, since `camera_source` is a `never_pool_across` dimension.
     pub fn source_label(&self) -> String {
         match self {
             Self::Synthetic(_) => crate::cli::TEST_PATTERN_SOURCE.to_string(),
             Self::Camera(c) => c.identity().device_name.clone(),
+            Self::Rtsp(r) => format!("rtsp:{}", r.identity().url),
         }
     }
 
-    /// The resolved device, for the run record. `None` for the synthetic pattern.
-    pub fn camera_identity(&self) -> Option<&crate::camera::CameraIdentity> {
+    /// The resolved device or stream, for the run record. `None` for the synthetic pattern.
+    ///
+    /// Both camera kinds populate the same record field: they are the same claim about a
+    /// run, and splitting them would give the analysis layer two shapes to handle for one
+    /// `never_pool_across` dimension.
+    pub fn camera_device(&self) -> Option<crate::snapshot::CameraDevice> {
         match self {
             Self::Synthetic(_) => None,
-            Self::Camera(c) => Some(c.identity()),
+            Self::Camera(c) => Some(c.identity().into()),
+            Self::Rtsp(r) => Some(r.identity().into()),
         }
     }
 
-    /// Produces the next frame, or `None` when the device failed mid-run.
+    /// Produces the next frame, or `None` when the source failed mid-run.
     ///
     /// A capture failure is logged and ends the loop rather than being retried: frames
     /// stop, the stats show it, and the run is not silently padded with stale content.
@@ -170,6 +183,13 @@ impl FrameSource {
                 Ok(buffer) => Some(buffer),
                 Err(e) => {
                     log::error!("camera capture stopped: {e}");
+                    None
+                }
+            },
+            Self::Rtsp(r) => match r.next_buffer() {
+                Ok(buffer) => Some(buffer),
+                Err(e) => {
+                    log::error!("rtsp capture stopped: {e}");
                     None
                 }
             },
