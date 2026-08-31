@@ -17,6 +17,7 @@ use crate::control::payload::{ControlSample, ProbeEcho};
 use crate::control::publisher::{ControlPublisher, PublisherCounters};
 use crate::control::receiver::ControlReceiver;
 use crate::control::transport::{self, ControlSender};
+use crate::frame_timing::{PublisherFrameLog, SubscriberFrameLog};
 use crate::probe::ProbeTracker;
 use crate::sampler::StatsSampler;
 use crate::session::{self, Credentials, SessionError};
@@ -149,6 +150,13 @@ pub struct SharedState {
     /// More than one means the session re-subscribed mid-run, which is what a full
     /// reconnect does; the G2G series then spans two subscriptions.
     pub video_subscriptions: AtomicU64,
+    /// Per-frame subscriber stage log, when `--frame-csv-out` was given.
+    ///
+    /// Shared between the timing-event task and the decoded-frame loop: the former fills
+    /// the receive, decode-start and decode-finish stages, the latter closes the row on
+    /// delivery. Both run per subscription, so the lock is held only for the duration of a
+    /// single row write.
+    pub subscriber_frames: Option<Mutex<SubscriberFrameLog>>,
 }
 
 impl crate::probe::ProbeHost for SharedState {
@@ -169,6 +177,7 @@ impl Default for SharedState {
             // Folded with AND as each subscription reports in, so it must start true.
             g2g_handler_installed: AtomicBool::new(true),
             video_subscriptions: AtomicU64::new(0),
+            subscriber_frames: None,
         }
     }
 }
@@ -288,7 +297,24 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
     let (sub_room, sub_events) =
         session::connect(&credentials, &args.room_name, &subscriber_identity).await?;
 
-    let shared = Arc::new(SharedState::default());
+    // Both CSVs are timed from one origin so the two files share an x-axis in the report.
+    let frame_csv_origin_us = clock.wall_us();
+    let subscriber_frames = match args.frame_csv_out.as_ref() {
+        Some(prefix) => {
+            let path = frame_csv_path(prefix, "sub");
+            Some(Mutex::new(SubscriberFrameLog::create(&path, frame_csv_origin_us).map_err(
+                |source| {
+                    RunError::Output(crate::writer::WriteError::Open {
+                        path: path.display().to_string(),
+                        source,
+                    })
+                },
+            )?))
+        }
+        None => None,
+    };
+
+    let shared = Arc::new(SharedState { subscriber_frames, ..SharedState::default() });
     // The probe lifetime is a run parameter, so it is applied before any probe is issued.
     *shared.probe.lock() = ProbeTracker::with_lifetime_us(args.probe_lifetime_us());
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -307,7 +333,7 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
     // to the experiment it actually ran.
     let video_source = VideoSourceRecord::of(&source);
     let (width, height) = (source.width(), source.height());
-    let video = session::publish_video(&pub_room, &args, width, height).await?;
+    let mut video = session::publish_video(&pub_room, &args, width, height).await?;
     let audio =
         if args.audio { Some(session::publish_audio(&pub_room, &args).await?) } else { None };
 
@@ -322,6 +348,38 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
 
     let mut tasks = Vec::new();
 
+    // Publisher stages are read from the SDK's own event stream, subscribed inside
+    // `publish_video` before the track was published — see the note there on why the
+    // ordering is not negotiable.
+    let publisher_frames = match (args.frame_csv_out.as_ref(), video.publish_timing.take()) {
+        (Some(prefix), Some(mut events)) => {
+            let path = frame_csv_path(prefix, "pub");
+            let log = Arc::new(Mutex::new(
+                PublisherFrameLog::create(&path, frame_csv_origin_us).map_err(|source| {
+                    RunError::Output(crate::writer::WriteError::Open {
+                        path: path.display().to_string(),
+                        source,
+                    })
+                })?,
+            ));
+            let task_log = Arc::clone(&log);
+            let task_shutdown = Arc::clone(&shutdown);
+            tasks.push(tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    if task_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Err(e) = task_log.lock().record_event(event) {
+                        log::warn!("publisher frame CSV write failed: {e}");
+                        break;
+                    }
+                }
+            }));
+            Some(log)
+        }
+        _ => None,
+    };
+
     tasks.push(tokio::spawn(
         VideoCaptureLoop::new(
             source,
@@ -333,6 +391,7 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
             args.attach_frame_id,
             Arc::clone(&shared.frames_captured),
         )
+        .with_frame_log(publisher_frames.clone())
         .run(),
     ));
 
@@ -402,6 +461,21 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
     shutdown.store(true, Ordering::Release);
     for task in tasks {
         task.abort();
+    }
+
+    // Flushed after the writing tasks are down, so no row is half-written, and before the
+    // rooms close, so a teardown failure cannot cost the run its per-frame data. Unlike
+    // the snapshot writer these are block-buffered, so without this a run's final second
+    // of frames would be lost on exit.
+    if let Some(log) = publisher_frames.as_ref() {
+        if let Err(e) = log.lock().flush() {
+            log::warn!("publisher frame CSV flush failed: {e}");
+        }
+    }
+    if let Some(log) = shared.subscriber_frames.as_ref() {
+        if let Err(e) = log.lock().flush() {
+            log::warn!("subscriber frame CSV flush failed: {e}");
+        }
     }
 
     // Teardown failures are logged rather than swallowed. The matrix reuses room names
@@ -667,6 +741,22 @@ async fn subscriber_event_loop(
     }
 }
 
+/// Builds one side's per-frame CSV path from the `--frame-csv-out` prefix.
+///
+/// A prefix rather than two flags, so the pair is named consistently and the report script
+/// can be pointed at `<prefix>.pub.csv` and `<prefix>.sub.csv` without the runner having to
+/// keep two paths in step. A prefix ending in `.csv` would otherwise produce
+/// `run.csv.pub.csv`, so that extension is dropped first.
+fn frame_csv_path(prefix: &std::path::Path, side: &str) -> std::path::PathBuf {
+    let stem = prefix
+        .extension()
+        .filter(|ext| ext.eq_ignore_ascii_case("csv"))
+        .map_or_else(|| prefix.to_path_buf(), |_| prefix.with_extension(""));
+    let mut name = stem.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{side}.csv"));
+    stem.with_file_name(name)
+}
+
 /// Installs the receive-side packet trailer handler, retrying until it takes.
 ///
 /// Returns whether a handler is present on the track. `subscribe_timing_events` reports no
@@ -727,6 +817,14 @@ async fn video_receive_loop(
     // reconnect the SDK re-subscribes from a detached task, so this loop can observe the
     // new track before its transceiver lands and lose the race. Retrying is safe because
     // installation is idempotent, and a late success fixes every subsequent frame.
+    // When per-frame CSVs are on, the same call that installs the handler yields the
+    // stage-event stream, so it is consumed here rather than dropped. The stages it
+    // carries — first packet on the interface, decode start, decode finish — are stamped
+    // inside WebRTC and exist nowhere else: reading a clock in this loop would time when
+    // this task was next scheduled, which under matrix load is precisely when an
+    // application-level read is least trustworthy.
+    let stage_events = shared.subscriber_frames.is_some().then(|| track.subscribe_timing_events());
+
     let installed = install_timing_handler(&track, &shutdown, &cancel).await;
     if !installed {
         log::error!(
@@ -737,6 +835,26 @@ async fn video_receive_loop(
         );
     }
     shared.g2g_handler_installed.fetch_and(installed, Ordering::Relaxed);
+
+    // Drains stage events for the life of this subscription. Kept separate from the frame
+    // loop because the two are not in lockstep: a frame's receive stage is emitted well
+    // before it is decoded and delivered, and interleaving them on one task would let a
+    // slow frame callback stall the event drain and lose stages to the broadcast buffer.
+    let stage_task = stage_events.map(|mut events| {
+        let shared = Arc::clone(&shared);
+        let shutdown = Arc::clone(&shutdown);
+        let cancel = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            while let Some(event) = events.next().await {
+                if shutdown.load(Ordering::Acquire) || cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Some(log) = shared.subscriber_frames.as_ref() {
+                    log.lock().record_event(event);
+                }
+            }
+        })
+    });
 
     let mut stream = NativeVideoStream::new(track.rtc_track());
     while let Some(frame) = stream.next().await {
@@ -756,6 +874,19 @@ async fn video_receive_loop(
         });
 
         shared.g2g.lock().on_frame(arrival_us, user_timestamp, frame_id, corrected);
+
+        // Delivery closes the frame's row. Only frames carrying a capture stamp can be
+        // keyed to their stage events, so an un-stamped frame is left to the G2G
+        // coverage gate above rather than written as a row with no origin.
+        if let (Some(log), Some(capture_us)) = (shared.subscriber_frames.as_ref(), user_timestamp) {
+            if let Err(e) = log.lock().record_sink(capture_us, frame_id, arrival_us) {
+                log::warn!("subscriber frame CSV write failed: {e}");
+            }
+        }
+    }
+
+    if let Some(task) = stage_task {
+        task.abort();
     }
 }
 
@@ -858,6 +989,27 @@ mod tests {
     fn session_errors_propagate_as_run_errors() {
         let err: RunError = SessionError::MissingCredential("LIVEKIT_URL").into();
         assert!(err.to_string().contains("LIVEKIT_URL"));
+    }
+
+    #[test]
+    fn frame_csv_paths_pair_off_one_prefix() {
+        let prefix = std::path::Path::new("runs/cell-a-r1");
+        assert_eq!(frame_csv_path(prefix, "pub"), std::path::Path::new("runs/cell-a-r1.pub.csv"));
+        assert_eq!(frame_csv_path(prefix, "sub"), std::path::Path::new("runs/cell-a-r1.sub.csv"));
+    }
+
+    /// A prefix that already ends in `.csv` must not produce `run.csv.pub.csv`.
+    #[test]
+    fn frame_csv_prefix_drops_a_trailing_csv_extension() {
+        let prefix = std::path::Path::new("runs/run.csv");
+        assert_eq!(frame_csv_path(prefix, "pub"), std::path::Path::new("runs/run.pub.csv"));
+    }
+
+    /// A run id containing dots is not an extension; only `.csv` is stripped.
+    #[test]
+    fn frame_csv_prefix_keeps_other_dotted_segments() {
+        let prefix = std::path::Path::new("runs/q7.av1.r3");
+        assert_eq!(frame_csv_path(prefix, "sub"), std::path::Path::new("runs/q7.av1.r3.sub.csv"));
     }
 
     /// A run that never saw the published track measured nothing, and must not be

@@ -67,6 +67,11 @@ SNAPSHOTS_DIR = HERE / "snapshots"
 # excerpt, and a Tier 0 sweep lost 15 runs to a transient event whose actual error
 # was unrecoverable because 300 characters was all that survived.
 LOGS_DIR = HERE / "logs"
+# Per-frame pipeline-stage CSVs, two per run, written only under --frame-csv. Kept out
+# of snapshots/ because these are a different granularity with a different consumer:
+# examples/local_video/scripts/generate_frame_report.py renders them to a per-cell PDF,
+# while parse_runs.py reads only the JSON-lines snapshots.
+FRAMES_DIR = HERE / "frames"
 
 # The harness exits with this when the session never established: a transient
 # failure that says nothing about the cell. Mirrors EXIT_RETRYABLE in src/main.rs.
@@ -597,6 +602,12 @@ def harness_command(matrix: dict, run: dict, args) -> list[str]:
     if cond.get("fault_injection"):
         cmd += ["--fault", str(cond["fault_injection"])]
 
+    # Per-frame stage CSVs, written alongside the snapshots rather than instead of them.
+    # Off unless asked for: a row per frame per side is a different order of output than
+    # one snapshot per second, and a full sweep would carry that cost on every cell.
+    if args.frame_csv:
+        cmd += ["--frame-csv-out", str(FRAMES_DIR / run["run_id"])]
+
     return cmd
 
 
@@ -1032,6 +1043,8 @@ def execute(matrix: dict, args, *, dry: bool) -> int:
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
         SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        if args.frame_csv:
+            FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 
     current_batch = None
     exit_code = 0
@@ -1160,6 +1173,14 @@ def main() -> int:
                     choices=["none", "ntp", "chrony", "ptp"])
     ap.add_argument("--build-config", default="release",
                     choices=["debug", "release"])
+    ap.add_argument("--frame-csv", action="store_true",
+                    help="write per-frame pipeline-stage CSVs to frames/ alongside the "
+                         "JSON-lines snapshots, two per run (<run_id>.pub.csv and "
+                         "<run_id>.sub.csv) in the examples/local_video format. Feeds "
+                         "generate_frame_report.py for a per-cell latency PDF. Off by "
+                         "default: this is a row per frame per side, versus one snapshot "
+                         "per second, and it changes nothing about how a run is scored -- "
+                         "parse_runs.py reads the snapshots either way.")
     ap.add_argument("--camera-source", default="test_pattern",
                     help="video source for every run in this sweep: 'test_pattern' "
                          "(default), a local capture device given as an enumeration "

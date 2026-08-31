@@ -217,6 +217,7 @@ pub struct VideoCaptureLoop {
     attach_timestamp: bool,
     attach_frame_id: bool,
     frames_captured: Arc<std::sync::atomic::AtomicU64>,
+    frame_log: Option<Arc<parking_lot::Mutex<crate::frame_timing::PublisherFrameLog>>>,
 }
 
 impl VideoCaptureLoop {
@@ -240,7 +241,22 @@ impl VideoCaptureLoop {
             attach_timestamp,
             attach_frame_id,
             frames_captured,
+            frame_log: None,
         }
+    }
+
+    /// Attaches a per-frame publisher log, recording the hand-off to WebRTC.
+    ///
+    /// That hand-off is the one publish stage the SDK cannot emit, because it happens
+    /// before WebRTC has the frame. Without it the first CSV column pair collapses and
+    /// "the harness was slow to generate a frame" becomes indistinguishable from "the
+    /// encoder was slow to take it".
+    pub fn with_frame_log(
+        mut self,
+        log: Option<Arc<parking_lot::Mutex<crate::frame_timing::PublisherFrameLog>>>,
+    ) -> Self {
+        self.frame_log = log;
+        self
     }
 
     /// Captures frames until the run duration elapses.
@@ -269,6 +285,9 @@ impl VideoCaptureLoop {
                 buffer,
                 frame_metadata: metadata,
             };
+            if let Some(log) = self.frame_log.as_ref() {
+                log.lock().record_capture(capture_wall_us, attached_id);
+            }
             self.rtc_source.capture_frame(&frame);
             self.frames_captured.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             frame_id = frame_id.wrapping_add(1);

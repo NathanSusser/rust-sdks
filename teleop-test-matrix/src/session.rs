@@ -195,6 +195,12 @@ pub struct PublishedVideo {
     pub source: NativeVideoSource,
     pub width: u32,
     pub height: u32,
+    /// Publish-timing events, present only when `--frame-csv-out` asked for them.
+    ///
+    /// Carried out of the publish call rather than taken from `track` later because the
+    /// subscription must exist before the track is published for the SDK to instrument it
+    /// at all.
+    pub publish_timing: Option<livekit::track::PublishTimingEventStream>,
 }
 
 /// Publishes the synthetic video track.
@@ -213,6 +219,14 @@ pub async fn publish_video(
         VIDEO_TRACK_NAME,
         RtcVideoSource::Native(source.clone()),
     );
+
+    // Subscribed before `publish_track`, never after. The SDK decides whether to install
+    // publish-timing instrumentation by asking the track whether anyone is listening, and
+    // it asks exactly once, while publishing (`has_publish_timing_subscribers` in
+    // `local_participant`). A stream taken afterwards yields a well-formed subscription
+    // that never receives an event — the publisher-side mirror of the receive-side
+    // ordering fault, and just as silent.
+    let publish_timing = args.frame_csv_out.is_some().then(|| track.publish_timing_events());
 
     let mut frame_metadata_features = livekit::options::FrameMetadataFeatures::default();
     frame_metadata_features.user_timestamp = args.attach_timestamp;
@@ -245,7 +259,7 @@ pub async fn publish_video(
             ))
         })?;
 
-    Ok(PublishedVideo { track, source, width, height })
+    Ok(PublishedVideo { track, source, width, height, publish_timing })
 }
 
 /// A published audio track and the source feeding it.

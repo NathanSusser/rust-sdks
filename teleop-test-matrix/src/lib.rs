@@ -20,6 +20,7 @@ pub mod control;
 pub mod counters;
 pub mod encoder;
 pub mod export;
+pub mod frame_timing;
 pub mod keyframe;
 pub mod probe;
 pub mod rtsp;

@@ -394,6 +394,20 @@ pub struct Args {
     #[arg(long = "snapshots-out")]
     pub snapshots_out: std::path::PathBuf,
 
+    /// Destination prefix for per-frame pipeline-stage CSVs, in the `local_video` format.
+    ///
+    /// Writes `<prefix>.pub.csv` and `<prefix>.sub.csv`, which
+    /// `examples/local_video/scripts/generate_frame_report.py` renders to a PDF. These sit
+    /// alongside the JSON-lines snapshots rather than replacing them: the snapshots carry
+    /// the scored metrics and the validity gates, and the CSVs carry the per-frame stage
+    /// decomposition that answers where a given frame's latency went.
+    ///
+    /// Requires `--attach-timestamp`, since every row is keyed by the in-band capture
+    /// stamp. Off unless asked for: at 30 fps a run writes a row per frame per side, which
+    /// is a different order of output than one snapshot per second.
+    #[arg(long = "frame-csv-out", requires = "attach_timestamp")]
+    pub frame_csv_out: Option<std::path::PathBuf>,
+
     /// Append-only JSON-lines log of every control sequence number published. This is
     /// the `control_delivered_pct` denominator; without it the metric biases toward
     /// passing at the window edges.
