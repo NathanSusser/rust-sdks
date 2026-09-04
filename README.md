@@ -176,7 +176,30 @@ match event {
 
 Building on Ubuntu 24 x86_64:
 
+Install the system libraries *before* the first build, and make sure the
+submodules are checked out. `yuv-sys` copies `yuv-sys/libyuv` at build time and
+probes for libjpeg once; if either is missing on the first build, the failure
+surfaces later and is not obviously related:
+
+- an uninitialized `yuv-sys/libyuv` makes the `yuv-sys` build script fail while
+  reading its include directory
+- a missing `libjpeg-turbo8-dev` silently builds libyuv without `HAVE_JPEG`,
+  and binaries that capture MJPEG (such as `local_video`'s publisher) then fail
+  to link with `undefined symbol: rs_MJPGToI420`
+
+Installing libjpeg afterwards is not enough on its own. Nothing tells cargo that
+pkg-config's view changed, so the cached build script output is reused and
+`HAVE_JPEG` stays unset. `cargo clean -p yuv-sys` does not dislodge it either;
+remove the build directory instead:
+
 ```
+rm -rf target/*/build/yuv-sys-*
+```
+
+```
+# check out submodules (libyuv, protocol)
+git submodule update --init --recursive
+
 # install required libs
 sudo apt install -y \
   libglib2.0-dev build-essential \
