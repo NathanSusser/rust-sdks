@@ -24,15 +24,14 @@ evidence supports. The withdrawal rate is the honest answer to "how confident
 are you".
 
 The third column records *how* each was caught, because it is the evidence for
-the second pattern below. Rows marked † are attributed from one host's memory
-and need confirming by the other.
+the second pattern below.
 
 | Claim | Withdrawn because | Caught by |
 |---|---|---|
 | BWE decay over a run | Probes had no subscriber, so GCC had no receiver feedback at all | Other host's review |
-| SFU was dropping frames | Never separated from encoder-side drops | † |
-| Keyframe tail explained the p99 | Keyframe cadence did not correlate once measured | † |
-| The grant was being lost between components | `available_outgoing` and `target_bitrate` agree to 5% in the realistic arm | † |
+| SFU was dropping frames | Never separated from encoder-side drops | Attributed from one host's memory; the other has no record of it — see below |
+| Keyframe tail explained the p99 | The worst frames group into one to three contiguous episodes per run, not a cadence. A3's entire worst 1% is a single episode, frames 62–179, spanning 0.0–3.9 s | Re-derived from the data |
+| The grant was being lost between components | Two refutations, of two versions of the claim. `available_outgoing` and `target_bitrate` agree to 5% in the realistic arm; and grant loss predicts stalls follow *idle* periods, where measured episodes follow *elevated* demand (A1 median demand ratio 1.21 into an episode) | One host each |
 | A standing 2× `available`/`target` gap | Confined to arm 2b, a configuration already rejected; ratio pinned at 2.04 while both absolutes swung, so structural | Other host proposed it; own data settled it |
 | "The estimator settles at 1.2 Mbps" | It never settles. It starts at 3.3 Mbps, collapses by t+20 s, and is still climbing at t+120 s | **Neither — see below** |
 | "The estimator is wrong" | The uplink was 0.15 Mbps. It was measuring reality | **Neither — two curl commands, available all night** |
@@ -57,6 +56,13 @@ signature. A capacity figure taken once became a standing property of the link.
 A subscriber's presence in one probe was assumed in the next. Runs are not
 interchangeable, and the rig gave no way to tell — which is what §4 exists to
 fix.
+
+One row deserves note for what *could not* be established. The SFU-frame-drop
+claim is recorded as withdrawn, but neither host can now evidence who made it or
+on what basis: one has it in memory, the other has no record in logs or repo.
+The correct response was to leave it marked as unverifiable rather than
+reconstruct a plausible history for it — reconstructing it would have been the
+same move the rest of this document is about, performed on the document itself.
 
 **The two that survived longest were the two both hosts agreed on** — and the
 mechanism is worse than a shared prior. On those claims the hosts were not two
@@ -236,7 +242,7 @@ process was still alive before adding a protocol step to work around it.
 
 ## 6. Defects found in the runbooks themselves
 
-Nine corrections to `PTP-RUNBOOK-HOST-A.md` and the harness docs, all found by
+Ten corrections to `PTP-RUNBOOK-HOST-A.md` and the harness docs, all found by
 executing them rather than reading them.
 
 | # | Defect | Correction |
@@ -250,6 +256,7 @@ executing them rather than reading them.
 | 7 | No instruction to run the full test suite before pushing | A filtered run passed while the shared branch was broken. Shared modules require the full unfiltered package suite |
 | 8 | Definition of done requires `phc2sys` with `s2` on Host A | Host A is the grandmaster; it disciplines *from* its own clock. Absent `phc2sys` is correct there, and the checklist marks a correct rig as failing |
 | 9 | Nothing warns that a `ptp4l` restart makes the restarted host's own sync check meaningless | The slave detects the gap loudly. The restarted host cannot — see below |
+| 10 | The 90-frame startup exclusion discarded evidence differentially across arms | Not merely "it removed the cause" — it removed 85% of the worst frames from the loaded runs and 0% from the control. See below |
 
 ### Defect 3 — a header-only CSV has already told you the answer
 
@@ -307,13 +314,46 @@ The real defect is an asymmetry, and it points at the *other* host:
 The slave detects this trivially. The host that cannot is the one that just
 restarted, which is the host most likely to be asked whether it is healthy.
 
-### What these two have in common
+### Defect 10 — an exclusion that acted differently on each arm
 
-Defects 3, 6 and 9 share a shape with the rest of this document: the rig reports
-success while the measurement is wrong, or reports a cause the evidence already
-rules out. Those are the expensive ones. A guard that warns loudly is worth more
-than a fix that silently works, because the fix will be reverted by a reboot and
-the guard will not.
+`START_FRAME=60` (later 90) excluded the first frames of every run, to keep
+encoder ramp-up out of the statistics. Applied uniformly, defensible in
+isolation, and stated in the script's own comment.
+
+It was not uniform in effect. Worst-1% frames falling inside the excluded
+window:
+
+| Run | In window | Share |
+|---|---|---|
+| Run B (control) | 0 / 35 | 0% |
+| A2-off | 3 / 33 | 9% |
+| A1 | 9 / 34 | 26% |
+| A2 | 29 / 34 | **85%** |
+| A3 | 29 / 34 | **85%** |
+
+Zero percent from the control; 85% from the two runs whose collapse the
+programme was trying to explain. Every comparison drawn across that filter was
+biased toward making the loaded runs look calmer than they were.
+
+> **A filter that discards more evidence from the treatment than from the
+> control is removing signal, not noise.** It is not enough for an exclusion to
+> be defensible in isolation — it has to be checked for differential effect
+> across arms, and this one never was.
+
+### What these have in common
+
+Defects 3, 6, 9 and 10 share a shape with the rest of this document: the rig
+reports success while the measurement is wrong, or points at a cause the
+evidence already rules out. Those are the expensive ones. A guard that warns
+loudly is worth more than a fix that silently works, because the fix will be
+reverted by a reboot and the guard will not.
+
+Defect 10 and the agreement failure in §1 are the same error at different
+scales, and are the two most transferable lines here: **a check can feel sound
+because it was applied uniformly, when what matters is whether it *acted*
+uniformly.** The startup filter was applied to every run and acted on two. The
+review protocol was applied to every claim and acted on all but the two both
+hosts already believed.
 
 Since the operator may be remote and without `sudo`, the publisher and
 subscriber scripts now warn on both governor **and** EPP: `cpufrequtils`
@@ -343,3 +383,22 @@ answer and neither can be taken until the uplink recovers.
   was still climbing at cutoff and never plateaued. R1 was designed to answer
   this and could not, because its link had already collapsed. Needs a repeat on
   a link comparable to arm 1's.
+
+- **Why did the A-series picture shrink while nothing was starved?** The encoder
+  runs `NV_ENC_PARAMS_RC_CBR` with `enableFillerDataInsertion` never set
+  (`h264_encoder_impl.cpp:225`). Denied padding, NVENC satisfies CBR the only
+  remaining way — by lowering QP until the target is consumed — so ~10 Mbps of
+  *real* coded picture on trivially compressible colour bars is the rate control
+  working as configured. That accounts for the flat bitrate, the bpp climbing
+  0.30 → 2.00 as resolution fell, and A3's frames carrying 6.7× the bytes of
+  arm 1's at identical 640×360.
+
+  What it does not account for is the staircase. WebRTC's quality scaler steps
+  down on *high* QP; CBR at a 10 Mbps target on that content should have driven
+  QP low. The picture stepped down four times on an exact 5.00 s clock while
+  bitrate held, packet loss was zero, and QP pressure should have been absent.
+  The honest statement is not "mechanism unknown" but the more specific **the
+  collapse proceeded while every signal the scaler is documented to respond to
+  was healthy.** Settling it needs a repeat with the encoder-side QP column,
+  which did not exist during the A-series — reasoning about QP from an encoder
+  config instead of from QP is the substitution this document exists to prevent.
