@@ -502,6 +502,17 @@ deliberately — it already knows the argv and needs no rebuild to change.
 
 - Note the `START_FRAME` change in run metadata. Runs before and after are **not** directly
   comparable on any startup-window metric.
+- **A dropped frame at the window boundary used to hang the publisher.** `reaches_end` tested
+  `end == frame_id`, so shutdown depended on one specific frame surviving the whole pipeline.
+  At 30 fps that is a rare coin flip; at arm 2b's 1-in-26 delivery it was near-certain, and
+  the publisher ran 19 minutes past its window still publishing into the room. That is also
+  the `a3r1` mechanism — a publisher outliving its window is exactly why one was still in the
+  room when the next subscriber connected. Fixed in `6f25679` (`>=`, checked before the
+  containment gate).
+- Frame IDs advance at the **capture** rate, not the delivery rate. An arm that collapses
+  delivery does *not* push its end frame further away: arm 2b delivered 1.12 fps while its
+  frame IDs advanced at 29.86/s, so frame 3600 came due on schedule at t+120.3 s. Do not
+  reason about window duration from delivered frame rate.
 - Keep PTP running and keep the clock-check gate in `run_report.sh`. The negative-sample and
   floor checks in §06 are what make cross-machine transport defensible; do not drop them for
   a "quick" arm.
