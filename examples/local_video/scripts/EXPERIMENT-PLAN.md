@@ -17,47 +17,61 @@ coordinated commit. Same push protocol — commit, `git pull --ff-only`, push, p
 None of these need capture time. All three change what the arms mean. **Do not start
 arm 0 until all three are closed and their answers are recorded in this file.**
 
-### 0.1 The bitrate ladder was never held constant — and the cap was exceeded
+### 0.1 ~~The bitrate ladder was never held constant~~ — ❌ REFUTED, gate is clear
 
-`run_publisher_test.sh:73` hardcodes `--width 1280 --height 720` and passes **no
-`--max-bitrate`**. So `max_bitrate` falls through to `compute_appropriate_encoding`
-(`livekit/src/room/options.rs:278`), a static preset table indexed on resolution that
-knows nothing about the 10 Mbps link. Simulating that selection loop:
+**This section's premise was wrong and it is withdrawn. Nothing here blocks the gate.**
 
-| Nominal | `max_bitrate` actually requested |
-|---|---|
-| 640×360 (A1) | 0.80 Mbps |
-| 960×540 (A2) | 1.70 Mbps |
-| 1920×1080 (A3) | 5.00 Mbps |
-| 1600×1300 (production) | 3.00 Mbps |
+It assumed the A-runs inherited `max_bitrate` from `compute_appropriate_encoding`'s preset
+table and derived caps of 0.80 / 1.70 / 5.00 Mbps. They did not. Every A-run passed
+`--max-bitrate 10000000` explicitly. From Host A's publisher logs, read by Host B directly
+rather than taken on report:
 
-Two consequences:
+```
+a1      Video encoding:  640x360  @ 30 fps, 10000000 bps
+a2      Video encoding:  960x540  @ 30 fps, 10000000 bps
+a2off   Video encoding:  960x540  @ 30 fps, 10000000 bps
+a3      Video encoding: 1920x1080 @ 30 fps, 10000000 bps
+a1r1    Video encoding:  640x360  @ 30 fps, 10000000 bps
+```
 
-**The ladder confounded two variables.** A1→A2→A3 changed resolution *and* bitrate
-target together. The report presents it as a resolution ladder. It is not one. Note also
-that A1 and A2 both floor at 320×180, whose preset is 160 kbps — consistent with the
-encoder walking back down the same table it walked up.
+Three consequences, all of which **remove** work rather than adding it:
 
-**A3 delivered ~9.6 Mbps against a 5.0 Mbps cap.** This is the important one. The 9.6
-figure is not interface throughput and not an iperf number — `subscriber.rs:914` computes
-it as a delta of `inbound-rtp.bytes_received` on the *video* inbound stat, so it is this
-stream and nothing else. Roughly **1.9× the requested maximum**.
+1. **There was no cap overshoot.** A3 delivered ~9.6 Mbps against a **10 Mbps** cap — 96% of
+   the ceiling, under it rather than 1.9× over. The four candidate explanations this section
+   offered (RTX/FEC/padding riding on top, the cap unenforced on NVENC, the pacer bursting
+   above the encoder target, a short window reading a burst as sustained) explain a
+   phenomenon that did not occur.
+2. **The ladder did not confound bitrate with resolution.** The requested cap was constant at
+   10 Mbps across A1, A2 and A3; resolution was the only deliberate variable. What else
+   varied was the *delivered* rate, and that is an outcome of the estimator — the finding
+   itself, not a confound.
+3. **§7 item 11 is withdrawn.** "The pipe was never the binding constraint" rested on the
+   overshoot; there is no overshoot. The capacity argument stands on its original evidence:
+   9.6 Mbps delivered into a 10.0 Mbps measured uplink, zero packet loss, and a collapse to
+   640×360 regardless.
 
-That is a real finding, and it cuts against the report's own mechanism. §03 argues the
-estimator *lowered* its target and the encoder obeyed. But the encoder was simultaneously
-overshooting its configured ceiling by ~2×. Both cannot be casually true. Candidate
-explanations, in the order worth testing:
+**This section also contradicted §0.2**, which correctly states the A-runs were direct binary
+invocations and not the committed script. §0.2 is the correct one; this section then reasoned
+as though the script's preset behaviour applied to runs that never touched the script.
 
-- `max_bitrate` is a per-layer cap and something (RTX, FEC, padding, probing) rides on top
-  of it and is counted in `bytes_received`
-- the cap is advertised but not enforced on this encoder path (NVENC)
-- the ceiling applies to the encoder target while the pacer bursts above it
-- the sampling window is short enough that a burst reads as sustained rate
+**What survives, and it is still worth doing.** Always pass `--max-bitrate` explicitly — not
+because a cap was exceeded, but because exactly one run inherited a preset and it is the one
+we lean on hardest:
 
-**Deliverable:** Host A reports what `target_bitrate` and `available_outgoing_bitrate`
-actually were, once the arm-1 instrumentation lands. Until then, **no statement about
-"capacity to spare" or "bandwidth was not the constraint" is supportable.** The report's
-§03 step 3 rests on this.
+```
+round5a (via run_publisher_test.sh)   1280x720 @ 30 fps, 3000000 bps
+```
+
+**Run B — the zero-episode control — is the only run with an inherited cap**, and it landed
+at 3.0 Mbps, not the 1.7 Mbps the H720 preset row would suggest. That is direct confirmation
+of the off-by-one in §9: `compute_appropriate_encoding` assigns `preset.encoding` and *then*
+breaks, so 1280×720 receives H1080's 3.0 Mbps. §9's observation is upgraded from "looks
+off-by-one" to measured.
+
+That does not invalidate Run B as a control for *does load induce stalls*. It does mean
+anyone comparing Run B's delivered rate against the A-runs' is comparing across a 3 Mbps
+versus 10 Mbps cap difference that nobody chose, and that comparison should be avoided or
+stated.
 
 ### 0.2 `run_publisher_test.sh` never ran at the resolutions in the report
 
@@ -478,9 +492,9 @@ own finding**.
    as explanations and makes the single-stream scaler claim airtight.
 10. **Add the `MaintainFramerate` default** (§1.1). "We told it to shed resolution" is a
     stronger and more actionable finding than "libwebrtc chose to."
-11. **Withdraw or qualify "the pipe was never the binding constraint"** until §0.1 is
-    resolved. A3 delivered ~1.9× its configured cap; the capacity argument is not currently
-    supportable.
+11. ~~**Withdraw or qualify "the pipe was never the binding constraint"**~~ — **withdrawn,
+    see §0.1.** There was no overshoot: A3's cap was 10 Mbps, not 5, so 9.6 Mbps delivered is
+    under the ceiling. The claim stands on its original evidence and needs no correction.
 
 ---
 
