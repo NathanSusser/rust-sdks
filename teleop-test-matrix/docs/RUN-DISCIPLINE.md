@@ -92,6 +92,46 @@ Applied to this document, that sweep found one: a claim that the A-series ran
 derived from exactly the kind of spot capacity reading being withdrawn. It now
 cites the two measured delivered bitrates instead.
 
+### A negative from a search is not evidence of absence
+
+Four times, a search returned nothing and the nothing was believed. The search
+was wrong every time, and in one case it was *incapable* of reporting what it
+was read as reporting.
+
+| The search | Why the negative was false |
+|---|---|
+| `grep` for `--max-bitrate` in `publisher.rs` | Flags are derived from field names by clap, so the literal string appears nowhere. Returned "absent" for four flags, two of which exist |
+| `grep -rn scale_resolution_down_by livekit/src/` | The field is declared in `libwebrtc/src` and marshalled in `webrtc-sys/src`. The scope was chosen by the same assumption that produced the question |
+| `grep … \| head -3 \|\| echo "ABSENT"` | **The fallback can never fire.** A pipeline exits with `head`'s status, which is 0. This command cannot report absence — its silence means nothing at all |
+| Parsing `ptp4l` lines for `rms` | The answer to a different question sat in the `delay` field on every line read |
+
+The third is the one worth internalising, because it is not a judgement error.
+Verified:
+
+```
+$ grep -rn 'nothing_here' /etc/hostname | head -3 || echo "FALLBACK FIRED"
+  (silence — exit 0, from head)
+$ grep -rn 'nothing_here' /etc/hostname      || echo "FALLBACK FIRED"
+  FALLBACK FIRED
+```
+
+A blank result was read as a confirmed negative by a command structurally unable
+to produce one.
+
+> **A negative result needs at least as much verification as a positive one.**
+> A positive announces itself — here is the line, here is the file. A negative
+> is silence, and silence is also what a mis-scoped search, a wrong pattern, and
+> a broken pipeline produce. Before believing "it does not exist", establish
+> that the search *could* have found it.
+
+What caught two of the four was **implausibility**: "`--max-bitrate` does not
+exist" was unbelievable to someone who had been passing it all evening, which
+prompted a second look. That is the practical trigger — a negative that would be
+surprising if true has earned one more check, by a different method. The cost of
+the one that survived: a finding that sent a reader to add a field, write FFI
+conversions both ways and rebuild `webrtc-sys`, when all of that already existed
+and worked, and the actual blockage was one private method.
+
 ### The reinstatement reflex: a withdrawal is not a prompt for a replacement
 
 Every claim withdrawn this session was immediately followed by reaching for a
