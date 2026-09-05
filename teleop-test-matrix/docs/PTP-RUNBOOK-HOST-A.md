@@ -224,6 +224,36 @@ timedatectl | grep -i "NTP service"
 > starts from a small offset. PTP will correct any offset, but starting minutes
 > away makes the first convergence slow and the logs confusing.
 
+### 4.1 CPU governor and EPP — do not skip
+
+Not a clock setting, but it belongs here because it is the other host-level
+default that silently corrupts timings.
+
+A bursty 30 fps duty cycle never convinces the `powersave` governor to ramp up.
+Measured cost: capture→buffer went from 0.17 ms to 14.89 ms, with no symptom
+other than the latency itself.
+
+```bash
+sudo cpupower frequency-set -g performance
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference
+```
+
+**Verify both:**
+
+```bash
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor              # performance
+cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference # performance
+```
+
+To persist the governor across reboots, `sudo apt install cpufrequtils` and set
+`GOVERNOR="performance"` in `/etc/default/cpufrequtils`.
+
+> **EPP is not covered by `cpufrequtils`.** It is an `intel_pstate` knob outside
+> its scope and reverts to `balance_performance` on reboot. A freshly booted
+> machine can therefore read governor `performance` while the setting that
+> matters has silently gone back. Both run scripts warn on both values; heed the
+> warning rather than assuming the persisted governor covers you.
+
 ---
 
 ## Phase 5 — PTP grandmaster
@@ -305,7 +335,12 @@ phc2sys[123.4]: CLOCK_REALTIME phc offset  -34 s2 freq  -1234 delay 987
 
 ---
 
-## Phase 7 — Make it persistent (optional; skip for a one-off test)
+## Phase 7 — Make it persistent
+
+> Previously labelled optional. It is not, for anything beyond a single
+> afternoon: these units are what make the rig survive a reboot, and a
+> multi-day programme *will* reboot. The "skip for a one-off test" framing
+> invited skipping it and then losing a day's configuration silently.
 
 ```bash
 sudo tee /etc/systemd/system/ptp4l-A.service >/dev/null <<'EOF'
@@ -321,6 +356,28 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
+sudo systemctl daemon-reload
+sudo systemctl enable --now ptp4l-A
+```
+
+### Install `phc2sys-A` only on the hardware tier
+
+**Check first — on the software tier this unit cannot work and must not be
+installed:**
+
+```bash
+ethtool -T "$ETH_LINK" | grep "PTP Hardware Clock"
+```
+
+`PTP Hardware Clock: none` means there is no PHC to synchronise *from*.
+`phc2sys -s "$ETH_LINK"` has no source, and Phase 6 has already said so:
+`ptp4l` disciplines the system clock directly when `time_stamping software` is
+set. Installing the unit anyway leaves a permanently failing service and a
+checklist item that can never pass.
+
+Only if the link reports a real PHC:
+
+```bash
 sudo tee /etc/systemd/system/phc2sys-A.service >/dev/null <<'EOF'
 [Unit]
 Description=Sync system clock to PHC
@@ -336,10 +393,16 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ptp4l-A phc2sys-A
+sudo systemctl enable --now phc2sys-A
 ```
 
 Substitute your interface in the `phc2sys` line.
+
+> This rig's Host A runs `time_stamping software` on a NIC reporting
+> `PTP Hardware Clock: none`. **Absent `phc2sys` is the correct state here.** The
+> runbook previously installed the unit unconditionally in this phase while
+> Phase 6 said to skip it, and then required its output in the Definition of
+> Done — three places disagreeing about the same host.
 
 ---
 
@@ -374,20 +437,62 @@ Either satisfies a 10 ms measurement with orders of magnitude to spare.
 Host B (subscriber) starts **first**. Once it is waiting, start the publisher:
 
 ```bash
-cd ~/rust-sdks/examples/local_video/scripts
+cd ~/code/rust-sdks/examples/local_video/scripts
 export LIVEKIT_API_KEY=... LIVEKIT_API_SECRET=...
 ./run_publisher_test.sh wss://your.livekit.server round4-mso 120
 ```
 
 This publishes the animated test pattern with the capture time burned into the
-video, opens a local preview, and writes `results/publisher.csv`. It exits by
-itself at the end frame.
+video, opens a local preview, and writes `results/publisher.csv` together with
+`results/publisher.manifest.json`, which records the run's provenance —
+invocation, git sha, governor and EPP, encoder actually selected, uplink
+capacity at both ends, and how the run ended.
 
-When finished, copy the CSV to Host B, which generates the report:
+It ends its own run at the end frame and releases the room.
+
+> This was previously stated as "it exits by itself" and was **false** until
+> `6f25679`. Shutdown tested equality against one specific frame ID, so it
+> depended on that exact frame surviving the whole capture→packetize pipeline.
+> At 30 fps with no drops it nearly always does; in a run encoding one frame in
+> twenty-six it did not, and the publisher ran 19 minutes past its window still
+> publishing into the room — which silently corrupted the next run. If you are
+> on an older build, confirm the process actually exited before starting
+> anything else in that room.
+
+**Frame window:** `START_FRAME` defaults to 0. Do not raise it to skip
+encoder ramp-up without checking what you are discarding — see the warning
+under Phase 9.1.
+
+When finished, copy the CSV **and its manifest** to Host B, which generates the
+report:
 
 ```bash
-scp results/publisher.csv userB@192.168.99.2:~/rust-sdks/examples/local_video/scripts/results/
+scp results/publisher.csv results/publisher.manifest.json \
+    userB@192.168.99.2:~/code/rust-sdks/examples/local_video/scripts/results/
 ```
+
+### 9.1 Startup exclusions are not free
+
+An earlier version of these scripts excluded the first 60–90 frames of every run
+to keep encoder ramp-up out of the statistics. Applied uniformly, defensible in
+isolation — and it removed the evidence differentially. Share of each run's
+worst-1% frames that fell inside the excluded window:
+
+| Run | In window | Share |
+|---|---|---|
+| control | 0 / 35 | 0% |
+| A2-off | 3 / 33 | 9% |
+| A1 | 9 / 34 | 26% |
+| A2 | 29 / 34 | **85%** |
+| A3 | 29 / 34 | **85%** |
+
+Zero from the control, 85% from the two runs whose behaviour was under
+investigation. Every comparison drawn across that filter was biased toward
+making the loaded runs look calmer than they were.
+
+> **A filter that discards more evidence from the treatment than from the
+> control is removing signal, not noise.** Before applying any exclusion, check
+> its effect *per arm*, not just its justification.
 
 > Copying over the direct link is fine — the test is over by then, so the transfer
 > cannot perturb a measurement.
@@ -402,8 +507,52 @@ scp results/publisher.csv userB@192.168.99.2:~/rust-sdks/examples/local_video/sc
 | ptp4l: `port 1: link down` | peer not configured | Host B finishes Phase 2 first |
 | Both hosts claim grandmaster | cable not actually between them, or a switch in path | verify with `ping -I $ETH_LINK` |
 | phc2sys `offset` in millions | NTP still running | re-check Phase 4 |
-| Sync looks perfect, CSV timestamps still wrong | `phc2sys` not running | Phase 6 — the classic failure |
+| Sync looks perfect, CSV timestamps still wrong | `phc2sys` not running — **hardware tier only** | Phase 6. On the software tier absent `phc2sys` is correct; check `ethtool -T` before chasing this |
 | Video stops when cable is plugged | link became default route | Phase 3; add `never-default` |
+| CSV contains the header and **no rows** | *Not* permissions — the frame-ID range matched nothing | See below |
+| CSV file missing entirely | `File::create` failed | Genuinely a path or permissions problem |
+| `ptp4l` restarted; its own sync check passes immediately | A fresh daemon has no `rms` history | See below |
+
+### A header-only CSV has already ruled out permissions
+
+The header is written at logger construction — `create_dir_all`, `File::create`,
+write header, flush — before a single frame arrives. So the artifact tells you
+which branch you are on:
+
+| On disk | What it proves |
+|---|---|
+| No file at all | `File::create` failed. Path or permissions, genuinely |
+| Header, zero rows | `File::create` **succeeded**. Permissions are ruled out by the file's own existence; your `--log-start-frame-id` / `--log-end-frame-id` window matched no frames |
+
+A header-only CSV is positive evidence *against* the permissions hypothesis.
+Read the file before chasing the cause it appears to suggest.
+
+### After a `ptp4l` restart, the restarted host cannot check its own sync
+
+A grandmaster has no master to measure itself against, so `ptp4l` emits no `rms`
+lines at all while holding that role. On the **slave** this is loud and the
+existing check catches it — here is the whole event from Host B's journal when
+Host A's daemon went down:
+
+```
+19:19:24  port 1 (eno2): SLAVE to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES
+19:19:24  port 1 (eno2): assuming the grand master role
+19:19:28  selected best master clock 345a60.fffe.5a6e7b
+19:19:29  port 1 (eno2): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+19:19:29  rms 5831 max 12953 freq +374977984 delay 70362
+```
+
+It self-healed in five seconds with no operator action, and the residue was a
+single 13 µs excursion — three orders below anything the transport figures
+measure.
+
+> The host that **cannot** detect this is the one that just restarted. It has no
+> `rms` history, so a check counting samples over a window passes on a few
+> seconds of convergence — and it is also the host that believes it is the
+> grandmaster and therefore never doubts itself.
+>
+> **After any `ptp4l` restart, wait for the full averaging window to elapse
+> before trusting that host's own sync-quality check.**
 
 ---
 
@@ -413,7 +562,16 @@ scp results/publisher.csv userB@192.168.99.2:~/rust-sdks/examples/local_video/sc
 - [ ] `192.168.99.1/30` assigned; no default route on `$ETH_LINK`
 - [ ] `ip route get 8.8.8.8` → 5G interface
 - [ ] `timedatectl` → NTP inactive
+- [ ] CPU governor **and** EPP both read `performance`
 - [ ] `ptp4l` running, log shows grandmaster role
-- [ ] `phc2sys` running with `s2` and sub-µs offsets (hardware tier)
+- [ ] **Hardware tier only:** `phc2sys` running with `s2` and sub-µs offsets.
+      On the software tier (`PTP Hardware Clock: none`), `phc2sys` absent is the
+      correct state — do not tick this and do not install the unit
+- [ ] If `ptp4l` was restarted, its averaging window has fully elapsed since the
+      restart before its sync check is believed
 - [ ] Host B reports `offsetFromMaster` within target
 - [ ] Timestamping tier reported to the operator
+- [ ] Full unfiltered test suite passes before any push that touches shared
+      code: `cargo test -p local_video --features desktop`. A *filtered* run
+      passed while the shared branch was broken — the filter excluded the test
+      the change had invalidated
