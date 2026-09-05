@@ -28,9 +28,9 @@ pub enum DegradationPreference {
     /// Maintain both framerate and resolution. Frames may be dropped before encoding
     /// if necessary to avoid overusing network and encoder resources.
     MaintainFramerateAndResolution,
-    /// Degrade framerate to maintain resolution.
-    MaintainFramerate,
     /// Degrade resolution to maintain framerate.
+    MaintainFramerate,
+    /// Degrade framerate to maintain resolution.
     MaintainResolution,
     /// Balance between framerate and resolution degradation.
     #[default]
