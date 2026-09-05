@@ -25,7 +25,7 @@ use std::env;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -744,24 +744,43 @@ impl PublisherCsvLogger {
         })
     }
 
+    /// Pushes buffered rows to disk.
+    ///
+    /// Rows are otherwise flushed at most once a second, so the manifest -- which
+    /// counts rows by reading the CSV back -- can be closed while the last second
+    /// of the run is still sitting in the buffer, under-reporting the artifact it
+    /// is supposed to describe.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()?;
+        self.last_flush = Instant::now();
+        Ok(())
+    }
+
     fn record(&mut self, sample: PublisherTimingSample) -> std::io::Result<bool> {
         let Some(frame_id) = sample.frame_id else {
             return Ok(false);
         };
+        // Evaluated before the containment gate, and reported even when this
+        // sample is not logged. The window closes on the first frame at or past
+        // the end bound; the frame that closes it is usually, but not always,
+        // one that gets written. Returning early here was the other half of the
+        // arm-2b hang: every frame past the bound took the `contains` exit and
+        // the caller was never told the window had ended.
+        let reached_end = self.range.reaches_end(frame_id);
         if !self.range.contains(frame_id) {
-            return Ok(false);
+            return Ok(reached_end);
         }
         let Some(frame_buffer_timestamp_us) = sample.got_frame_buffer_timestamp_us else {
-            return Ok(false);
+            return Ok(reached_end);
         };
         let Some(encoder_upload_timestamp_us) = sample.encoder_upload_timestamp_us else {
-            return Ok(false);
+            return Ok(reached_end);
         };
         let Some(encoder_output_timestamp_us) = sample.encoder_output_timestamp_us else {
-            return Ok(false);
+            return Ok(reached_end);
         };
         let Some(packetize_timestamp_us) = sample.webrtc_packetize_timestamp_us else {
-            return Ok(false);
+            return Ok(reached_end);
         };
 
         let first_packetize_timestamp_us =
@@ -818,11 +837,11 @@ impl PublisherCsvLogger {
 
         self.previous_frame_id = Some(frame_id);
         self.previous_packetize_timestamp_us = Some(packetize_timestamp_us);
-        if self.range.reaches_end(frame_id) || self.last_flush.elapsed() >= Duration::from_secs(1) {
+        if reached_end || self.last_flush.elapsed() >= Duration::from_secs(1) {
             self.writer.flush()?;
             self.last_flush = Instant::now();
         }
-        Ok(self.range.reaches_end(frame_id))
+        Ok(reached_end)
     }
 }
 
@@ -894,6 +913,14 @@ impl PublisherTimingState {
         self.completed_log_frame_id.take()
     }
 
+    fn flush_frame_log(&mut self) {
+        if let Some(frame_log) = self.frame_log.as_mut() {
+            if let Err(error) = frame_log.flush() {
+                warn!("failed to flush publisher CSV before closing the manifest: {error}");
+            }
+        }
+    }
+
     fn get_or_insert_sample(
         &mut self,
         sensor_exposure_timestamp_us: u64,
@@ -951,6 +978,39 @@ fn update_shared_timing_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_cause_defaults_to_stream_ended_not_to_success() {
+        // The old close path hardcoded "completed", so a run that fell out of
+        // the loop for an unknown reason was recorded as a clean finish.
+        assert_eq!(ShutdownCause::new().reason(), "stream_ended");
+    }
+
+    #[test]
+    fn shutdown_cause_distinguishes_the_window_from_a_signal() {
+        let end = ShutdownCause::new();
+        end.set(ShutdownCause::END_FRAME);
+        assert_eq!(end.reason(), "end_frame_reached");
+
+        let term = ShutdownCause::new();
+        term.set(ShutdownCause::SIGTERM);
+        assert_eq!(term.reason(), "terminated_sigterm");
+
+        let int = ShutdownCause::new();
+        int.set(ShutdownCause::SIGINT);
+        assert_eq!(int.reason(), "interrupted_sigint");
+    }
+
+    #[test]
+    fn the_first_shutdown_cause_wins() {
+        // Stopping a run by hand after its window closed must not relabel it as
+        // a termination: the window is why it was ending. Arm 2b was the
+        // reverse case -- terminated by hand, recorded as completed.
+        let cause = ShutdownCause::new();
+        cause.set(ShutdownCause::END_FRAME);
+        cause.set(ShutdownCause::SIGTERM);
+        assert_eq!(cause.reason(), "end_frame_reached");
+    }
 
     #[test]
     fn requested_playout_delay_is_absent_when_no_delay_flags_are_set() {
@@ -1197,25 +1257,98 @@ fn create_i420_buffer(width: u32, height: u32, align_for_display: bool) -> I420B
     }
 }
 
+/// Why the run ended.
+///
+/// `ctrl_c_received` is the shutdown *signal* and is shared by several paths --
+/// a real interrupt, and the window-completion task, both set it. That makes it
+/// useless for saying what happened, and the manifest was hardcoding
+/// "completed" for every exit as a result: arm 2b was terminated by hand after
+/// running 19 minutes past its window and its manifest still claimed a clean
+/// completion. A run's own provenance is exactly the thing that must not be
+/// guessed.
+#[derive(Clone)]
+struct ShutdownCause(Arc<AtomicU8>);
+
+impl ShutdownCause {
+    const RUNNING: u8 = 0;
+    const END_FRAME: u8 = 1;
+    const SIGINT: u8 = 2;
+    const SIGTERM: u8 = 3;
+
+    fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(Self::RUNNING)))
+    }
+
+    /// First cause wins. A SIGTERM landing during window-completion teardown
+    /// must not overwrite the reason the run was already ending.
+    fn set(&self, cause: u8) {
+        let _ =
+            self.0.compare_exchange(Self::RUNNING, cause, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn reason(&self) -> &'static str {
+        match self.0.load(Ordering::Acquire) {
+            Self::END_FRAME => "end_frame_reached",
+            Self::SIGINT => "interrupted_sigint",
+            Self::SIGTERM => "terminated_sigterm",
+            // Neither a signal nor the window: the capture loop or the room
+            // ended on its own, which is worth telling apart from both.
+            _ => "stream_ended",
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
     let ctrl_c_received = Arc::new(AtomicBool::new(false));
+    let shutdown_cause = ShutdownCause::new();
     tokio::spawn({
         let ctrl_c_received = ctrl_c_received.clone();
+        let shutdown_cause = shutdown_cause.clone();
         async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown_cause.set(ShutdownCause::SIGINT);
             ctrl_c_received.store(true, Ordering::Release);
             info!("Ctrl-C received, exiting...");
         }
     });
 
-    run(args, ctrl_c_received).await
+    // The rig drives runs with `nohup` and stops them with `kill`, which sends
+    // SIGTERM, not SIGINT. Without this the default disposition kills the
+    // process outright and the manifest is never closed -- provenance is lost
+    // for precisely the runs that had to be stopped by hand, which are the ones
+    // whose results get argued about later.
+    #[cfg(unix)]
+    tokio::spawn({
+        let ctrl_c_received = ctrl_c_received.clone();
+        let shutdown_cause = shutdown_cause.clone();
+        async move {
+            let mut term =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(term) => term,
+                    Err(error) => {
+                        log::warn!("could not install SIGTERM handler: {error}");
+                        return;
+                    }
+                };
+            term.recv().await;
+            shutdown_cause.set(ShutdownCause::SIGTERM);
+            ctrl_c_received.store(true, Ordering::Release);
+            info!("SIGTERM received, exiting...");
+        }
+    });
+
+    run(args, ctrl_c_received, shutdown_cause).await
 }
 
-async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
+async fn run(
+    args: Args,
+    ctrl_c_received: Arc<AtomicBool>,
+    shutdown_cause: ShutdownCause,
+) -> Result<()> {
     let log_range = FrameLogRange::new(args.log_start_frame_id, args.log_end_frame_id)?;
     // Shared between the stats loop that fills it and the CSV logger that reads
     // it; declared here so both the logger and the task can be handed a clone.
@@ -1515,6 +1648,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         let timing_state = timing_state.clone();
         let display_shared_for_timing = display_shared.clone();
         let shutdown_on_log_end = ctrl_c_received.clone();
+        let shutdown_cause_on_log_end = shutdown_cause.clone();
         let mut events = track.publish_timing_events();
         tokio::spawn(async move {
             use tokio_stream::StreamExt;
@@ -1531,6 +1665,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
                 }
                 if let Some(frame_id) = completed_frame_id {
                     info!("Publisher completed --log-end-frame-id {frame_id}; shutting down...");
+                    shutdown_cause_on_log_end.set(ShutdownCause::END_FRAME);
                     shutdown_on_log_end.store(true, Ordering::Release);
                     break;
                 }
@@ -1744,7 +1879,12 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         {
             manifest.set_encoder_implementation(implementation);
         }
-        manifest.finish_from_csv(csv_path, "completed");
+        // Flush before counting: `finish_from_csv` measures the file on disk, so
+        // buffered rows would be missing from the count and present in the CSV.
+        if let Some(timing_state) = publish_timing_state.as_ref() {
+            timing_state.lock().flush_frame_log();
+        }
+        manifest.finish_from_csv(csv_path, shutdown_cause.reason());
         if let Err(e) = manifest.write() {
             log::warn!("failed to close run manifest: {e}");
         } else {
@@ -1752,7 +1892,24 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         }
     }
 
-    Ok(())
+    // Exit rather than returning into the runtime teardown.
+    //
+    // The room is never explicitly closed and teardown is entirely drop-driven;
+    // something in that chain blocks the tokio runtime's drop indefinitely. A
+    // publisher that has finished its window but never exits keeps publishing
+    // into the room, and the next run on that room measures both streams: that
+    // is how a3r1 was lost, and why every run so far has needed a manual
+    // `pkill`. Arm 2b sat in this state for 19 minutes.
+    //
+    // `_exit` rather than `std::process::exit`, which was tried first and also
+    // hung: it runs C++ static destructors, and libwebrtc's block on threads
+    // that are themselves not shutting down. `_exit` skips them and returns the
+    // process to the OS immediately.
+    //
+    // Everything this run produced -- CSV flushed above, manifest written -- is
+    // already on disk, so there is nothing left for the drop chain to protect.
+    info!("Publisher shutting down ({}).", shutdown_cause.reason());
+    unsafe { libc::_exit(0) }
 }
 
 async fn run_capture_loop(

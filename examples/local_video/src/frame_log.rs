@@ -35,9 +35,17 @@ impl FrameLogRange {
         self.start.and_then(|start| start.checked_sub(1))
     }
 
-    /// Returns whether this frame ID is the configured inclusive end bound.
+    /// Returns whether this frame ID is at or past the configured end bound.
+    ///
+    /// Deliberately `>=` rather than `==`. This drives publisher shutdown, and
+    /// an equality test makes shutdown contingent on one specific frame ID
+    /// surviving the whole capture->packetize pipeline. Arm 2b encoded roughly
+    /// one frame in twenty-six, so the end frame had about a 4% chance of being
+    /// one of the survivors; it was not, and the publisher ran 19 minutes past
+    /// its window still publishing into the room. A publisher that outlives its
+    /// window silently corrupts the *next* run, which is how a3r1 was lost.
     pub(crate) fn reaches_end(self, frame_id: u32) -> bool {
-        self.end == Some(frame_id)
+        self.end.is_some_and(|end| frame_id >= end)
     }
 }
 
@@ -127,6 +135,27 @@ mod tests {
         assert_eq!(range.previous_to_start(), Some(9));
         assert!(range.reaches_end(20));
         assert!(!range.reaches_end(19));
+    }
+
+    #[test]
+    fn reaches_end_fires_on_frames_past_the_bound_not_only_on_the_bound() {
+        // The arm-2b hang: at 1.13 fps the encoder dropped frame 3600, so an
+        // equality test never fired and the publisher never shut down. Any
+        // frame at or past the bound must end the window.
+        let range = FrameLogRange::new(Some(0), Some(3600)).expect("range should be valid");
+        assert!(range.reaches_end(3600));
+        assert!(range.reaches_end(3601), "the end frame is often dropped; the next one must end it");
+        assert!(range.reaches_end(9999));
+        assert!(!range.reaches_end(3599));
+    }
+
+    #[test]
+    fn an_open_ended_range_never_reaches_an_end() {
+        // No --log-end-frame-id means run until interrupted. `>=` must not turn
+        // an absent bound into an immediate shutdown.
+        let range = FrameLogRange::new(Some(0), None).expect("range should be valid");
+        assert!(!range.reaches_end(0));
+        assert!(!range.reaches_end(u32::MAX));
     }
 
     #[test]

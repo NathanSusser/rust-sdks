@@ -46,6 +46,9 @@ winit = { workspace = true, features = [ "android-native-activity" ] }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 anyhow = { workspace = true }
 chrono = "0.4"
+# For `_exit`. `std::process::exit` runs C++ static destructors, and libwebrtc's
+# deadlock on teardown -- see the shutdown path in publisher.rs.
+libc = "0.2"
 serde_json = { workspace = true }
 bytemuck = { version = "1.16", features = ["derive"] }
 
