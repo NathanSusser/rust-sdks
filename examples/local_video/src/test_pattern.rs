@@ -9,6 +9,11 @@ pub(crate) enum TestPatternMode {
     /// Scrolling color bars with a moving checkerboard.
     #[value(name = "1")]
     Animated,
+    /// Pseudo-random noise. Near-incompressible, so the encoder emits whatever the
+    /// bitrate cap allows instead of what the content needs — which is what makes
+    /// bytes-per-frame a controllable variable rather than a property of the scene.
+    #[value(name = "2")]
+    Noise,
 }
 
 impl TestPatternMode {
@@ -17,6 +22,7 @@ impl TestPatternMode {
         match self {
             Self::Static => "static SMPTE 75% color bars",
             Self::Animated => "animated scrolling color bars and checkerboard",
+            Self::Noise => "pseudo-random noise (near-incompressible)",
         }
     }
 }
@@ -30,6 +36,8 @@ pub(crate) struct TestPattern {
     y_plane: Vec<u8>,
     u_plane: Vec<u8>,
     v_plane: Vec<u8>,
+    chroma_row_u: Vec<u8>,
+    chroma_row_v: Vec<u8>,
     mode: TestPatternMode,
     frame_index: u64,
 }
@@ -86,6 +94,8 @@ impl TestPattern {
             y_plane,
             u_plane,
             v_plane,
+            chroma_row_u: vec![128; chroma_width],
+            chroma_row_v: vec![128; chroma_width],
             mode,
             frame_index: 0,
         }
@@ -127,12 +137,23 @@ impl TestPattern {
                 data_v,
                 stride_v as usize,
             ),
+            TestPatternMode::Noise => self.render_noise(
+                data_y,
+                stride_y as usize,
+                data_u,
+                stride_u as usize,
+                data_v,
+                stride_v as usize,
+            ),
         }
         self.frame_index = self.frame_index.wrapping_add(1);
     }
 
-    fn render_animated(
-        &self,
+    /// Fills every plane with seeded noise. Seeded from `frame_index` so a given frame
+    /// is byte-identical across hosts and reruns; a clock- or entropy-seeded generator
+    /// would make two runs incomparable.
+    fn render_noise(
+        &mut self,
         data_y: &mut [u8],
         stride_y: usize,
         data_u: &mut [u8],
@@ -144,41 +165,106 @@ impl TestPattern {
             return;
         }
 
-        let bar_offset = animation_position(self.frame_index, self.width, 4);
-        let box_size = (self.width.min(self.height) / 4).max(1);
-        let box_x = animation_position(self.frame_index, self.width.saturating_sub(box_size), 7);
-        let box_y = animation_position(self.frame_index, self.height.saturating_sub(box_size), 5);
+        // Mixed into a xorshift64* state below; the odd constant keeps successive frame
+        // indices from producing correlated streams.
+        let mut state = self.frame_index.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut fill = |dst: &mut [u8], stride: usize, width: usize, height: usize| {
+            for row in 0..height {
+                let start = row * stride;
+                let line = &mut dst[start..start + width];
+                // 8 bytes per PRNG step: a per-byte generator is fast enough to be
+                // correct but slow enough to reappear in capture_to_buffer.
+                for chunk in line.chunks_mut(8) {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let bytes = state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+                    chunk.copy_from_slice(&bytes[..chunk.len()]);
+                }
+            }
+        };
+
+        fill(data_y, stride_y, self.width, self.height);
+        fill(data_u, stride_u, self.chroma_width, self.chroma_height);
+        fill(data_v, stride_v, self.chroma_width, self.chroma_height);
+    }
+
+    fn render_animated(
+        &mut self,
+        data_y: &mut [u8],
+        stride_y: usize,
+        data_u: &mut [u8],
+        stride_u: usize,
+        data_v: &mut [u8],
+        stride_v: usize,
+    ) {
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        let width = self.width;
+        let height = self.height;
+        let chroma_width = self.chroma_width;
+        let chroma_height = self.chroma_height;
+
+        let bar_offset = animation_position(self.frame_index, width, 4) % width;
+        let box_size = (width.min(height) / 4).max(1);
+        let box_x = animation_position(self.frame_index, width.saturating_sub(box_size), 7);
+        let box_y = animation_position(self.frame_index, height.saturating_sub(box_size), 5);
         let checker_size = (box_size / 8).max(1);
 
-        for row in 0..self.height {
+        // The bars depend only on the column, so every luma row is identical and the
+        // horizontal scroll is a rotation of the precomputed base row. Two copies per
+        // row replace a per-pixel modulo and palette lookup.
+        let split = width - bar_offset;
+        let base_y = &self.y_plane[..width];
+        for row in 0..height {
             let row_start = row * stride_y;
-            for col in 0..self.width {
-                let source_col = (col + bar_offset) % self.width;
-                let mut y = color_for_luma_column(source_col, self.width).y;
-                if point_is_in_box(col, row, box_x, box_y, box_size) {
-                    let checker_col = (col - box_x) / checker_size;
-                    let checker_row = (row - box_y) / checker_size;
-                    y = if (checker_col + checker_row).is_multiple_of(2) { 235 } else { 16 };
-                }
-                data_y[row_start + col] = y;
+            let dst = &mut data_y[row_start..row_start + width];
+            dst[..split].copy_from_slice(&base_y[bar_offset..]);
+            dst[split..].copy_from_slice(&base_y[..bar_offset]);
+        }
+
+        let box_col_end = (box_x + box_size).min(width);
+        let box_row_end = (box_y + box_size).min(height);
+        for row in box_y..box_row_end {
+            let row_start = row * stride_y;
+            let checker_row = (row - box_y) / checker_size;
+            for col in box_x..box_col_end {
+                let checker_col = (col - box_x) / checker_size;
+                data_y[row_start + col] =
+                    if (checker_col + checker_row).is_multiple_of(2) { 235 } else { 16 };
             }
         }
 
-        for row in 0..self.chroma_height {
+        // The scroll offset is in luma columns, so an odd offset does not correspond to
+        // any rotation of a chroma row. Build the row once, then replicate it.
+        for col in 0..chroma_width {
+            let luma_col = (col * 2).min(width - 1);
+            let color = color_for_luma_column((luma_col + bar_offset) % width, width);
+            self.chroma_row_u[col] = color.u;
+            self.chroma_row_v[col] = color.v;
+        }
+        for row in 0..chroma_height {
             let row_start_u = row * stride_u;
             let row_start_v = row * stride_v;
-            for col in 0..self.chroma_width {
-                let luma_col = (col * 2).min(self.width - 1);
-                let luma_row = (row * 2).min(self.height - 1);
-                let source_col = (luma_col + bar_offset) % self.width;
-                let color = color_for_luma_column(source_col, self.width);
-                let (u, v) = if point_is_in_box(luma_col, luma_row, box_x, box_y, box_size) {
-                    (128, 128)
-                } else {
-                    (color.u, color.v)
-                };
-                data_u[row_start_u + col] = u;
-                data_v[row_start_v + col] = v;
+            data_u[row_start_u..row_start_u + chroma_width].copy_from_slice(&self.chroma_row_u);
+            data_v[row_start_v..row_start_v + chroma_width].copy_from_slice(&self.chroma_row_v);
+        }
+
+        for row in 0..chroma_height {
+            let luma_row = (row * 2).min(height - 1);
+            if luma_row < box_y || luma_row >= box_y + box_size {
+                continue;
+            }
+            let row_start_u = row * stride_u;
+            let row_start_v = row * stride_v;
+            for col in 0..chroma_width {
+                let luma_col = (col * 2).min(width - 1);
+                if point_is_in_box(luma_col, luma_row, box_x, box_y, box_size) {
+                    data_u[row_start_u + col] = 128;
+                    data_v[row_start_v + col] = 128;
+                }
             }
         }
     }
@@ -291,6 +377,110 @@ mod tests {
         let second = render_frame(&mut pattern, 64, 36);
 
         assert_ne!(first, second);
+    }
+
+    /// The straightforward per-pixel formulation the fast path replaced. Kept as an
+    /// oracle so the row-replication rewrite cannot silently change what is rendered.
+    fn render_animated_reference(
+        pattern: &TestPattern,
+        data_y: &mut [u8],
+        stride_y: usize,
+        data_u: &mut [u8],
+        stride_u: usize,
+        data_v: &mut [u8],
+        stride_v: usize,
+    ) {
+        if pattern.width == 0 || pattern.height == 0 {
+            return;
+        }
+        let bar_offset = animation_position(pattern.frame_index, pattern.width, 4);
+        let box_size = (pattern.width.min(pattern.height) / 4).max(1);
+        let box_x =
+            animation_position(pattern.frame_index, pattern.width.saturating_sub(box_size), 7);
+        let box_y =
+            animation_position(pattern.frame_index, pattern.height.saturating_sub(box_size), 5);
+        let checker_size = (box_size / 8).max(1);
+
+        for row in 0..pattern.height {
+            let row_start = row * stride_y;
+            for col in 0..pattern.width {
+                let source_col = (col + bar_offset) % pattern.width;
+                let mut y = color_for_luma_column(source_col, pattern.width).y;
+                if point_is_in_box(col, row, box_x, box_y, box_size) {
+                    let checker_col = (col - box_x) / checker_size;
+                    let checker_row = (row - box_y) / checker_size;
+                    y = if (checker_col + checker_row).is_multiple_of(2) { 235 } else { 16 };
+                }
+                data_y[row_start + col] = y;
+            }
+        }
+
+        for row in 0..pattern.chroma_height {
+            let row_start_u = row * stride_u;
+            let row_start_v = row * stride_v;
+            for col in 0..pattern.chroma_width {
+                let luma_col = (col * 2).min(pattern.width - 1);
+                let luma_row = (row * 2).min(pattern.height - 1);
+                let source_col = (luma_col + bar_offset) % pattern.width;
+                let color = color_for_luma_column(source_col, pattern.width);
+                let (u, v) = if point_is_in_box(luma_col, luma_row, box_x, box_y, box_size) {
+                    (128, 128)
+                } else {
+                    (color.u, color.v)
+                };
+                data_u[row_start_u + col] = u;
+                data_v[row_start_v + col] = v;
+            }
+        }
+    }
+
+    #[test]
+    fn animated_fast_path_matches_reference() {
+        // Odd and tiny dimensions exercise the chroma rounding and the box clamping,
+        // which is where a row-replication rewrite is most likely to diverge.
+        for (width, height) in
+            [(1280usize, 720usize), (64, 36), (17, 13), (31, 17), (2, 2), (1, 1)]
+        {
+            let chroma_width = width.div_ceil(2);
+            let chroma_height = height.div_ceil(2);
+            let mut pattern = TestPattern::new(width as u32, height as u32, TestPatternMode::Animated);
+
+            for frame in 0..120 {
+                let mut fast = (
+                    vec![7; width * height],
+                    vec![7; chroma_width * chroma_height],
+                    vec![7; chroma_width * chroma_height],
+                );
+                let mut reference = (
+                    vec![9; width * height],
+                    vec![9; chroma_width * chroma_height],
+                    vec![9; chroma_width * chroma_height],
+                );
+
+                render_animated_reference(
+                    &pattern,
+                    &mut reference.0,
+                    width,
+                    &mut reference.1,
+                    chroma_width,
+                    &mut reference.2,
+                    chroma_width,
+                );
+                pattern.render_animated(
+                    &mut fast.0,
+                    width,
+                    &mut fast.1,
+                    chroma_width,
+                    &mut fast.2,
+                    chroma_width,
+                );
+                pattern.frame_index = pattern.frame_index.wrapping_add(1);
+
+                assert_eq!(fast.0, reference.0, "luma differs at {width}x{height} frame {frame}");
+                assert_eq!(fast.1, reference.1, "u differs at {width}x{height} frame {frame}");
+                assert_eq!(fast.2, reference.2, "v differs at {width}x{height} frame {frame}");
+            }
+        }
     }
 
     #[test]
