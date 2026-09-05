@@ -105,7 +105,7 @@ theirs to write.*
 
 ## Host B (subscriber)
 
-### CPU governor — ⚠ NOT PERSISTED
+### CPU governor — persisted; EPP is not
 
 ```bash
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -118,16 +118,23 @@ frame — which never convinces the governor to ramp, so cores sat at 800 MHz
 against a 4500 MHz ceiling. Correcting it cut subscriber decode time by 73%
 and moved median core frequency from 1737 to 2880 MHz.
 
-**This reverts on reboot.** `cpufrequtils` is not installed and
-`/etc/default/cpufrequtils` does not exist, so nothing restores it. Until that
-is fixed, verify the governor before every run — a rebooted machine produces
-plausible, wrong numbers with no warning. Host A's `run_publisher_test.sh`
-carries a run-time guard that warns when the governor is not `performance`;
-Host B has no equivalent yet.
+**Corrected 2026-09-05 — this row said "NOT PERSISTED" and listed its own fix
+as an open item after that fix had been applied.** Verified on the machine:
+`cpufrequtils` is installed and `/etc/default/cpufrequtils` contains
+`GOVERNOR="performance"`, so **the governor now survives a reboot**.
 
-*Open item: install `cpufrequtils` and set `GOVERNOR="performance"` in
-`/etc/default/cpufrequtils`. Note it restores the governor but **not** EPP, so
-EPP still needs setting or checking separately after a reboot.*
+**EPP still does not.** `cpufrequtils` has no concept of
+`energy_performance_preference` — it is an `intel_pstate` knob outside its
+scope — and nothing else on this machine restores it (no tmpfiles rule, no
+unit). So after any reboot the governor is right and EPP is back to
+`balance_performance`, which is the harder case to notice because the obvious
+check passes.
+
+`run_subscriber_test.sh` carries a run-time guard that warns on **both**
+governor and EPP, ported from Host A's publisher script. This row previously
+said Host B had no equivalent; it has had one since that port.
+
+*Open item: persist EPP, via a systemd unit or a tmpfiles rule.*
 
 ### 5G must hold the default route
 
@@ -243,13 +250,35 @@ Root fingerprint, sha256:
 
 ### Not changed, deliberately
 
-- `run_subscriber_test.sh` is unmodified. It cannot pass `--low-latency`, so
-  those runs invoke the binary directly using the script's own argument list
-  plus the flag, rather than editing a runbook script.
 - Hardware decode is not available and was not pursued: no NVIDIA GPU, and
   `webrtc-sys` ships a VAAPI *encoder* but no VAAPI decoder. Software decode is
-  structural here, not a misconfiguration. It has never been the bottleneck —
-  1.27 ms at 640×360, 3.65 ms at 1080p, against a 33.3 ms frame budget.
+  structural here, not a misconfiguration.
+
+  **The claim that it "has never been the bottleneck" is withdrawn**, along with
+  the figures that supported it. This row read "1.27 ms at 640×360, 3.65 ms at
+  1080p, against a 33.3 ms frame budget". Measured across every run that logged
+  resolution: 640×360 is **3.76 ms** p50, and 1080p is **9.16 ms** p50 with a
+  **27.84 ms** maximum — 84% of the frame budget, not 11% of it. The 3.65 ms
+  figure does not correspond to any measurement in the data.
+
+  The deeper problem is that the 1080p number cannot be quoted at all. There are
+  **16 frames of 1080p in the entire programme**, all of them the opening frames
+  of runs that immediately collapsed to a lower resolution, so every sample is a
+  cold-decoder startup sample. Steady-state 1080p decode on this host has never
+  been measured, because the encoder never let a run hold 1080p. Decode cost
+  tracks bytes per frame rather than pixel count, so it must be re-measured
+  against the production feed's actual bitrate before hardware decode is ruled
+  in or out.
+
+### Changed, and why
+
+- **`run_subscriber_test.sh` is heavily modified.** This section previously
+  listed it under "not changed, deliberately", saying it could not pass
+  `--low-latency` and that low-latency runs therefore invoked the binary
+  directly. Both halves are stale. It now takes `LOW_LATENCY=1` to append
+  `--low-latency`, defaults `START_FRAME` to 0 rather than 60, carries the
+  governor and EPP guard, emits a run manifest, and probes uplink capacity at
+  both ends of a run. Runs go through the script.
 
 ---
 
