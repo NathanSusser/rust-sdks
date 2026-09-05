@@ -1723,6 +1723,25 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         }
     }
 
+    // Close the manifest. Written at startup so a killed run still has
+    // provenance; closed here so a completed one records what it produced.
+    // encoder_implementation comes from the stats snapshot rather than the CLI
+    // flag -- the flag says what was asked for, the snapshot says what ran, and
+    // NVENC silently compiling out is exactly the case where they differ.
+    if let (Some(manifest), Some(csv_path)) = (run_manifest.as_mut(), args.log_csv.as_deref()) {
+        if let Some(implementation) =
+            outbound_snapshot.lock().encoder_implementation.as_deref().filter(|s| !s.is_empty())
+        {
+            manifest.set_encoder_implementation(implementation);
+        }
+        manifest.finish_from_csv(csv_path, "completed");
+        if let Err(e) = manifest.write() {
+            log::warn!("failed to close run manifest: {e}");
+        } else {
+            info!("Run manifest closed: {}", manifest.path().display());
+        }
+    }
+
     Ok(())
 }
 
