@@ -151,7 +151,7 @@ ul.plain li{margin-bottom:9px}
 <header class="top">
   <div class="eyebrow">Teleoperation video · 5G field investigation · 4 September 2026</div>
   <h1>The Silent Downscale</h1>
-  <p class="dek">WebRTC discarded <b>seven eighths of the pixels</b> in every loaded run — within one second, on a link with capacity to spare and <b>zero packet loss</b>. Nothing in either machine's logging would have shown it.</p>
+  <p class="dek">WebRTC discarded <b>seven eighths of the pixels</b> in every loaded run — within one second, with <b>zero packet loss</b> and no drop in delivered bitrate. Nothing in either machine's logging would have shown it.</p>
   <div class="meta">
     <span class="mono">5 paired runs · 17,270 frames</span>
     <span class="mono">Host A → LiveKit SFU → Host B</span>
@@ -159,11 +159,19 @@ ul.plain li{margin-bottom:9px}
   </div>
 </header>
 
+<div class="col">
+<div class="call warn" style="margin-top:36px">
+  <div class="eyebrow">Correction · 5 September 2026</div>
+  <p><strong>Sections 03 and 04 are withdrawn.</strong> They attributed the collapse to WebRTC's bandwidth estimator falling in response to 5G delay spikes, and to the encoder shedding resolution to meet a falling bitrate target. The delivered bitrate in the run that argument rests on does not fall. It holds between 9.1 and 10.1 Mbps through every one of A3's resolution steps, from the first frame to the last. An encoder losing its bitrate allocation cannot spend a flat 10 Mbps while it happens.</p>
+  <p><strong>The mechanism is now unestablished</strong> — not replaced with a different one. Everything measured below is unaffected and stands as recorded: the staircase, its timing, the five-second cadence, the zero packet loss, and the finding that the load ladder was never a ladder. What has been withdrawn is the explanation, and the redirection of the codec work that followed from it. Section 07 carries the detail.</p>
+</div>
+</div>
+
 <div class="stats">
   <div class="stat"><div class="stat-v bad">1/8</div><div class="stat-k">of intended pixels delivered at the highest load point</div></div>
-  <div class="stat"><div class="stat-v bad">0.55–1.05<span style="font-size:16px"> s</span></div><div class="stat-k">from first frame to first resolution drop</div></div>
+  <div class="stat"><div class="stat-v bad">0.40–0.77<span style="font-size:16px"> s</span></div><div class="stat-k">from first frame to first resolution drop</div></div>
   <div class="stat"><div class="stat-v ok">0</div><div class="stat-k">packets lost, in every single run</div></div>
-  <div class="stat"><div class="stat-v">9.6<span style="font-size:16px"> / 10 Mbps</span></div><div class="stat-k">delivered against uplink capacity</div></div>
+  <div class="stat"><div class="stat-v">9.6<span style="font-size:16px"> Mbps</span></div><div class="stat-k">delivered bitrate, held flat across every resolution step</div></div>
 </div>
 
 <div class="col">
@@ -171,7 +179,7 @@ ul.plain li{margin-bottom:9px}
   <h2><span class="n">01</span>What happened</h2>
   <p class="sub">The independent variable was never held constant</p>
   <p class="lede">We ran a load ladder — three nominal resolutions, increasing offered load — to find where latency degrades. The ladder did not exist. Every loaded run held its configured resolution for a handful of frames and then collapsed, and stayed collapsed.</p>
-  <p>The two middle runs, nominally 640×360 and 960×540, both delivered <strong>320×180</strong> for essentially their entire duration. They were not two load points. They were the same experiment run twice — which is why their numbers looked so similar, a similarity we had misread as the encoder gracefully absorbing the increase.</p>
+  <p>The two middle runs, nominally 640×360 and 960×540, both spent most of their duration at <strong>320×180</strong> — A1 for 3,323 of 3,475 frames, A2 for 2,780 of 3,463, A2 alternating up to 480×268 and back on a five-second cycle. They were not two load points. They were the same experiment run twice — which is why their numbers looked so similar, a similarity we had misread as the encoder gracefully absorbing the increase.</p>
 </section>
 </div>
 
@@ -183,7 +191,7 @@ ul.plain li{margin-bottom:9px}
   <div class="legend">
     <span><i></i>measured value</span>
     <span><i class="dash"></i>nominal / configured resolution</span>
-    <span>transport on a log scale — the run spans 20 ms to 2,367 ms</span>
+    <span>transport on a log scale — samples span 18.95 ms to 2,365.80 ms</span>
   </div>
   </div>
 </section>
@@ -197,7 +205,7 @@ ul.plain li{margin-bottom:9px}
       <tr class="okrow"><td class="name">Run B</td><td>1280×720</td><td>1280×720</td><td class="num">3,544 / 3,544</td><td class="num">100%</td><td><span class="win">held</span></td></tr>
       <tr class="hl"><td class="name">A1</td><td>640×360</td><td>320×180</td><td class="num">3,323 / 3,475</td><td class="num">25%</td><td><span class="lose">collapsed</span></td></tr>
       <tr class="hl"><td class="name">A2</td><td>960×540</td><td>320×180</td><td class="num">2,780 / 3,463</td><td class="num">11%</td><td><span class="lose">collapsed</span></td></tr>
-      <tr class="hl"><td class="name">A3</td><td>1920×1080</td><td>640×360</td><td class="num">2,536 / 3,446</td><td class="num">12%</td><td><span class="lose">collapsed</span></td></tr>
+      <tr class="hl"><td class="name">A3</td><td>1920×1080</td><td>640×360</td><td class="num">2,536 / 3,446</td><td class="num">11%</td><td><span class="lose">collapsed</span></td></tr>
       <tr class="hl"><td class="name">A2-off</td><td>960×540</td><td>320×180</td><td class="num">2,660 / 3,342</td><td class="num">11%</td><td><span class="lose">collapsed</span></td></tr>
     </tbody>
   </table>
@@ -206,25 +214,63 @@ ul.plain li{margin-bottom:9px}
 </section>
 
 <section>
-  <h2><span class="n">03</span>Why it happens</h2>
-  <p class="sub">A congestion controller reacting to something that is not congestion</p>
-  <ol class="chain">
-    <li><b>The 5G link produces latency spikes from the first frame</b><span>Not packet loss — arrival timing. Transport jumps well above its median within the first second of every run.</span></li>
-    <li><b>WebRTC's bandwidth estimator is delay-based</b><span>Rising one-way delay is its primary congestion signal. It cannot distinguish radio scheduling jitter from a queue filling up.</span></li>
-    <li><b>There is no actual congestion</b><span>Zero packets lost in all five runs. The highest load point delivered 9.6 Mbps into a 10 Mbps uplink with headroom remaining.</span></li>
-    <li><b>The estimate falls anyway, and the encoder obeys</b><span>Given a lower bitrate target, libwebrtc's quality scaler sheds <em>resolution</em> rather than compressing harder.</span></li>
-    <li><b>It never recovers</b><span>Twenty seconds in, the resolution has settled at its floor and stays there for the remaining hundred seconds.</span></li>
-  </ol>
+  <h2><span class="n">03</span>What the mechanism is not</h2>
+  <p class="sub">The bitrate held flat through every step, which contradicts the explanation this section used to give</p>
+  <p class="lede">This section argued that 5G delay spikes drove WebRTC's delay-based estimator down, and that the encoder shed resolution to meet a falling bitrate target. The first half may well be true. The second half is contradicted by the run it was built on.</p>
+  <p>A3 steps its picture down four times. Its delivered bitrate does not move. What rises, monotonically, is the number of bits spent on each pixel:</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr><th>A3 · elapsed</th><th class="num">Delivered bitrate</th><th>Modal resolution</th><th class="num">Bits per pixel</th></tr></thead>
+    <tbody>
+      <tr><td class="name">0–5 s</td><td class="num">8.16 Mbps</td><td>1280×720</td><td class="num">0.30</td></tr>
+      <tr><td class="name">5–10 s</td><td class="num">11.86 Mbps</td><td>960×540</td><td class="num">0.76</td></tr>
+      <tr><td class="name">10–15 s</td><td class="num">9.94 Mbps</td><td>640×360</td><td class="num">1.44</td></tr>
+      <tr><td class="name">15–95 s</td><td class="num">9.13 – 10.07 Mbps</td><td>640×360</td><td class="num">1.32 – 1.46</td></tr>
+      <tr><td class="name">95–115 s</td><td class="num">7.72 – 8.43 Mbps</td><td>480×268</td><td class="num">2.00 – 2.18</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>An encoder that is losing its bitrate allocation cannot spend a flat 10 Mbps while it happens. Whatever drove the staircase, a collapsing bandwidth estimate is not visible in this run.</p>
+
+  <div class="call warn">
+    <div class="eyebrow">A later run shows the opposite signature</div>
+    <p>A separate 1080p run made two hours later, with the encoder's own columns logged, does match the withdrawn story exactly: bitrate falling 6.76 → 0.82 Mbps, bits per pixel flat at 0.2–0.3, <span class="mono">quality_limitation_reason</span> reading <span class="mono">Bandwidth</span> throughout, and QP pinned at the H.264 ceiling of 51 before every step — dropping to 48, 49, 44, 43, 35 immediately after each one. So the encoder does compress maximally <em>first</em> and shed resolution only when compression is exhausted. But that run happened on a collapsed uplink, and its signature is the inverse of A3's. Carrying its mechanism onto the A-series is the error this correction exists to undo.</p>
+  </div>
+
+  <p>The bytes were real picture, not padding. Padding is discarded at depacketization and never reaches the decoder, so decode time is an independent witness to how much actual coded data arrived — and across sixteen run-and-resolution cells spanning 1.5 to 49.4 kB per frame and five resolutions, decode time tracks bytes rather than pixels (r² = 0.81):</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr><th>Run</th><th>Delivered resolution</th><th class="num">kB per frame</th><th class="num">Decode p50</th></tr></thead>
+    <tbody>
+      <tr><td class="name">Later 1080p run</td><td>640×360</td><td class="num">6.1</td><td class="num">0.87 ms</td></tr>
+      <tr class="hl"><td class="name">A3</td><td>640×360</td><td class="num">41.1</td><td class="num">3.93 ms</td></tr>
+      <tr><td class="name">Later 1080p run</td><td>480×268</td><td class="num">4.2</td><td class="num">0.43 ms</td></tr>
+      <tr class="hl"><td class="name">A2-off</td><td>480×268</td><td class="num">37.1</td><td class="num">2.96 ms</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Same resolution, same decoder, same source: A3's frames carry nearly seven times the bytes and cost four and a half times the decode. Those bytes were delivered to the decoder and decoded. One alternative survives this test and has not been ruled out — filler NAL units emitted inside the bitstream by the hardware encoder, which unlike RTP padding <em>would</em> reach the decoder. Settling that needs the encoder's configuration, not the receiver's logs.</p>
 
   <div class="twrap">
   <table>
     <thead><tr><th>Run</th><th class="num">First transport spike</th><th class="num">First resolution drop</th><th class="num">Spikes before the drop</th><th class="num">Interval</th></tr></thead>
     <tbody>
-      <tr><td class="name">A1</td><td class="num">0.00 s</td><td class="num">0.71 s</td><td class="num">18</td><td class="num">+0.71 s</td></tr>
-      <tr><td class="name">A2</td><td class="num">0.00 s</td><td class="num">0.55 s</td><td class="num">9</td><td class="num">+0.55 s</td></tr>
-      <tr><td class="name">A3</td><td class="num">0.00 s</td><td class="num">1.05 s</td><td class="num">10</td><td class="num">+1.05 s</td></tr>
+      <tr><td class="name">A1</td><td class="num">0.00 s</td><td class="num">0.77 s</td><td class="num">18 / 18</td><td class="num">+0.77 s</td></tr>
+      <tr><td class="name">A2</td><td class="num">0.00 s</td><td class="num">0.40 s</td><td class="num">9 / 9</td><td class="num">+0.40 s</td></tr>
+      <tr><td class="name">A3</td><td class="num">0.00 s</td><td class="num">0.60 s</td><td class="num">10 / 10</td><td class="num">+0.60 s</td></tr>
     </tbody>
   </table>
+  </div>
+  <p>Two notes on reading this. The spike column is <em>every frame that arrived before the drop</em>, not a subset: taking a spike as any sample above twice the run's median transport, all 18, all 9 and all 10 qualify. There is no quiet interval preceding the collapse in any run.</p>
+  <p>And these times are on the <strong>capture</strong> clock, not the receiver's. An earlier version of this table used arrival times, which inflated A3 from 0.60 s to 1.05 s by adding that moment's transport delay. The encoder's decision is made on the sender's timeline, so the sender's clock is the right one — and the difference between the two bases, up to 0.45 s, is larger than the quantity being reported.</p>
+
+  <div class="call">
+    <div class="eyebrow">It does not settle at a floor — it oscillates</div>
+    <p>The withdrawn version of this section said the resolution reaches a floor and stays there. It does not. A2 alternates between 320×180 and 480×268 six times over its run, and A2-off twice, on intervals of 5.00 seconds measured to the hundredth across eight consecutive steps. A3 steps <em>down</em> again at 96 seconds. The picture never returns to anything near nominal, which is the part that matters operationally — but the scaler is plainly still trying, and a description that has it giving up is wrong about what it is doing.</p>
   </div>
 
   <div class="call warn">
@@ -236,11 +282,12 @@ ul.plain li{margin-bottom:9px}
 <section>
   <h2><span class="n">04</span>What this means for the production feed</h2>
   <p class="sub">1600×1300 · 30 fps · ~10 Mbps</p>
-  <p>The production video is 1600×1300 — <strong>2.08 megapixels</strong>, essentially identical to the 2.07 of the 1920×1080 run. On this link, that run settled at 640×360 within twenty seconds and held it for 2,536 consecutive frames.</p>
-  <p>An operator would be driving on a <strong>quarter-resolution image within twenty seconds of every session</strong>, with uplink capacity to spare and not a single packet lost.</p>
-  <div class="call">
-    <div class="eyebrow">This redirects the work</div>
-    <p>The codec plan — AV1 at a reduced bitrate — was aimed at fitting the feed into the pipe. The pipe was never the binding constraint on resolution; the congestion controller was. This is a bitrate-controller and encoder-configuration problem, not a codec or QoS one, and the remaining phases were designed around a different question.</p>
+  <p>The production video is 1600×1300 — <strong>2.08 megapixels</strong>, essentially identical to the 2.07 of the 1920×1080 run. On this link, that run reached 640×360 within 11.03 seconds and held it for 2,536 frames, then stepped down again to 480×268 at 96 seconds.</p>
+  <p>An operator would be driving on <strong>one ninth of the intended pixels within eleven seconds of every session</strong> — 640×360 in place of 1920×1080 — with no packet loss and no drop in the bitrate being delivered.</p>
+  <div class="call warn">
+    <div class="eyebrow">The redirect is withdrawn with the mechanism</div>
+    <p>This box previously concluded that the congestion controller, not the pipe, was the binding constraint on resolution, and that the codec plan was therefore aimed at the wrong problem. That conclusion rested entirely on section 03, and section 03 is withdrawn. Naming the congestion controller as the culprit is not supported by a run whose bitrate never fell.</p>
+    <p>What survives is narrower and still worth acting on: <strong>the feed does not hold its configured resolution on this link, and nothing in the existing logging would have told you.</strong> That is a reason to instrument before choosing a codec, not a reason to have chosen a different one. Deciding between codec work and rate-control work requires knowing why the picture shrank, and we do not yet know.</p>
   </div>
 </section>
 </div>
@@ -272,6 +319,10 @@ ul.plain li{margin-bottom:9px}
   </table>
   </div>
   <p>A negative sample would mean the receiving clock trails the sender and every transport figure is shifted. A minimum near zero would mean it leads, understating transport. Neither appears: the floor sits at 19–22 ms in all five runs, which is where 5G one-way latency belongs. <strong>Clock sync is not a limiting factor on any number here.</strong></p>
+
+  <h3 style="font-size:19px;font-weight:600;margin:34px 0 8px">The link capacity figure is not solid, and an earlier version leaned on it</h3>
+  <p>Uplink capacity was a spot reading taken beside the runs, not during them, and later work showed the link moves under it. A repeated probe on the subscriber's modem swung 2.4× — 12.8, 5.7, 13.7, 9.8 Mbps — within minutes with nothing changed, and the publisher's uplink separately fell to 0.14 Mbps and stayed there for over an hour. Before believing any of that, the probe itself was checked three ways: payload size (2, 4 and 8 MB give 13.7, 15.2 and 12.6 Mbps, so no slow-start truncation), pipe versus file (the pipe reads higher, so the upload path is not the bottleneck), and the entropy source (~3,800 Mbps, three orders clear).</p>
+  <p>So a single capacity number is a sample, not a level, and two samples taken at the ends of a run bound it only at those ends. This report no longer rests any claim on one. The measurement it <em>does</em> rest on is the delivered bitrate — 9.6 Mbps of real coded data arriving and decoding, held flat across every resolution step — which needs no assumption about what the link could have carried. Knowing the noise floor is 2.4× is also what makes the 70× gap between the two hosts' uplinks interpretable: a 2× difference would have been unreadable, and that one is not.</p>
 </section>
 
 <section>
@@ -283,15 +334,22 @@ ul.plain li{margin-bottom:9px}
     <li><strong>“Stalls come from losing the uplink scheduling grant during idle periods.”</strong> Withdrawn. It predicts that stalls follow quiet periods; measured, they follow <em>elevated</em> demand.</li>
     <li><strong>“Stalls get rarer as load rises.”</strong> Withdrawn. An off-by-one in the episode detector discarded a 155-frame stall because it began one frame before the analysis window. Corrected, the affected-frame share is flat at 5.1–5.7% across all three load points.</li>
     <li><strong>“The two metrics disagree.”</strong> They never did. One included the startup window and the other excluded it.</li>
+    <li><strong>“The estimate falls and the encoder obeys.”</strong> Withdrawn, and it was this report's headline explanation. A3's delivered bitrate holds between 9.1 and 10.1 Mbps through all four of its resolution steps. Nothing fell.</li>
+    <li><strong>“It settles at a floor and stays there.”</strong> Withdrawn. A2 steps back up six times and A2-off twice, alternating on a 5.00-second cycle. The scaler is still working; it just never gets near nominal.</li>
+    <li><strong>“The source is incompressible noise, so the collapse may be an artifact.”</strong> Withdrawn, and it was the most comfortable available explanation. The A-series ran on animated colour bars — the noise pattern did not exist in the code until two hours after the last of those runs, and passing it would have failed argument parsing. Trivially compressible content was consuming 9.9 Mbps at 640×360.</li>
+    <li><strong>“The uplink had capacity to spare.”</strong> Withdrawn as stated. It compared a delivered rate against a single spot capacity reading, and repeated probing later showed that reading moves 2.4× within minutes. The zero-packet-loss result stands on its own and does not need it.</li>
   </ul>
-  <p>Four hypotheses died on evidence, three of them killed by whoever proposed them. The pattern worth keeping: <strong>every result that survived had a control or a matched pair behind it, and every hypothesis that died was reasoned into without one.</strong></p>
+  <p>Eight hypotheses died on evidence. Two patterns are worth more than any of the results:</p>
+  <p><strong>Every result that survived had a control or a matched pair behind it, and every hypothesis that died was reasoned into without one.</strong></p>
+  <p><strong>The dominant failure was a claim travelling from the run where it was measured to a run where it was assumed.</strong> The encoder mechanism in section 03 is the clearest case: it is correct, it is well evidenced, and it was measured on a different run, on a different link, two hours later. Nothing about it was wrong except where it was applied — which is the hardest kind of error to see, because checking the claim confirms it every time.</p>
 </section>
 
 <section>
   <h2><span class="n">08</span>What we still don't know</h2>
   <p class="sub">Stated plainly, so nothing here is over-read</p>
   <ul class="plain">
-    <li>The source is <strong>incompressible synthetic noise</strong>, chosen to stress rate control. Real camera video compresses far better and may not provoke the same collapse — this needs confirming before the finding is generalised.</li>
+    <li><strong>Why trivially compressible content needed 9.9 Mbps at 640×360.</strong> The A-series source was animated colour bars, which should encode in a small fraction of that. Whether those bytes were coefficients the encoder chose to spend, or filler emitted to meet a 10 Mbps target, is the single most useful thing left to determine — and it decides whether the collapse would happen on real camera video at all. It needs the encoder's own columns on a repeat run.</li>
+    <li><strong>No run has ever delivered sustained high resolution</strong>, so no client-side latency figure in this programme describes the production feed. The 1080p decode samples that exist are the first handful of frames of a run, where the decoder is cold: 24.92 ms median across six frames, against 0.59 ms for 320×180 across 2,776. Those are not comparable, and the pipeline has never been measured in the state it would actually run in.</li>
     <li>Each load point is <strong>a single run</strong>. A repeat of the lowest point produced 17 stall episodes against the original's 11, so within-condition variability is substantial.</li>
     <li>We cannot yet separate the sender's pacer from the radio scheduler from the SFU. Distinguishing them needs sender-side pacer queue depth sampled far faster than either host currently logs.</li>
     <li><strong>Nothing here says the collapse is unavoidable.</strong> No attempt has yet been made to pin resolution, floor the bitrate, or configure the degradation preference — that is the obvious next experiment and it has not been run.</li>
@@ -299,7 +357,7 @@ ul.plain li{margin-bottom:9px}
 </section>
 
 <div class="foot">
-  <p>Host B (subscriber, Intel i5-14400T, software H.264 decode) · Host A (publisher, RTX 5070, NVENC) · LiveKit SFU on T-Mobile edge · uplink 10 Mbps / downlink 33 Mbps measured. Resolution and bitrate columns added to the subscriber CSV on 4 September 2026; they are the only reason this was visible.</p>
+  <p>Host B (subscriber, Intel i5-14400T, software H.264 decode) · Host A (publisher, RTX 5070, NVENC) · LiveKit SFU on T-Mobile edge · uplink and downlink figures are single spot readings, not sustained levels. Resolution and bitrate columns added to the subscriber CSV on 4 September 2026; they are the only reason this was visible.</p>
 </div>
 </div>
 </div>
@@ -318,8 +376,8 @@ const tip = document.getElementById("tip");
 function xs(t, tmax){ return PADL + (t/tmax)*(W-PADL-PADR); }
 function ysRes(w){ const i=STEPS.indexOf(w); const k=i<0?0:i;
   return PADT+RH - (k/(STEPS.length-1))*RH; }
-function ysTr(v){ const lo=Math.log10(20), hi=Math.log10(2500);
-  const c=Math.max(20,Math.min(2500,v));
+function ysTr(v){ const lo=Math.log10(15), hi=Math.log10(2500);
+  const c=Math.max(15,Math.min(2500,v));
   const y0=PADT+RH+GAP, h=TH;
   return y0+h - ((Math.log10(c)-lo)/(hi-lo))*h; }
 
@@ -399,8 +457,8 @@ const RMETA = [
   ["RunB","Run B — 1280×720 at 0.36 Mbps","The control. Transport sits at 32 ms median with a 96 ms worst case, and the resolution never moves. This is what the pipeline looks like when the congestion controller is not under pressure."],
   ["a1","A1 — nominal 640×360","Transport median rises to 51 ms and the tail reaches 675 ms. What the report cannot tell you: 3,323 of these 3,475 frames were 320×180, not the 640×360 the run was configured for."],
   ["a2","A2 — nominal 960×540","Almost indistinguishable from A1 — 49 ms median, 1,064 ms worst case. That is not a coincidence. Both runs delivered the same 320×180 picture, so this report and the one above describe the same condition."],
-  ["a3","A3 — nominal 1920×1080","The only genuinely separated load point: 9.6 Mbps delivered, 34 packets per frame. Transport median barely moves at 50 ms, but the tail stretches to 1,547 ms. Delivered resolution was 640×360."],
-  ["a2off","A2-off — jitter buffer enabled","The isolation pair for A2. Identical publisher configuration; the only difference is the subscriber's playout buffer. Its worst transport sample, 2,366 ms, is the largest in the programme."]
+  ["a3","A3 — nominal 1920×1080","The only genuinely separated load point. Transport median barely moves at 50 ms, but the tail stretches to 1,547 ms. Delivered resolution settled at 640×360 — one ninth of the pixels — while the delivered bitrate stayed flat near 10 Mbps."],
+  ["a2off","A2-off — jitter buffer enabled","The isolation pair for A2. Identical publisher configuration; the only difference is the subscriber's playout buffer. Its worst transport sample, 2,365.80 ms, is the largest in the programme."]
 ];
 const key2png={RunB:"RunB",a1:"A1",a2:"A2",a3:"A3",a2off:"A2off"};
 document.getElementById("reports").innerHTML = RMETA.map(([k,t,c])=>`
