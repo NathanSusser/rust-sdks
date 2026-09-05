@@ -226,12 +226,160 @@ Root fingerprint, sha256:
 
 ## Host A (publisher)
 
-*Host A to complete. Suggested coverage, based on what came up during testing:
-CPU governor and whether it is persisted; `CUDA_HOME=/usr` for the NVENC/NVDEC
-build gate, and whether `webrtc-sys/build.rs` needs touching to defeat the
-cached build result; `clang-21` toolchain; whether `ptp4l` runs as a systemd
-unit or still as a foreground process; the `SHOW_PREVIEW` toggle and the
-run-time governor guard in `run_publisher_test.sh`.*
+### TLS root for the SFU — ⚠ NOT PERSISTED, MOST URGENT ITEM ON EITHER MACHINE
+
+The SFU presents a chain rooted in `T-Mobile USA KF ENT Root CA01`, which is not
+in this machine's trust store. Only `figure-ai-root.crt` is installed there, and
+it belongs to a different PKI entirely. Without the T-Mobile root every
+connection fails at the certificate check:
+
+```
+Error: engine: signal failure: transport connection error:
+IO error: invalid peer certificate: UnknownIssuer
+```
+
+The current workaround is a bundle — the system CA file concatenated with the
+extracted root — pointed at by `SSL_CERT_FILE`. `rustls-native-certs` 0.8.4
+honours that variable, so it works, but **the bundle lives in a session
+temporary directory and is deleted when that session ends.** At that point Host
+A cannot reach the SFU at all, and the error reads as a network fault rather
+than a missing file.
+
+Fix, which removes the dependency on `SSL_CERT_FILE` entirely:
+
+```bash
+sudo cp tmobile-ent-root.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+```
+
+Install the **root only** — the self-signed cert at the top of the chain — not
+the 123-certificate bundle. Verify before trusting it, sha256:
+
+```
+D8:20:6A:4F:8A:66:31:EB:05:37:B7:36:5E:BD:20:A9:79:5B:C9:CC:28:1B:D8:78:4D:1D:AA:ED:DD:24:E5:40
+```
+
+That fingerprint was taken from the chain the server itself presented, which is
+circular — it proves the bundle matches what we connected to, not that what we
+connected to is genuine. Confirm it against a value published by T-Mobile IT
+before installing it as a trust anchor.
+
+### CPU governor `performance` — persisted; EPP is not
+
+```bash
+sudo cpupower frequency-set -g performance
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference
+sudo apt install cpufrequtils
+echo 'GOVERNOR="performance"' | sudo tee /etc/default/cpufrequtils
+```
+
+Default was `powersave`. The capture loop renders for a few milliseconds then
+sleeps until the next 30 fps tick — roughly a 7% duty cycle, which never
+convinces the governor to ramp. Most cores sat at 800 MHz against a 5.8 GHz
+ceiling. Measured directly: identical work in a tight loop ran **4.85× faster**
+than the same work on a 30 fps duty cycle; after the change that penalty fell to
+1.11×.
+
+Effect on the pipeline was larger than anything else found in this program:
+`capture_to_buffer` went **14.89 → 0.17 ms p50 (85.6×)**, and p95 fell from
+20.81 to 1.61 ms. Most of the publisher's measured variance was power
+management rather than the pipeline.
+
+`cpufrequtils` restores the **governor** on reboot but has no concept of
+`energy_performance_preference` — that is an `intel_pstate` knob outside its
+scope. So the governor persists here and EPP does not.
+
+*Open item: persist EPP, via a systemd unit or a tmpfiles rule. Until then,
+check it after any reboot.*
+
+### Build environment — ⚠ NOT PERSISTED, AND FAILS SILENTLY
+
+Every build must be invoked as:
+
+```bash
+CUDA_HOME=/usr CC=clang-21 CXX=clang++-21 cargo build --release -p local_video \
+  --features desktop --bin publisher --bin subscriber
+```
+
+None of those three are in `.bashrc`, `.profile` or `/etc/environment`. Two
+reasons they are mandatory, with very different failure modes:
+
+**`CC`/`CXX` fail loudly.** `webrtc-sys/build.rs` rejects GCC outright —
+`libwebrtc.a` is built against Chromium's hermetic libc++, whose `trivial_abi`
+annotations GCC ignores, which silently breaks the calling convention for
+`unique_ptr` and `shared_ptr`. It also requires clang **≥ 21**; clang 18 fails
+with a message about the hermetic libc++. `/usr/bin/clang++` still points at
+llvm-18, so the versioned binaries must be named explicitly.
+
+**`CUDA_HOME` fails silently, and this one has already cost us a wrong result.**
+`build.rs` enables `USE_NVIDIA_VIDEO_CODEC` only when `$CUDA_HOME/include/cuda.h`
+exists, defaulting to `/usr/local/cuda`, which does not exist here — `cuda.h`
+comes from the `nvidia-cuda-dev` package and lives at `/usr/include/cuda.h`. If
+the check fails, every NVIDIA encoder and decoder source is skipped and the only
+symptom is a `cargo:warning` that scrolls past. The binary builds, runs, and
+encodes in software. A rebuild without it produced an encode time that was
+reported as an improvement before the cause was found.
+
+Confirm after any build that the log reports `encoder=NVIDIA H264 Encoder` and
+that the backend list includes `nvenc`. If it reads `libaom` or the list is
+`auto, software, unknown`, the gate failed.
+
+**`build.rs` does not declare `cargo:rerun-if-env-changed=CUDA_HOME`**, so cargo
+replays a cached build-script result and the variable appears to do nothing. Run
+`touch webrtc-sys/build.rs` first when changing it.
+
+*Open item: a fallback to `/usr/include/cuda.h` in `build.rs` plus the
+`rerun-if-env-changed` declaration would remove this whole class of error. Not
+done — it is a build-script change affecting the entire workspace.*
+
+### PTP grandmaster — ⚠ NOT PERSISTED, FOREGROUND PROCESS
+
+```bash
+sudo ptp4l -f /etc/linuxptp/ptp4l-A.conf -m
+```
+
+`/etc/linuxptp/ptp4l-A.conf` persists. The **process does not**: there are no
+`ptp4l-A.service` or `phc2sys-A.service` units on this machine, and `ptp4l` has
+been running as a hand-started foreground process since Phase 5.
+
+This is worse here than the equivalent on Host B, because **Host A is the
+grandmaster**. If that terminal closes, sync dies for both machines, and Host
+B's `phc2sys` will go on reporting `s2` against a PHC that nothing is
+disciplining. Host B's Phase 7 units protect Host B from its own terminal and
+do nothing about this.
+
+No `phc2sys` runs here, and that is correct rather than an omission: this NIC
+reports `PTP Hardware Clock: none`, so there is no PHC to bridge from and
+`ptp4l` disciplines `CLOCK_REALTIME` directly under `time_stamping software`.
+The rig is therefore software-tier end to end, capped by this side.
+
+*Open item: install the Phase 7 units. The runbook presents them as optional;
+they should be the documented path.*
+
+### Run-time guards in `run_publisher_test.sh`
+
+Two additions, both aimed at the failure modes above:
+
+- **Governor guard.** Reads `scaling_governor` and prints a loud warning when it
+  is not `performance`. It warns rather than aborts, so a deliberate measurement
+  under `powersave` is still possible, and it fails safe — an unreadable file
+  yields an empty string, which does not equal `performance` and still warns.
+- **`SHOW_PREVIEW=0`** drops `--display-video`, mirroring the subscriber's
+  existing `SHOW_TIMING`. Measured cost of the preview is small — 0.24 ms at the
+  median — but it adds tail jitter, so it is worth dropping when the tail is
+  under study.
+
+### Persisted without further work
+
+| Change | Detail |
+|---|---|
+| `systemd-timesyncd` disabled | `timedatectl` reports NTP inactive; chrony was never installed |
+| PTP link addressing | NetworkManager profile `ptp-link`, `192.168.99.1/30`, `autoconnect yes`, `ipv4.never-default yes` |
+| Packages | `clang`, `clang-21`, `libclang-common-18-dev`, `nvidia-cuda-dev`, `cpufrequtils` |
+
+The `never-default` setting is load-bearing: without it the direct cable can
+become the default route and video leaves over the PTP link instead of 5G,
+which would invalidate the measurement and be invisible in the results.
 
 ---
 
