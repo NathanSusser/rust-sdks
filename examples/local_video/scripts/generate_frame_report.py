@@ -143,6 +143,74 @@ def read_log(path: Path, kind: str) -> LogData:
     return LogData(kind, path, rows, latency_column, interval_column)
 
 
+@dataclass(frozen=True)
+class ResolutionTrack:
+    """Delivered resolution over a run, from the subscriber CSV.
+
+    WebRTC downscales under rate control, so a run's configured resolution is not
+    necessarily what arrived. A report that omits this cannot distinguish a faster
+    pipeline from a smaller picture -- which is exactly how a load ladder was drawn
+    across three nominal resolutions that all delivered the same one.
+    """
+
+    spans: list[tuple[str, int]]          # (WxH, frame count), in order of appearance
+    modal: str | None
+    modal_frames: int
+    total: int
+    first_change_s: float | None
+
+    @property
+    def changed(self) -> bool:
+        return len(self.spans) > 1
+
+    def summary(self) -> str:
+        if not self.spans:
+            return "resolution not recorded"
+        if not self.changed:
+            return f"{self.modal} held for all {self.total:,} frames"
+        pct = 100.0 * self.modal_frames / self.total if self.total else 0.0
+        when = f" after {self.first_change_s:.2f}s" if self.first_change_s is not None else ""
+        return (
+            f"CHANGED{when}: "
+            + " -> ".join(f"{res} x{count:,}" for res, count in self.spans[:5])
+            + (" ..." if len(self.spans) > 5 else "")
+            + f"  (modal {self.modal}, {pct:.1f}% of frames)"
+        )
+
+
+def resolution_track(log: LogData) -> ResolutionTrack:
+    """Collapse consecutive equal resolutions into spans."""
+    spans: list[list] = []
+    counts: dict[str, int] = {}
+    first_change: float | None = None
+    start_ms: float | None = None
+    previous: str | None = None
+    for row in log.rows:
+        width, height = row.get("frame_width"), row.get("frame_height")
+        if not width or not height:
+            continue
+        res = f"{width}x{height}"
+        counts[res] = counts.get(res, 0) + 1
+        elapsed = number(row.get("elapsed_ms"))
+        if start_ms is None and elapsed is not None:
+            start_ms = elapsed
+        if res != previous:
+            if previous is not None and first_change is None and elapsed is not None and start_ms is not None:
+                first_change = (elapsed - start_ms) / 1000.0
+            spans.append([res, 0])
+            previous = res
+        spans[-1][1] += 1
+    total = sum(counts.values())
+    modal = max(counts, key=lambda k: counts[k]) if counts else None
+    return ResolutionTrack(
+        spans=[(res, n) for res, n in spans],
+        modal=modal,
+        modal_frames=counts.get(modal, 0) if modal else 0,
+        total=total,
+        first_change_s=first_change,
+    )
+
+
 def percentile(samples: Sequence[float], percent: float) -> float:
     ordered = sorted(samples)
     if len(ordered) == 1:
@@ -613,6 +681,11 @@ def generate_report(
 
     sources = " + ".join(f"{log.label}: {log.path.name}" for log in logs)
     subtitle = sources
+    # A run whose delivered resolution moved is flagged in the header rather than left
+    # for a reader to notice -- being invisible is the failure this exists to prevent.
+    res_track = resolution_track(subscriber) if subscriber is not None else None
+    if res_track is not None and res_track.total:
+        subtitle = f"{sources}   |   {res_track.summary()}"
     output.parent.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(output), pagesize=landscape(letter))
     pdf.setTitle(title)
@@ -627,6 +700,13 @@ def generate_report(
         ("P95 latency", f"{percentile(primary_latencies, 95):.1f} ms"),
         ("Frame losses", f"{losses:,}"),
     )
+    if res_track is not None and res_track.total:
+        cards = cards + (
+            (
+                "Resolution CHANGED" if res_track.changed else "Resolution",
+                res_track.modal or "-",
+            ),
+        )
     card_width = 112
     for index, (label, value) in enumerate(cards):
         draw_card(pdf, 38 + index * (card_width + 11), 461, card_width, label, value)

@@ -443,6 +443,48 @@ publishers and it was moved aside rather than deleted.
 
 ## 6. Both hosts
 
+### Run manifests — a run must describe itself
+
+Five separate confusions in this programme came from reconstructing a run's meaning
+afterwards, from shell history, scrollback and memory: an argv nobody recorded (§0.2), a
+bitrate cap nobody recorded (§0.1 — which was then reasoned about wrongly), a control that
+silently inherited a different cap, a run that overlapped the previous publisher, and a
+label ("A2-off") carrying meaning it could not hold (§0.3). None of those artifacts were
+ever meant to be evidence.
+
+Each host writes `run_manifest.json` into its own results directory, at run start, closed
+with the outcome at run end. **A run whose manifest is absent or incomplete is not
+citable** — this makes §0.2's rule enforceable when the run is written rather than
+discoverable months later.
+
+**Field names must match exactly across hosts or the two halves will not join.**
+
+Shared fields, both hosts:
+
+```
+role host started_utc ended_utc
+argv git_sha git_dirty
+governor epp
+room url
+start_frame end_frame fps_requested
+rows_written frame_id_first frame_id_last elapsed_s complete
+```
+
+Host B adds: `low_latency`, `show_timing`, `ptp_port_state_start`, `ptp_grandmaster`,
+`ptp_rms_ns_start`, `phc2sys_servo_start`, `delivered_resolutions`, `resolution_changed`,
+`decoder_implementation`.
+
+Host A adds: `width_requested`, `height_requested`, `max_bitrate_bps`, `test_pattern_mode`,
+`encoder_implementation`, `cuda_home`.
+
+This also fixes the naming problem structurally. "A2-off" had to carry meaning a run name
+cannot hold; `low_latency: false` makes the flag authoritative and the name decorative.
+
+*Host B's emitter is in `run_subscriber_test.sh`. Deliberately shell rather than Rust: it
+already knows the argv, and it needs no rebuild to change.*
+
+
+
 - Note the `START_FRAME` change in run metadata. Runs before and after are **not** directly
   comparable on any startup-window metric.
 - Keep PTP running and keep the clock-check gate in `run_report.sh`. The negative-sample and
