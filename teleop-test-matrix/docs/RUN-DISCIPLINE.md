@@ -30,7 +30,7 @@ the second pattern below.
 |---|---|---|
 | BWE decay over a run | Probes had no subscriber, so GCC had no receiver feedback at all | Other host's review |
 | SFU was dropping frames | Never separated from encoder-side drops | Attributed from one host's memory; the other has no record of it — see below |
-| Keyframe tail explained the p99 | The worst frames group into one to three contiguous episodes per run, not a cadence. A3's entire worst 1% is a single episode, frames 62–179, spanning 0.0–3.9 s | Re-derived from the data |
+| Keyframe tail explained the p99 | Two independent refutations, from opposite ends of the pipeline. At the receiver, the worst frames group into one to three contiguous episodes per run rather than a cadence — A3's entire worst 1% is one episode, frames 62–179, spanning 0.0–3.9 s. At the encoder, `gopLength` and `idrPeriod` are both `NVENC_INFINITE_GOPLENGTH`, so there is no periodic keyframe to produce a periodic tail: the hypothesis was not merely unsupported but impossible | Re-derived from the data; the encoder half found afterwards, in seconds |
 | The grant was being lost between components | Two refutations, of two versions of the claim. `available_outgoing` and `target_bitrate` agree to 5% in the realistic arm; and grant loss predicts stalls follow *idle* periods, where measured episodes follow *elevated* demand (A1 median demand ratio 1.21 into an episode) | One host each |
 | A standing 2× `available`/`target` gap | Confined to arm 2b, a configuration already rejected; ratio pinned at 2.04 while both absolutes swung, so structural | Other host proposed it; own data settled it |
 | "The estimator settles at 1.2 Mbps" | It never settles. It starts at 3.3 Mbps, collapses by t+20 s, and is still climbing at t+120 s | **Neither — see below** |
@@ -363,6 +363,22 @@ freshly booted machine can read `performance` while the setting that matters has
 silently gone back.
 
 ---
+
+## What this programme has not answered
+
+Stated plainly, because a reader of this document and the run reports together
+could come away thinking the investigation concluded. It did not.
+
+**The deliverable is whether the teleoperation feed holds 1600×1300 at 30 fps
+over this link. That is still unanswered.** Nothing in this session measured it.
+What the session produced is the instrumentation to answer it: a rig that
+records how each run ended, what the link could carry at both ends of it, which
+encoder actually ran, and whether the host's power settings were where they
+should have been. None of that is the answer. All of it is what makes the next
+attempt at the answer worth trusting.
+
+The withdrawal ledger in §1 is longer than the list of established findings, and
+that ratio is the accurate picture of where the work stands.
 
 ## Still open
 
