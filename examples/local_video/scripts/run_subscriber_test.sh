@@ -60,46 +60,80 @@ fi
 mkdir -p "$OUTDIR"
 
 # --- run manifest -------------------------------------------------------------
-# A run has to describe itself. Five separate confusions in this programme came from
+# A run has to describe itself. Five confusions in this programme came from
 # reconstructing a run's meaning afterwards from shell history, scrollback and memory:
 # an argv nobody recorded, a bitrate cap nobody recorded, a control that silently
 # inherited a different cap, a run that overlapped the previous publisher, and a label
 # ("A2-off") carrying meaning it could not hold. A run whose manifest is absent or
 # incomplete is not citable.
-# Schema is shared with Host A -- keep field names identical or the two halves will not join.
-MANIFEST="$OUTDIR/run_manifest.json"
-json_str() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
-_gov="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unreadable)"
-_epp="$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null || echo unreadable)"
-_sha="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || echo unknown)"
-_dirty="$(git -C "$(dirname "$0")" status --porcelain 2>/dev/null | head -c1)"
-_ptp_state="$(journalctl -u ptp4l-B -b -q --no-pager 2>/dev/null | grep -oE 'to (SLAVE|MASTER|UNCALIBRATED|LISTENING)' | tail -1)"
-_ptp_gm="$(journalctl -u ptp4l-B -b -q --no-pager 2>/dev/null | grep -oE 'best master clock [0-9a-f.]+' | tail -1 | awk '{print $4}')"
-_ptp_rms="$(journalctl -u ptp4l-B --since '1 min ago' -q --no-pager 2>/dev/null | grep -oE 'rms +[0-9]+' | awk '{print $2}' | tail -1)"
-_phc_s="$(journalctl -u phc2sys-B --since '1 min ago' -q --no-pager 2>/dev/null | grep -oE ' s[0-2] ' | tail -1 | tr -d ' ')"
-{
-  printf '{\n'
-  printf '  "role": "subscriber",\n'
-  printf '  "host": %s,\n'            "$(json_str "$(hostname)")"
-  printf '  "started_utc": %s,\n'     "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
-  printf '  "argv": %s,\n'            "$(json_str "$BIN --url $URL --room-name $ROOM --identity viewer-1 --participant cam-1 ${TIMING_FLAG[*]} --log-csv $OUTDIR/subscriber.csv --log-start-frame-id $START_FRAME --log-end-frame-id $END_FRAME")"
-  printf '  "room": %s,\n'            "$(json_str "$ROOM")"
-  printf '  "url": %s,\n'             "$(json_str "$URL")"
-  printf '  "git_sha": %s,\n'         "$(json_str "$_sha")"
-  printf '  "git_dirty": %s,\n'       "$([ -n "$_dirty" ] && echo true || echo false)"
-  printf '  "governor": %s,\n'        "$(json_str "$_gov")"
-  printf '  "epp": %s,\n'             "$(json_str "$_epp")"
-  printf '  "low_latency": %s,\n'     "$([ "${LOW_LATENCY:-0}" = "1" ] && echo true || echo false)"
-  printf '  "show_timing": %s,\n'     "$([ "${SHOW_TIMING:-1}" = "1" ] && echo true || echo false)"
-  printf '  "start_frame": %s,\n'     "$START_FRAME"
-  printf '  "end_frame": %s,\n'       "$END_FRAME"
-  printf '  "fps_requested": %s,\n'   "$FPS"
-  printf '  "ptp_port_state_start": %s,\n'  "$(json_str "${_ptp_state:-unknown}")"
-  printf '  "ptp_grandmaster": %s,\n' "$(json_str "${_ptp_gm:-unknown}")"
-  printf '  "ptp_rms_ns_start": %s,\n' "${_ptp_rms:-null}"
-  printf '  "phc2sys_servo_start": %s\n' "$(json_str "${_phc_s:-unknown}")"
-  printf '}\n'
-} > "$MANIFEST"
+#
+# Nesting matches Host A's run_manifest.rs exactly so the two halves join per run.
+# Written BEFORE the first frame -- a run killed mid-flight is the one whose
+# configuration gets disputed later. Capture is best-effort: an unreadable field
+# becomes null rather than failing the run.
+MANIFEST="${OUTDIR}/subscriber.manifest.json"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MAN_ARGV="$(printf '%s\037' "$BIN" --url "$URL" --room-name "$ROOM" --identity viewer-1 \
+  --participant cam-1 "${TIMING_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
+  --log-start-frame-id "$START_FRAME" --log-end-frame-id "$END_FRAME")"
+MAN_PATH="$MANIFEST" MAN_ARGV="$MAN_ARGV" MAN_DIR="$SCRIPT_DIR" \
+MAN_START="$START_FRAME" MAN_END="$END_FRAME" MAN_FPS="$FPS" python3 - <<'PYEOF'
+import json, os, pathlib, subprocess, datetime, platform, re
+
+def read(path):
+    try: return pathlib.Path(path).read_text().strip() or None
+    except Exception: return None
+
+def sh(*cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+def journal(unit, pattern, since=None):
+    cmd = ["journalctl", "-u", unit, "-q", "--no-pager"] + (["--since", since] if since else ["-b"])
+    hits = re.findall(pattern, sh(*cmd) or "")
+    return hits[-1] if hits else None
+
+argv = [a for a in os.environ["MAN_ARGV"].split("\x1f") if a]
+d = os.environ["MAN_DIR"]
+doc = {
+    "role": "subscriber",
+    "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "invocation": {"argv": argv, "cwd": os.getcwd()},
+    "environment": {
+        "hostname": platform.node(),
+        "kernel": platform.release(),
+        "cpu_governor": read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
+        "cpu_epp": read("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"),
+        "git_sha": sh("git", "-C", d, "rev-parse", "HEAD"),
+        "git_dirty": bool(sh("git", "-C", d, "status", "--porcelain")),
+        "ssl_cert_file": os.environ.get("SSL_CERT_FILE"),
+    },
+    # No requested_* here, deliberately: the subscriber requests nothing, it receives
+    # whatever arrives. requested_* is publisher-only and delivered_resolutions is
+    # subscriber-only; pairing them is the join that catches a silent downscale.
+    "media": {"requested_fps": int(os.environ["MAN_FPS"]), "decoder_implementation": None},
+    "flags": {
+        "low_latency": os.environ.get("LOW_LATENCY", "0") == "1",
+        "display_timestamp": os.environ.get("SHOW_TIMING", "1") == "1",
+    },
+    "sync": {
+        "method": "journal",  # pmc needs root and this path has no TTY for a password
+        "ptp_port_state": journal("ptp4l-B", r"to (SLAVE|MASTER|UNCALIBRATED|LISTENING)"),
+        "ptp_grandmaster": journal("ptp4l-B", r"best master clock ([0-9a-f.]+)"),
+        "ptp_rms_ns_start": (lambda v: int(v) if v else None)(journal("ptp4l-B", r"rms\s+(\d+)", "1 min ago")),
+        "ptp_rms_ns_end": None,
+        "phc2sys_servo_start": journal("phc2sys-B", r" (s[0-2]) ", "1 min ago"),
+        "phc2sys_servo_end": None,
+    },
+    "window": {"log_start_frame_id": int(os.environ["MAN_START"]),
+               "log_end_frame_id": int(os.environ["MAN_END"])},
+    "outcome": None,
+}
+pathlib.Path(os.environ["MAN_PATH"]).write_text(json.dumps(doc, indent=2) + "\n")
+PYEOF
 echo "  manifest: $MANIFEST"
 # ------------------------------------------------------------------------------
 BIN="$(dirname "$0")/../../../target/release/subscriber"
@@ -132,25 +166,51 @@ TIMING_FLAG=()
 ROWS=$(( $(wc -l < "$OUTDIR/subscriber.csv") - 1 ))
 
 # Close the manifest with what actually happened, so a run carries its own outcome.
-python3 - "$MANIFEST" "$ROWS" "$OUTDIR/subscriber.csv" <<'PYEOF' || true
-import csv, json, sys, datetime, pathlib
-man, rows, csv_path = pathlib.Path(sys.argv[1]), int(sys.argv[2]), pathlib.Path(sys.argv[3])
-d = json.loads(man.read_text())
-d["ended_utc"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-d["rows_written"] = rows
+MAN_PATH="$MANIFEST" MAN_ROWS="$ROWS" MAN_CSV="$OUTDIR/subscriber.csv" python3 - <<'PYEOF' || true
+import csv, json, os, pathlib, subprocess, datetime, re
+man = pathlib.Path(os.environ["MAN_PATH"])
+rows = int(os.environ["MAN_ROWS"])
+csv_path = pathlib.Path(os.environ["MAN_CSV"])
+doc = json.loads(man.read_text())
+
+def journal(unit, pattern):
+    try:
+        out = subprocess.run(["journalctl", "-u", unit, "--since", "1 min ago", "-q", "--no-pager"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None
+    hits = re.findall(pattern, out)
+    return hits[-1] if hits else None
+
+rms = journal("ptp4l-B", r"rms\s+(\d+)")
+doc["sync"]["ptp_rms_ns_end"] = int(rms) if rms else None
+doc["sync"]["phc2sys_servo_end"] = journal("phc2sys-B", r" (s[0-2]) ")
+
+outcome = {
+    "ended_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "rows_written": rows,
+    "exit_reason": "end_frame_reached" if rows > 0 else "no_rows",
+    "first_frame_id": None, "last_frame_id": None, "elapsed_s": None,
+    "delivered_resolutions": None, "resolution_changed": None,
+}
 try:
     r = list(csv.DictReader(csv_path.open()))
     if r:
-        d["frame_id_first"], d["frame_id_last"] = int(r[0]["frame_id"]), int(r[-1]["frame_id"])
-        d["elapsed_s"] = round(float(r[-1]["elapsed_ms"]) / 1000.0, 1)
-        res = {f'{x["frame_width"]}x{x["frame_height"]}' for x in r if x.get("frame_width")}
-        d["delivered_resolutions"] = sorted(res)
-        d["resolution_changed"] = len(res) > 1
-        d["decoder_implementation"] = r[-1].get("decoder_implementation")
+        outcome["first_frame_id"] = int(r[0]["frame_id"])
+        outcome["last_frame_id"] = int(r[-1]["frame_id"])
+        outcome["elapsed_s"] = round(float(r[-1]["elapsed_ms"]) / 1000.0, 1)
+        seen, order = set(), []
+        for row in r:
+            w, h = row.get("frame_width"), row.get("frame_height")
+            if w and h and f"{w}x{h}" not in seen:
+                seen.add(f"{w}x{h}"); order.append(f"{w}x{h}")
+        outcome["delivered_resolutions"] = order or None
+        outcome["resolution_changed"] = (len(order) > 1) if order else None
+        doc["media"]["decoder_implementation"] = r[-1].get("decoder_implementation") or None
 except Exception as exc:
-    d["outcome_error"] = str(exc)
-d["complete"] = rows > 0
-man.write_text(json.dumps(d, indent=2) + "\n")
+    outcome["exit_reason"] = "outcome_read_failed: %s" % exc
+doc["outcome"] = outcome
+man.write_text(json.dumps(doc, indent=2) + "\n")
 PYEOF
 echo
 echo "done: $OUTDIR/subscriber.csv ($ROWS frames)"

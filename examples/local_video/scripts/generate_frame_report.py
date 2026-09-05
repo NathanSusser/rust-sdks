@@ -211,6 +211,60 @@ def resolution_track(log: LogData) -> ResolutionTrack:
     )
 
 
+@dataclass(frozen=True)
+class ResolutionPairing:
+    """Encoder-side against decoder-side resolution, joined on frame ID.
+
+    The publisher records what the encoder emitted; the subscriber records what the
+    decoder produced. Comparing them separates "the encoder shed resolution" from
+    "it was lost in transit" without inference -- and the disagreement, if any, is
+    the only thing that distinguishes those two stories.
+    """
+
+    paired: int
+    agreeing: int
+    disagreements: list[tuple[int, str, str]]   # (frame_id, encoded, delivered)
+
+    @property
+    def available(self) -> bool:
+        return self.paired > 0
+
+    def summary(self) -> str:
+        if not self.available:
+            return "encoder-side resolution not recorded (publisher predates the column)"
+        if not self.disagreements:
+            return f"encoder and decoder agree on all {self.paired:,} paired frames"
+        pct = 100.0 * len(self.disagreements) / self.paired
+        first = self.disagreements[0]
+        return (
+            f"DISAGREE on {len(self.disagreements):,}/{self.paired:,} frames ({pct:.1f}%); "
+            f"first at frame {first[0]}: encoder {first[1]}, delivered {first[2]}"
+        )
+
+
+def pair_resolutions(publisher: LogData, subscriber: LogData) -> ResolutionPairing:
+    enc: dict[str, str] = {}
+    for row in publisher.rows:
+        width, height = row.get("encoded_frame_width"), row.get("encoded_frame_height")
+        if width and height and row.get("frame_id"):
+            enc[row["frame_id"]] = f"{width}x{height}"
+    paired = 0
+    agreeing = 0
+    disagreements: list[tuple[int, str, str]] = []
+    for row in subscriber.rows:
+        fid = row.get("frame_id")
+        width, height = row.get("frame_width"), row.get("frame_height")
+        if not fid or not width or not height or fid not in enc:
+            continue
+        delivered = f"{width}x{height}"
+        paired += 1
+        if enc[fid] == delivered:
+            agreeing += 1
+        else:
+            disagreements.append((int(fid), enc[fid], delivered))
+    return ResolutionPairing(paired, agreeing, disagreements)
+
+
 def percentile(samples: Sequence[float], percent: float) -> float:
     ordered = sorted(samples)
     if len(ordered) == 1:
@@ -300,7 +354,7 @@ def paired_loss_events(publisher: LogData, subscriber: LogData) -> list[Event]:
         if frame_id is not None and elapsed is not None and round(frame_id) in missing_ids:
             events.append(Event(elapsed, 1))
     return events
-def draw_header(pdf: canvas.Canvas, title: str, subtitle: str) -> None:
+def draw_header(pdf: canvas.Canvas, title: str, subtitle: str | Sequence[str]) -> None:
     width, height = landscape(letter)
     pdf.setFillColor(white)
     pdf.rect(0, 0, width, height, fill=1, stroke=0)
@@ -311,7 +365,12 @@ def draw_header(pdf: canvas.Canvas, title: str, subtitle: str) -> None:
     pdf.drawString(38, height - 33, title)
     pdf.setFillColor(HexColor("#D9F2F4"))
     pdf.setFont("Helvetica", 8.5)
-    pdf.drawString(39, height - 51, subtitle)
+    # One line per fact rather than one long line: a resolution change or an
+    # encoder/decoder disagreement is the most important thing in the header, and
+    # concatenating them ran the text off the page and clipped exactly that.
+    lines = [subtitle] if isinstance(subtitle, str) else list(subtitle)
+    for index, line in enumerate(lines[:3]):
+        pdf.drawString(39, height - 51 - index * 10, line[:190])
 
 
 def draw_card(pdf: canvas.Canvas, x: float, y: float, width: float, label: str, value: str) -> None:
@@ -683,9 +742,20 @@ def generate_report(
     subtitle = sources
     # A run whose delivered resolution moved is flagged in the header rather than left
     # for a reader to notice -- being invisible is the failure this exists to prevent.
+    subtitle_lines = [sources]
     res_track = resolution_track(subscriber) if subscriber is not None else None
     if res_track is not None and res_track.total:
-        subtitle = f"{sources}   |   {res_track.summary()}"
+        subtitle_lines.append(f"delivered resolution: {res_track.summary()}")
+    # B4: encoder-side vs decoder-side, joined on frame ID. Only meaningful once the
+    # publisher emits encoded_frame_width -- older runs simply have no encoder column.
+    pairing = (
+        pair_resolutions(publisher, subscriber)
+        if publisher is not None and subscriber is not None
+        else None
+    )
+    if pairing is not None and pairing.available and pairing.disagreements:
+        subtitle_lines.append(f"encoder vs decoder: {pairing.summary()}")
+    subtitle = subtitle_lines
     output.parent.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(output), pagesize=landscape(letter))
     pdf.setTitle(title)
