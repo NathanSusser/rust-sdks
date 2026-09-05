@@ -323,10 +323,40 @@ variable appears to do nothing. `touch webrtc-sys/build.rs` when changing it.
 
 ## 4. Host B (subscriber) — tasks
 
-### B1. Settle the A2-off label
+### B1. Settle the A2-off label — ✅ ANSWERED
 
-See §0.3. Report whether that run carried `--low-latency`. This decides whether the worst
-transport sample in the programme argues for or against disabling the jitter buffer.
+**A2-off did NOT carry `--low-latency`. The jitter buffer was ENABLED.**
+
+Evidence, in descending order of strength:
+
+1. **The data.** `receive_and_assembly_ms` p95 is **0.27 ms** for A2 and **131.88 ms** for
+   A2-off. A jitter buffer holding frames for playout is the only thing in the pipeline that
+   produces that gap; with the buffer disabled, assembly is first-to-last packet spread on
+   1.8-packet frames and cannot reach 131 ms.
+2. **The launcher.** The run log records `pre-flight (a2off, low-latency=off)` and
+   `lowlatency=off`, and the helper only appends `--low-latency` when that argument is `on`.
+3. **Live argv.** Verified by `ps` before GO was sent: `--low-latency` absent from A2-off,
+   present on A1/A2/A3/Run B.
+
+**§0.3 is resolved, but its premise was wrong.** The report's captions — "jitter buffer
+enabled", "jitter buffer ON" — are **correct and consistent with each other**. What is
+ambiguous is the run *name*: "A2-off" means the `--low-latency` **flag** is off, which means
+the **buffer is on**. The reviewer read "A2-off" as "buffer off". Nothing in the report
+contradicts itself; the name invites the misreading and should be changed.
+
+**Rename to `A2-buffer-on` everywhere**, in this file, the report and the results directory.
+
+**The finding is unchanged and the conclusion strengthens.** The 2,366 ms worst transport
+sample occurred with the buffer **enabled**, so it is evidence **for** disabling it, which is
+the direction already reported. The isolation pair stands: on `receive_to_gpu_complete`,
+which excludes transport entirely, the buffer cost 8 ms at p50 and 124 ms at p95 while
+leaving episode count unchanged at 9 either way.
+
+*Caveat on one piece of evidence I checked and discarded:* the startup line
+`Low-latency mode enabled: WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/` appears in neither
+`a2.log` nor `a2off.log`, so its absence proves nothing here. A2 was run with
+`RUST_LOG=local_video=debug`, a wrong target that matched nothing and suppressed all output
+including INFO. Do not use that line as evidence for runs before A2-off.
 
 ### B2. `START_FRAME=0`
 
@@ -369,13 +399,31 @@ its scope; EPP still needs checking after a reboot.
 *To be filled in by Host A per §0.2 and Host B per §0.3. A run not recorded here is not
 citable in the next report.*
 
-| Run | Host A argv | Host B argv | `--low-latency`? | Recovered? |
+All Host B invocations share this argv, which is `run_subscriber_test.sh`'s own argument
+list plus the flags noted — the script was deliberately never modified:
+
+```
+target/release/subscriber --url "$LIVEKIT_URL" --room-name round5-mso \
+  --identity viewer-1 --participant cam-1 --display-timestamp [--low-latency] \
+  --log-csv results-<run>/subscriber.csv --log-start-frame-id 60 --log-end-frame-id 3660
+```
+
+| Run | Host A argv | Host B `--low-latency` | Host B recovered? | Source |
 |---|---|---|---|---|
-| Run B | | | | |
-| A1 | | | | |
-| A2 | | | | |
-| A3 | | | | |
-| A2-off | | | | |
+| Run B | *Host A to fill* | **yes** | ✅ | live `ps` before GO |
+| A1 | *Host A to fill* | **yes** | ✅ | run log `lowlatency=on` |
+| A2 | *Host A to fill* | **yes** | ✅ | run log `lowlatency=on` |
+| A3 | *Host A to fill* | **yes** | ✅ | run log `lowlatency=on` |
+| A2-off → **A2-buffer-on** | *Host A to fill* | **no** | ✅ | run log + live `ps` + assembly p95 |
+| A1r1 (repeat) | *Host A to fill* | **yes** | ✅ | run log `lowlatency=on` |
+
+Host B's side of §0.2 is closed: every run's invocation is recovered and every one is
+citable. Note `--display-timestamp` was on for all of them, so `SHOW_TIMING` is constant
+across the comparison as §6 requires.
+
+**One Host B run is NOT citable and is not listed:** `a3r1`, discarded because Host A's
+previous publisher was still running when its subscriber started. Its CSV spans two
+publishers and it was moved aside rather than deleted.
 
 ---
 
