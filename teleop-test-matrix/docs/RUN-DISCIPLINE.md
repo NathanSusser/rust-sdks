@@ -51,8 +51,9 @@ from the first hour.
 A specific form of that assumption appeared three times and deserves its own
 name: **a mechanism established on one run was carried onto another run where it
 had only been assumed.** arm 1's QP evidence was applied to the A-series, which
-ran hours earlier on a link four times faster and shows the opposite bitrate
-signature. A capacity figure taken once became a standing property of the link.
+ran hours earlier, sustained 9–10 Mbps of delivered video where arm 1's delivery
+fell to 0.82 Mbps, and shows the opposite bitrate signature. A capacity figure
+taken once became a standing property of the link.
 A subscriber's presence in one probe was assumed in the next. Runs are not
 interchangeable, and the rig gave no way to tell — which is what §4 exists to
 fix.
@@ -63,6 +64,33 @@ on what basis: one has it in memory, the other has no record in logs or repo.
 The correct response was to leave it marked as unverifiable rather than
 reconstruct a plausible history for it — reconstructing it would have been the
 same move the rest of this document is about, performed on the document itself.
+
+### Withdrawing a number is not finished when the sentences containing it are
+
+A retracted figure keeps working through everything computed **from** it, and
+those derived figures do not contain the retracted phrase — so a text search
+will not find them.
+
+The instance: a report retracted its 10 Mbps uplink figure in one section while,
+three sections earlier, describing a control run as "roughly 3.5% link
+utilisation". That percentage was 0.36 Mbps divided by the very number being
+retracted. The sweep had been for the phrase *"capacity to spare"*; nothing
+containing that phrase was left, and the retracted number was still setting up
+the whole argument.
+
+It was fixed by restating the point as a ratio between two *measured delivered*
+bitrates — Run B is a twenty-seventh of what A3 delivered — which makes the same
+comparison while assuming nothing about what the link could have carried.
+
+> **Audit by category, not by string.** Sort every remaining figure into: a
+> distribution, a configured value, or a single instant quoted as a property.
+> The third category is where retractions hide, and grep cannot see it because
+> the derived figure shares no text with its source.
+
+Applied to this document, that sweep found one: a claim that the A-series ran
+"on a link four times faster" than arm 1's — a ratio with no stated provenance,
+derived from exactly the kind of spot capacity reading being withdrawn. It now
+cites the two measured delivered bitrates instead.
 
 ### Read the configuration for configuration questions
 
