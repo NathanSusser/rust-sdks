@@ -615,8 +615,12 @@ answer and neither can be taken until the uplink recovers.
   a link comparable to arm 1's.
 
 - **Why did the A-series picture shrink while nothing was starved?** The encoder
-  runs `NV_ENC_PARAMS_RC_CBR` with `enableFillerDataInsertion` never set *by us* — the driver's preset config is memcpy'd over the zeroed struct in `CreateDefaultEncoderParams`, so its actual value is not determined by this source tree
-  (`h264_encoder_impl.cpp:225`). Denied padding, NVENC satisfies CBR the only
+  runs `NV_ENC_PARAMS_RC_CBR` (`h264_encoder_impl.cpp:225`), and
+  `enableFillerDataInsertion` is never set *by us*. That last point is weaker
+  than it reads: `CreateDefaultEncoderParams` zeroes the config struct and then
+  copies the **driver's** preset over it wholesale, overriding only selected
+  fields afterwards, so the flag's actual value is not determined by this source
+  tree. Taking filler as disabled, NVENC satisfies CBR the only
   remaining way — by lowering QP until the target is consumed — so ~10 Mbps of
   *real* coded picture on trivially compressible colour bars is the rate control
   working as configured. That accounts for the flat bitrate, the bpp climbing
@@ -632,3 +636,27 @@ answer and neither can be taken until the uplink recovers.
   was healthy.** Settling it needs a repeat with the encoder-side QP column,
   which did not exist during the A-series — reasoning about QP from an encoder
   config instead of from QP is the substitution this document exists to prevent.
+
+---
+
+## For whoever is next at a machine
+
+The section above is organised by open question. This one is organised by what a
+person physically present can do, in the order worth doing it. Everything here
+needs someone at a keyboard; nothing here can be done remotely, and the first
+item is the only one that moves the actual deliverable.
+
+| # | Action | Needs | Why this order |
+|---|---|---|---|
+| 1 | **WAN ethernet control run.** Publish over wired ethernet instead of 5G, same everything else. | A cable. No uplink. | Decides whether the staircase happens at all with the radio out of the path. If it still does, the 5G link was never the story and two days of link diagnosis were beside the point. Cheapest result that can redirect the whole programme. |
+| 2 | **Read the live NVENC config back after `nvEncInitializeEncoder`**, and log `enableFillerDataInsertion` and the preset's rate-control fields. | Host A, a build. No uplink. | Settles whether ~10 Mbps of colour bars was coefficients or partly filler — the one open question about the byte counts, and it is a logging change rather than an experiment. |
+| 3 | **Check the SIM or slice for a volume cap.** | Carrier portal. | Host A's uplink fell ~70× and stayed there for over an hour. Nothing in the rig can see this and no run is comparable across it. |
+| 4 | **Repeat A3 with encoder columns** — QP, `quality_limitation_reason`, encoded resolution. | A link comparable to the A-series. | The central open question: why the picture stepped down while every signal the scaler responds to was healthy. Blocked until 3 is resolved. |
+| 5 | **Persist EPP on both hosts.** | Root on each. | Governor survives reboot on both; EPP survives on neither. The obvious check passes and the subtle one does not, which is the failure mode hardest to notice. |
+
+**Not on this list, deliberately:** the arms in `EXPERIMENT-PLAN.md`. Two of six
+cannot be run as specified, and its replication design assumes a link capacity
+that is stationary across forty minutes — which this programme measured moving
+2.4× in minutes. Those are design decisions for the operator, not repairs, and
+they are recorded in that document's §0.4 rather than fixed.
+
