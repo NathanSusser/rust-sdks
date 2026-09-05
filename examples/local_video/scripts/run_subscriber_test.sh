@@ -179,12 +179,18 @@ echo "  start the publisher now (or within ~30s)"
   "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" \
   --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" \
-  --log-end-frame-id "$END_FRAME"
+  --log-end-frame-id "$END_FRAME" && SUB_STATUS=0 || SUB_STATUS=$?
 
-ROWS=$(( $(wc -l < "$OUTDIR/subscriber.csv") - 1 ))
+# The manifest MUST close even when the subscriber exits non-zero. Under set -e a failed or
+# terminated run aborts the script here, leaving outcome: null -- and a run that died
+# mid-flight is precisely the one whose provenance later gets disputed. Terminating a run is
+# also routine, not exceptional: --log-end-frame-id assumes a frame rate, and an arm that
+# collapses the frame rate makes the end frame unreachable. Arm 2b ran at 1.12 fps, so its
+# end frame was about an hour away and it had to be killed.
+ROWS=$(( $(wc -l < "$OUTDIR/subscriber.csv" 2>/dev/null || echo 1) - 1 ))
 
 # Close the manifest with what actually happened, so a run carries its own outcome.
-MAN_PATH="$MANIFEST" MAN_ROWS="$ROWS" MAN_CSV="$OUTDIR/subscriber.csv" python3 - <<'PYEOF' || true
+MAN_PATH="$MANIFEST" MAN_ROWS="$ROWS" MAN_CSV="$OUTDIR/subscriber.csv" MAN_STATUS="${SUB_STATUS:-}" python3 - <<'PYEOF' || true
 import csv, json, os, pathlib, subprocess, datetime, re
 man = pathlib.Path(os.environ["MAN_PATH"])
 rows = int(os.environ["MAN_ROWS"])
@@ -207,10 +213,23 @@ doc["sync"]["phc2sys_servo_end"] = journal("phc2sys-B", r" (s[0-2]) ")
 outcome = {
     "ended_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "rows_written": rows,
-    "exit_reason": "end_frame_reached" if rows > 0 else "no_rows",
+    "exit_reason": None,   # set below from the subscriber's actual exit status
     "first_frame_id": None, "last_frame_id": None, "elapsed_s": None,
     "delivered_resolutions": None, "resolution_changed": None,
 }
+# Recorded from the process's real exit status, not inferred from row count. A run with
+# rows can still have been killed, and that distinction is the whole point of the field.
+_status = os.environ.get("MAN_STATUS", "")
+if _status == "0":
+    outcome["exit_reason"] = "end_frame_reached" if rows > 0 else "exited_clean_no_rows"
+elif _status in ("143", "130"):
+    outcome["exit_reason"] = "terminated_by_signal_%s" % _status
+elif _status:
+    outcome["exit_reason"] = "exited_nonzero_%s" % _status
+else:
+    outcome["exit_reason"] = "unknown"
+outcome["subscriber_exit_status"] = int(_status) if _status.isdigit() else None
+
 try:
     r = list(csv.DictReader(csv_path.open()))
     if r:
