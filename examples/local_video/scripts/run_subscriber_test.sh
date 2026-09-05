@@ -89,13 +89,44 @@ LOWLAT_FLAG=()
 # Written BEFORE the first frame -- a run killed mid-flight is the one whose
 # configuration gets disputed later. Capture is best-effort: an unreadable field
 # becomes null rather than failing the run.
+# Uplink capacity, measured at both ends of the run. Field names and probe shape match
+# Host A's run_manifest.rs so the two manifests read alike.
+#
+# Why both ends rather than one: Host A's uplink read 0.026 Mbps at the start of a 30 s run
+# and 0.157 at the end -- a 6x swing inside a single run. A single sample would have made
+# that run look flat at whichever figure happened to be taken.
+#
+# Why this exists at all: the whole programme rested on a 10 Mbps uplink figure measured
+# once, hours before the runs that cited it. It was correct when taken and had fallen 70x by
+# the end of the night. A capacity measurement is not a standing property of a link.
+#
+# null, never 0.0, when skipped or when the probe fails -- a failed probe and a real
+# measurement of zero must not render identically. curl reports the rate even when the
+# timeout truncates the upload, which is the case that matters: a link too slow to finish
+# the probe IS the finding.
+UPLINK_PROBE_BYTES=2000000
+UPLINK_PROBE_TIMEOUT=20
+measure_uplink_mbps() {
+  [ -n "${SKIP_UPLINK_PROBE:-}" ] && { echo "null"; return; }
+  local bps
+  bps="$(head -c "$UPLINK_PROBE_BYTES" /dev/urandom 2>/dev/null \
+    | curl --interface wwan0 -s -o /dev/null -w '%{speed_upload}' \
+        --max-time "$UPLINK_PROBE_TIMEOUT" -X POST --data-binary @- \
+        https://speed.cloudflare.com/__up 2>/dev/null)"
+  case "$bps" in
+    ''|*[!0-9.]*) echo "null" ;;
+    *) python3 -c "print(round(float('$bps')*8/1e6, 3))" 2>/dev/null || echo "null" ;;
+  esac
+}
+UPLINK_START="$(measure_uplink_mbps)"
+
 MANIFEST="${OUTDIR}/subscriber.manifest.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAN_ARGV="$(printf '%s\037' "$BIN" --url "$URL" --room-name "$ROOM" --identity viewer-1 \
   --participant cam-1 "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" --log-end-frame-id "$END_FRAME")"
 MAN_PATH="$MANIFEST" MAN_ARGV="$MAN_ARGV" MAN_DIR="$SCRIPT_DIR" \
-MAN_START="$START_FRAME" MAN_END="$END_FRAME" MAN_FPS="$FPS" python3 - <<'PYEOF'
+MAN_START="$START_FRAME" MAN_END="$END_FRAME" MAN_FPS="$FPS" MAN_UPLINK_START="$UPLINK_START" python3 - <<'PYEOF'
 import json, os, pathlib, subprocess, datetime, platform, re
 
 def read(path):
@@ -128,6 +159,8 @@ doc = {
         "git_sha": sh("git", "-C", d, "rev-parse", "HEAD"),
         "git_dirty": bool(sh("git", "-C", d, "status", "--porcelain")),
         "ssl_cert_file": os.environ.get("SSL_CERT_FILE"),
+        "uplink_mbps_start": (lambda v: None if v in ("", "null") else float(v))(os.environ.get("MAN_UPLINK_START", "null")),
+        "uplink_mbps_end": None,
     },
     # No requested_* here, deliberately: the subscriber requests nothing, it receives
     # whatever arrives. requested_* is publisher-only and delivered_resolutions is
@@ -189,8 +222,10 @@ echo "  start the publisher now (or within ~30s)"
 # end frame was about an hour away and it had to be killed.
 ROWS=$(( $(wc -l < "$OUTDIR/subscriber.csv" 2>/dev/null || echo 1) - 1 ))
 
+UPLINK_END="$(measure_uplink_mbps)"
+
 # Close the manifest with what actually happened, so a run carries its own outcome.
-MAN_PATH="$MANIFEST" MAN_ROWS="$ROWS" MAN_CSV="$OUTDIR/subscriber.csv" MAN_STATUS="${SUB_STATUS:-}" python3 - <<'PYEOF' || true
+MAN_PATH="$MANIFEST" MAN_ROWS="$ROWS" MAN_CSV="$OUTDIR/subscriber.csv" MAN_STATUS="${SUB_STATUS:-}" MAN_UPLINK_END="$UPLINK_END" python3 - <<'PYEOF' || true
 import csv, json, os, pathlib, subprocess, datetime, re
 man = pathlib.Path(os.environ["MAN_PATH"])
 rows = int(os.environ["MAN_ROWS"])
@@ -245,7 +280,12 @@ try:
         outcome["resolution_changed"] = (len(order) > 1) if order else None
         doc["media"]["decoder_implementation"] = r[-1].get("decoder_implementation") or None
 except Exception as exc:
-    outcome["exit_reason"] = "outcome_read_failed: %s" % exc
+    # Do NOT overwrite exit_reason here. It records HOW the process ended, which is known
+    # from its exit status and is still true when the CSV is unreadable -- and a run with no
+    # CSV is exactly the one where knowing whether it was killed or exited cleanly matters.
+    outcome["outcome_read_error"] = str(exc)
+_ue = os.environ.get("MAN_UPLINK_END", "null")
+doc["environment"]["uplink_mbps_end"] = None if _ue in ("", "null") else float(_ue)
 doc["outcome"] = outcome
 man.write_text(json.dumps(doc, indent=2) + "\n")
 PYEOF
