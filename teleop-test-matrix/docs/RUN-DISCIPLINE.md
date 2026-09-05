@@ -547,7 +547,7 @@ answer and neither can be taken until the uplink recovers.
   a link comparable to arm 1's.
 
 - **Why did the A-series picture shrink while nothing was starved?** The encoder
-  runs `NV_ENC_PARAMS_RC_CBR` with `enableFillerDataInsertion` never set
+  runs `NV_ENC_PARAMS_RC_CBR` with `enableFillerDataInsertion` never set *by us* — the driver's preset config is memcpy'd over the zeroed struct in `CreateDefaultEncoderParams`, so its actual value is not determined by this source tree
   (`h264_encoder_impl.cpp:225`). Denied padding, NVENC satisfies CBR the only
   remaining way — by lowering QP until the target is consumed — so ~10 Mbps of
   *real* coded picture on trivially compressible colour bars is the rate control
