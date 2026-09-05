@@ -51,8 +51,15 @@ use frame_log::{create_csv, csv_text, CsvFloat, CsvLatency, CsvOption, FrameLogR
 /// CLI spelling of `DegradationPreference`, which is not itself a `ValueEnum`.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum DegradationPreferenceArg {
+    /// Hold framerate, shed resolution. The SDK default for camera sources, and
+    /// what produced arm 1's six-step staircase to 320x180.
     MaintainFramerate,
+    /// Hold resolution, shed framerate. Trades a downscale for a stutter, which
+    /// for teleoperation may be the worse trade.
     MaintainResolution,
+    /// Hold both and drop whole frames before encoding instead. The only setting
+    /// that does not silently degrade the image.
+    MaintainFramerateAndResolution,
     Balanced,
 }
 
@@ -62,6 +69,9 @@ impl From<DegradationPreferenceArg> for DegradationPreference {
             DegradationPreferenceArg::MaintainFramerate => DegradationPreference::MaintainFramerate,
             DegradationPreferenceArg::MaintainResolution => {
                 DegradationPreference::MaintainResolution
+            }
+            DegradationPreferenceArg::MaintainFramerateAndResolution => {
+                DegradationPreference::MaintainFramerateAndResolution
             }
             DegradationPreferenceArg::Balanced => DegradationPreference::Balanced,
         }
