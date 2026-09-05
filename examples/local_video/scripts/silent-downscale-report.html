@@ -163,7 +163,7 @@ ul.plain li{margin-bottom:9px}
 <div class="call warn" style="margin-top:36px">
   <div class="eyebrow">Correction · 5 September 2026</div>
   <p><strong>Sections 03 and 04 are withdrawn.</strong> They attributed the collapse to WebRTC's bandwidth estimator falling in response to 5G delay spikes, and to the encoder shedding resolution to meet a falling bitrate target. The delivered bitrate in the run that argument rests on does not fall. It holds between 9.1 and 10.1 Mbps through every one of A3's resolution steps, from the first frame to the last. An encoder losing its bitrate allocation cannot spend a flat 10 Mbps while it happens.</p>
-  <p><strong>The mechanism is now unestablished</strong> — not replaced with a different one. Everything measured below is unaffected and stands as recorded: the staircase, its timing, the five-second cadence, the zero packet loss, and the finding that the load ladder was never a ladder. What has been withdrawn is the explanation, and the redirection of the codec work that followed from it. Section 07 carries the detail.</p>
+  <p><strong>The mechanism is now unestablished</strong> — not replaced with a different one. Later work narrowed it usefully without closing it: the encoder was never starved of bits, and the picture shrank while every signal its quality scaler is documented to respond to was healthy. Everything measured below is unaffected and stands as recorded: the staircase, its timing, the five-second cadence, the zero packet loss, and the finding that the load ladder was never a ladder. What has been withdrawn is the explanation, and the redirection of the codec work that followed from it. Sections 03 and 07 carry the detail.</p>
 </div>
 </div>
 
@@ -235,6 +235,12 @@ ul.plain li{margin-bottom:9px}
   <p>An encoder that is losing its bitrate allocation cannot spend a flat 10 Mbps while it happens. Whatever drove the staircase, a collapsing bandwidth estimate is not visible in this run.</p>
 
   <div class="call warn">
+    <div class="eyebrow">The sharper version of the unknown</div>
+    <p>The encoder was never starved. It held its target, the link carried it, no packets were lost, and the bytes were real coded picture. WebRTC's quality scaler steps down on <em>high</em> quantiser — and constant-bitrate encoding at 10 Mbps on trivially compressible content drives the quantiser <em>low</em>, which should have held the resolution or raised it.</p>
+    <p>So the picture stepped down four times, on an exact five-second clock, <strong>while every signal the scaler is documented to respond to was healthy.</strong> That is a more specific unknown than "the mechanism is unclear", and a more uncomfortable one: it says the trigger is something not yet identified, rather than something mismeasured. Settling it needs a repeat with the encoder's own quantiser column, which did not exist when these runs were made.</p>
+  </div>
+
+  <div class="call warn">
     <div class="eyebrow">A later run shows the opposite signature</div>
     <p>A separate 1080p run made two hours later, with the encoder's own columns logged, does match the withdrawn story exactly: bitrate falling 6.76 → 0.82 Mbps, bits per pixel flat at 0.2–0.3, <span class="mono">quality_limitation_reason</span> reading <span class="mono">Bandwidth</span> throughout, and QP pinned at the H.264 ceiling of 51 before every step — dropping to 48, 49, 44, 43, 35 immediately after each one. So the encoder does compress maximally <em>first</em> and shed resolution only when compression is exhausted. But that run happened on a collapsed uplink, and its signature is the inverse of A3's. Carrying its mechanism onto the A-series is the error this correction exists to undo.</p>
   </div>
@@ -253,7 +259,9 @@ ul.plain li{margin-bottom:9px}
   </table>
   </div>
 
-  <p>Same resolution, same decoder, same source: A3's frames carry nearly seven times the bytes and cost four and a half times the decode. Those bytes were delivered to the decoder and decoded. One alternative survives this test and has not been ruled out — filler NAL units emitted inside the bitstream by the hardware encoder, which unlike RTP padding <em>would</em> reach the decoder. Settling that needs the encoder's configuration, not the receiver's logs.</p>
+  <p>Same resolution, same decoder, same source: A3's frames carry nearly seven times the bytes and cost four and a half times the decode. The one alternative that survived that test was filler emitted inside the bitstream by the hardware encoder, which unlike RTP padding <em>would</em> reach the decoder. It is ruled out too. NVENC inserts filler only when <span class="mono">enableFillerDataInsertion</span> is set, and the flag is never assigned anywhere in the SDK's encoder sources — it appears only in the vendor header that declares it.</p>
+
+  <p>What the encoder configuration does explain is the byte counts. It runs in <strong>constant-bitrate mode</strong>, with the average rate driven straight from WebRTC's allocation. Denied filler as a way to reach that target, an encoder has one remaining lever: lower the quantiser until the budget is spent on real detail. So on scrolling colour bars at a 10 Mbps target it produces 10 Mbps of genuine coded picture, because that is what it was told to do. Every figure above follows arithmetically — the flat bitrate is CBR holding a target that is a floor rather than a ceiling, the climbing bits per pixel is the same budget divided among fewer pixels, and A3's frames outweighing the later run's at identical resolution is simply the ratio of their two targets. At 2.00 bits per pixel the encoder was operating near losslessly on colour bars.</p>
 
   <div class="twrap">
   <table>
@@ -362,7 +370,8 @@ ul.plain li{margin-bottom:9px}
   <h2><span class="n">08</span>What we still don't know</h2>
   <p class="sub">Stated plainly, so nothing here is over-read</p>
   <ul class="plain">
-    <li><strong>Why trivially compressible content needed 9.9 Mbps at 640×360.</strong> The A-series source was animated colour bars, which should encode in a small fraction of that. Whether those bytes were coefficients the encoder chose to spend, or filler emitted to meet a 10 Mbps target, is the single most useful thing left to determine — and it decides whether the collapse would happen on real camera video at all. It needs the encoder's own columns on a repeat run.</li>
+    <li><strong>What triggers the step-down, given that nothing the scaler responds to was unhealthy.</strong> This is the open question the correction leaves, and it is the one worth funding. It needs a repeat with the encoder's quantiser and limitation-reason columns, which did not exist when these runs were made.</li>
+    <li><strong>Whether constant-bitrate encoding is the right default here at all.</strong> The encoder spends its entire allocation whatever the content, so a still scene costs exactly as much uplink as a moving one. For a teleoperation feed that is arguably wanted. But it leaves no headroom on a link we have separately watched fall seventyfold, and variable-bitrate at the same average would buy the same picture for less. Nobody has revisited this default; it is recorded here because it interacts badly with the failure that prompted this report.</li>
     <li><strong>No run has ever delivered sustained high resolution</strong>, so no client-side latency figure in this programme describes the production feed. The 1080p decode samples that exist are the first handful of frames of a run, where the decoder is cold: 24.92 ms median across six frames, against 0.59 ms for 320×180 across 2,776. Those are not comparable, and the pipeline has never been measured in the state it would actually run in.</li>
     <li>Each load point is <strong>a single run</strong>. A repeat of the lowest point produced 17 stall episodes against the original's 11, so within-condition variability is substantial.</li>
     <li>We cannot yet separate the sender's pacer from the radio scheduler from the SFU. Distinguishing them needs sender-side pacer queue depth sampled far faster than either host currently logs.</li>
