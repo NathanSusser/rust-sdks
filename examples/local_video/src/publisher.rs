@@ -944,14 +944,17 @@ mod tests {
             .expect("static test pattern should parse");
         let animated_args = Args::try_parse_from(["publisher", "--test-pattern", "1"])
             .expect("animated test pattern should parse");
+        let noise_args = Args::try_parse_from(["publisher", "--test-pattern", "2"])
+            .expect("noise test pattern should parse");
 
         assert_eq!(static_args.test_pattern, Some(TestPatternMode::Static));
         assert_eq!(animated_args.test_pattern, Some(TestPatternMode::Animated));
+        assert_eq!(noise_args.test_pattern, Some(TestPatternMode::Noise));
     }
 
     #[test]
     fn publisher_test_pattern_rejects_unknown_mode() {
-        assert!(Args::try_parse_from(["publisher", "--test-pattern", "2"]).is_err());
+        assert!(Args::try_parse_from(["publisher", "--test-pattern", "3"]).is_err());
         assert!(Args::try_parse_from(["publisher", "--test-pattern"]).is_err());
     }
 
