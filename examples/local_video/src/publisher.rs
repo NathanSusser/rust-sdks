@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use livekit::e2ee::{key_provider::*, E2eeOptions, EncryptionType};
 use livekit::options::{
-    self, video as video_presets, FrameMetadataFeatures, TrackPublishOptions, VideoCodec,
-    VideoEncoderBackend, VideoEncoding, VideoPreset,
+    self, video as video_presets, DegradationPreference, FrameMetadataFeatures,
+    TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoEncoding, VideoPreset,
 };
 use livekit::prelude::*;
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
@@ -47,6 +47,26 @@ use timestamp_burn::TimestampOverlay;
 use video_display::{align_up, PublisherTimingSample, SharedYuv};
 
 use frame_log::{create_csv, csv_text, CsvFloat, CsvLatency, CsvOption, FrameLogRange};
+
+/// CLI spelling of `DegradationPreference`, which is not itself a `ValueEnum`.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum DegradationPreferenceArg {
+    MaintainFramerate,
+    MaintainResolution,
+    Balanced,
+}
+
+impl From<DegradationPreferenceArg> for DegradationPreference {
+    fn from(value: DegradationPreferenceArg) -> Self {
+        match value {
+            DegradationPreferenceArg::MaintainFramerate => DegradationPreference::MaintainFramerate,
+            DegradationPreferenceArg::MaintainResolution => {
+                DegradationPreference::MaintainResolution
+            }
+            DegradationPreferenceArg::Balanced => DegradationPreference::Balanced,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum PublisherCodec {
@@ -205,6 +225,16 @@ struct Args {
     /// Max video bitrate for the main layer in bps (optional)
     #[arg(long)]
     max_bitrate: Option<u64>,
+
+    /// How the encoder should degrade when the estimator gives it less than it
+    /// asked for.
+    ///
+    /// Unset uses the SDK default, which for `TrackSource::Camera` is
+    /// `MaintainFramerate` — hold 30 fps and give up pixels. Every run in the
+    /// 4 Sep programme was configured that way by default rather than by choice,
+    /// and the resolution staircase down to 320x180 is that default being obeyed.
+    #[arg(long, value_enum)]
+    degradation_preference: Option<DegradationPreferenceArg>,
 
     /// Interval between publisher stats samples, in milliseconds.
     ///
@@ -1569,6 +1599,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         frame_metadata_features,
         video_encoding: Some(main_encoding.clone()),
         simulcast_layers: args.simulcast.then(|| simulcast_presets.clone()),
+        degradation_preference: args.degradation_preference.map(Into::into),
         ..Default::default()
     };
 
