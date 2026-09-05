@@ -33,19 +33,44 @@ rejected push means the other host holds the token — pull and retry.
 ## Does it survive a reboot?
 
 The column that matters. A change that reverts silently is worse than one that
-was never made, because the rig keeps producing numbers.
+was never made, because the rig keeps producing plausible numbers.
 
-| Change | Host | Survives reboot? |
-|---|---|---|
-| CPU governor `performance` + EPP `performance` | B | **No** — see below |
-| CPU governor `performance` + EPP `performance` | A | *Host A to confirm* |
-| `ptp4l` / `phc2sys` running | B | Yes — systemd units, `enabled` |
-| `ptp4l` running | A | *Host A to confirm — foreground process as of last check* |
-| `systemd-timesyncd` disabled | B | Yes — `disabled` |
-| NetworkManager profile edits | B | Yes — persisted by definition |
-| `/etc/linuxptp/ptp4l-B.conf` | B | Yes — on disk |
-| `corp-ca.pem` | B | Yes — on disk, gitignored |
-| `CC` / `CXX` for builds | both | **No** — environment only, per shell |
+Two columns, because they are different risks with different remedies. A
+non-persistent setting with a run-time guard degrades **loudly** — someone sees
+a warning. Without one it degrades **silently**: a missing `CUDA_HOME` yields a
+working binary that is quietly slower, and a missing CA bundle yields a
+connection error that reads as a network fault.
+
+| Change | Host | Survives reboot? | Fails loudly? |
+|---|---|---|---|
+| CPU governor `performance` | A | Yes — `cpufrequtils`, `GOVERNOR="performance"` | Yes — guard in `run_publisher_test.sh` |
+| CPU governor `performance` | B | **No** — `cpufrequtils` absent | **No** — no guard on this side |
+| EPP `performance` | A | **No** — `cpufrequtils` does not manage EPP | Partly — the guard checks governor, not EPP |
+| EPP `performance` | B | **No** | **No** |
+| `ptp4l` / `phc2sys` running | B | Yes — systemd units, `enabled` | Yes — pre-flight checks `s2` and faults |
+| `ptp4l` / `phc2sys` running | A | **No** — foreground process, no units exist | **No** — and see the warning below |
+| `systemd-timesyncd` disabled | both | Yes | — |
+| NetworkManager profile edits | both | Yes — persisted by definition | — |
+| `/etc/linuxptp/ptp4l-B.conf` | B | Yes — on disk | — |
+| TLS bundle for the SFU | B | Yes — `.livekit-demo/corp-ca.pem`, on disk | — |
+| TLS bundle for the SFU | A | **No** — in a session-temporary directory | **No** — reads as a network fault |
+| `CC` / `CXX` for builds | both | **No** — environment only, per shell | Yes — build fails outright |
+| `CUDA_HOME=/usr` | A | **No** — in no shell profile | **No** — NVENC compiles out with only a `cargo:warning` |
+
+*Host A rows reported by Host A from their own audit; their section below is
+theirs to write.*
+
+> **Host A's grandmaster has no systemd unit.** `ptp4l` there is a foreground
+> process started by hand. If that terminal closes, sync dies for **both**
+> machines — and Host B's `phc2sys` would go on reporting `s2` against a clock
+> that has stopped being disciplined. Host B's units protect it from its own
+> terminal, not from Host A's.
+
+> **Host A's TLS bundle is in a session-temporary directory.** When that
+> session ends the file is deleted, and Host A can no longer reach the SFU:
+> `invalid peer certificate: UnknownIssuer`. The T-Mobile enterprise root is
+> not in `/usr/local/share/ca-certificates/` there. This is the most urgent
+> item on either machine.
 
 ---
 
