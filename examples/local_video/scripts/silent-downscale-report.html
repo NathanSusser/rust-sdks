@@ -276,6 +276,20 @@ ul.plain li{margin-bottom:9px}
   <div class="call warn">
     <div class="eyebrow">The measurement ate its own evidence</div>
     <p>We excluded the first 90 frames of every run from the stall analysis as “startup artifacts,” because the publisher's frame cadence is genuinely irregular there. Those excluded frames are exactly the ones that trigger the permanent collapse. The filter removed the cause of the largest problem in the programme.</p>
+    <p>It removed most of the latency evidence with it, and it did so <em>asymmetrically</em>. Taking the worst 1% of frames by transport in each run and asking how many fell inside the excluded window:</p>
+    <div class="twrap">
+    <table>
+      <thead><tr><th>Run</th><th class="num">Worst-1% frames inside the excluded window</th></tr></thead>
+      <tbody>
+        <tr class="okrow"><td class="name">Run B (control)</td><td class="num">0 / 35 — 0%</td></tr>
+        <tr><td class="name">A2-off</td><td class="num">3 / 33 — 9%</td></tr>
+        <tr><td class="name">A1</td><td class="num">9 / 34 — 26%</td></tr>
+        <tr class="hl"><td class="name">A2</td><td class="num">29 / 34 — 85%</td></tr>
+        <tr class="hl"><td class="name">A3</td><td class="num">29 / 34 — 85%</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>The filter took 85% of the tail out of the two runs whose collapse we were trying to explain, and none of it out of the control. A filter that discards more evidence from the treatment than from the control is not removing noise, it is removing signal — and every comparison drawn across it was biased in the direction that made the loaded runs look calmer than they were.</p>
   </div>
 </section>
 
