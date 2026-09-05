@@ -15,10 +15,23 @@ SECONDS_TO_RUN="${3:-120}"
 OUTDIR="${4:-./results}"
 
 FPS=30
-# Frames 0-59 are encoder ramp-up and bitrate probing; starting at 60 keeps that
-# transient out of the statistics. The end bound is what makes the run stop by
-# itself instead of needing a timer or Ctrl-C.
-START_FRAME=60
+WIDTH="${WIDTH:-1280}"
+HEIGHT="${HEIGHT:-720}"
+CODEC="${CODEC:-h264}"
+# Always passed explicitly. Omitting it falls through to a static preset table
+# indexed on resolution that knows nothing about this link -- Run B inherited
+# 3.0 Mbps that way, and a review section was later written against a cap that
+# had to be guessed rather than read.
+MAX_BITRATE="${MAX_BITRATE:-10000000}"
+# 1000 ms samples once inside a collapse that completes in 0.5-1.0 s, sometimes
+# not at all. 100 ms is the experiment default.
+STATS_INTERVAL_MS="${STATS_INTERVAL_MS:-100}"
+# Was 60, to keep encoder ramp-up out of the statistics. That window is now the
+# interval under study:
+# the resolution collapse completes inside the first second, so excluding it
+# excluded the evidence. Must match run_subscriber_test.sh exactly -- the two
+# CSVs pair by frame ID and mismatched windows produce metrics that disagree.
+START_FRAME="${START_FRAME:-0}"
 END_FRAME=$(( START_FRAME + FPS * SECONDS_TO_RUN ))
 
 : "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}"
@@ -70,8 +83,10 @@ fi
   --room-name "$ROOM" \
   --identity cam-1 \
   --test-pattern 1 \
-  --width 1280 --height 720 --fps "$FPS" \
-  --codec h264 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
+  --codec "$CODEC" \
+  --max-bitrate "$MAX_BITRATE" \
+  --stats-interval-ms "$STATS_INTERVAL_MS" \
   --burn-timestamp \
   "${PREVIEW_ARGS[@]}" \
   --log-csv "$OUTDIR/publisher.csv" \

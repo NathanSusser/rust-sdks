@@ -26,7 +26,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use yuv_sys;
@@ -35,6 +35,7 @@ use yuv_sys;
 mod argus;
 mod codec_display;
 mod frame_log;
+mod run_manifest;
 mod test_pattern;
 mod timestamp_burn;
 mod user_data;
@@ -45,7 +46,7 @@ use test_pattern::{TestPattern, TestPatternMode};
 use timestamp_burn::TimestampOverlay;
 use video_display::{align_up, PublisherTimingSample, SharedYuv};
 
-use frame_log::{create_csv, CsvFloat, CsvLatency, CsvOption, FrameLogRange};
+use frame_log::{create_csv, csv_text, CsvFloat, CsvLatency, CsvOption, FrameLogRange};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum PublisherCodec {
@@ -204,6 +205,15 @@ struct Args {
     /// Max video bitrate for the main layer in bps (optional)
     #[arg(long)]
     max_bitrate: Option<u64>,
+
+    /// Interval between publisher stats samples, in milliseconds.
+    ///
+    /// The resolution collapse under rate control completes in roughly 0.5-1.0 s,
+    /// so a 1000 ms tick yields one sample inside the event and sometimes none —
+    /// `quality_limitation_reason` can read `None` before it and `Bandwidth`
+    /// after it with the entire transition unobserved.
+    #[arg(long, default_value_t = 1000)]
+    stats_interval_ms: u64,
 
     /// Enable simulcast publishing (low/medium/high layers as appropriate)
     #[arg(long, default_value_t = false)]
@@ -494,36 +504,30 @@ fn log_publisher_outbound_health(stats: &[livekit::webrtc::stats::RtcStats]) {
     }
 }
 
-async fn update_publisher_video_stats(track: LocalVideoTrack, ctrl_c_received: Arc<AtomicBool>) {
-    let mut last_log =
-        Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        if ctrl_c_received.load(Ordering::Acquire) {
-            break;
-        }
-
-        if let Ok(stats) = track.get_stats().await {
-            if last_log.elapsed() >= Duration::from_secs(2) {
-                log_publisher_outbound_health(&stats);
-                last_log = Instant::now();
-            }
-        }
-
-        interval.tick().await;
-    }
-}
-
-async fn update_publisher_encoder_overlay(
+/// One stats loop for the whole publisher.
+///
+/// Health logging and the encoder overlay previously ran as two tasks, each on
+/// its own 1 s timer, each calling `get_stats()` independently. Two snapshots
+/// taken at two instants cannot be written into one CSV row without the columns
+/// disagreeing with each other, so they are merged here: one tick, one
+/// `get_stats()`, one snapshot that every consumer reads.
+///
+/// `overlay_sink` is filled in later by the display path, which constructs its
+/// shared buffer after this task is already running. A `OnceLock` lets the loop
+/// start immediately and pick the overlay up when it appears, rather than
+/// forcing a second task to exist purely because of construction order.
+async fn update_publisher_stats(
     track: LocalVideoTrack,
-    shared: Arc<Mutex<SharedYuv>>,
+    overlay_sink: Arc<OnceLock<Arc<Mutex<SharedYuv>>>>,
+    outbound_snapshot: Arc<Mutex<OutboundSnapshot>>,
+    interval_ms: u64,
     ctrl_c_received: Arc<AtomicBool>,
 ) {
+    let mut last_log =
+        Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
     let mut logged_initial = false;
     let mut last_implementation = String::new();
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut interval = tokio::time::interval(Duration::from_millis(interval_ms.max(1)));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -533,14 +537,26 @@ async fn update_publisher_encoder_overlay(
 
         match track.get_stats().await {
             Ok(stats) => {
+                if let Some(snapshot) = OutboundSnapshot::from_stats(&stats) {
+                    *outbound_snapshot.lock() = snapshot;
+                }
+
+                // Health logging stays on its own 2 s cadence regardless of the
+                // sampling tick: at 100 ms it would otherwise emit 20x the lines
+                // and bury everything else in the log.
+                if last_log.elapsed() >= Duration::from_secs(2) {
+                    log_publisher_outbound_health(&stats);
+                    last_log = Instant::now();
+                }
+
                 if let Some(implementation) = find_video_outbound_encoder(&stats) {
                     if implementation != last_implementation {
                         info!("Publisher video encoder implementation: {implementation}");
                         last_implementation = implementation.to_string();
                     }
-
-                    let mut shared = shared.lock();
-                    shared.codec_implementation = implementation.to_string();
+                    if let Some(shared) = overlay_sink.get() {
+                        shared.lock().codec_implementation = implementation.to_string();
+                    }
                 }
                 logged_initial = true;
             }
@@ -602,11 +618,67 @@ fn format_timing_line(timings: &PublisherTimingSummary) -> String {
 
 const MAX_PUBLISH_TIMING_SAMPLES: usize = 300;
 
-const PUBLISHER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,frame_buffer_timestamp_us,encoder_upload_timestamp_us,encoder_output_timestamp_us,webrtc_packetize_timestamp_us,capture_to_buffer_ms,buffer_to_encoder_ms,encode_ms,encoder_to_packetize_ms,capture_to_packetize_ms,frame_id_gap,packetize_interval_ms";
+const PUBLISHER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,frame_buffer_timestamp_us,encoder_upload_timestamp_us,encoder_output_timestamp_us,webrtc_packetize_timestamp_us,capture_to_buffer_ms,buffer_to_encoder_ms,encode_ms,encoder_to_packetize_ms,capture_to_packetize_ms,frame_id_gap,packetize_interval_ms,target_bitrate_mbps,available_outgoing_bitrate_mbps,quality_limitation_reason,quality_limitation_resolution_changes,encoded_frame_width,encoded_frame_height,frames_per_second,qp_sum,frames_encoded,encoder_implementation";
+
+/// Encoder-side stats, sampled by the stats loop and copied onto each CSV row.
+///
+/// These answer questions the timing columns structurally cannot.
+/// `quality_limitation_reason` distinguishes a bandwidth limit from a CPU limit —
+/// the mechanism claim currently rests on the absence of packet loss, which is
+/// equally consistent with either. `qp_sum` over `frames_encoded` gives mean QP,
+/// which is the direct test of whether the encoder compressed harder or shed
+/// pixels; without it that distinction stays inferred.
+#[derive(Debug, Default, Clone)]
+struct OutboundSnapshot {
+    target_bitrate_mbps: Option<f64>,
+    available_outgoing_bitrate_mbps: Option<f64>,
+    quality_limitation_reason: Option<String>,
+    quality_limitation_resolution_changes: Option<u32>,
+    encoded_frame_width: Option<u32>,
+    encoded_frame_height: Option<u32>,
+    frames_per_second: Option<f64>,
+    qp_sum: Option<u64>,
+    frames_encoded: Option<u32>,
+    encoder_implementation: Option<String>,
+}
+
+impl OutboundSnapshot {
+    fn from_stats(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<Self> {
+        let outbound = find_video_outbound_stats(stats)?;
+        let o = &outbound.outbound;
+        Some(Self {
+            target_bitrate_mbps: Some(o.target_bitrate / 1_000_000.0),
+            // available_outgoing_bitrate lives on candidate-pair, not outbound-rtp.
+            available_outgoing_bitrate_mbps: find_available_outgoing_bitrate(stats)
+                .map(|bps| bps / 1_000_000.0),
+            quality_limitation_reason: Some(format!("{:?}", o.quality_limitation_reason)),
+            quality_limitation_resolution_changes: Some(o.quality_limitation_resolution_changes),
+            encoded_frame_width: Some(o.frame_width),
+            encoded_frame_height: Some(o.frame_height),
+            frames_per_second: Some(o.frames_per_second),
+            qp_sum: Some(o.qp_sum),
+            frames_encoded: Some(o.frames_encoded),
+            encoder_implementation: Some(o.encoder_implementation.clone()),
+        })
+    }
+}
+
+fn find_available_outgoing_bitrate(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<f64> {
+    stats.iter().find_map(|stat| match stat {
+        livekit::webrtc::stats::RtcStats::CandidatePair(pair) => {
+            Some(pair.candidate_pair.available_outgoing_bitrate)
+        }
+        _ => None,
+    })
+}
 
 struct PublisherCsvLogger {
     writer: BufWriter<std::fs::File>,
     range: FrameLogRange,
+    /// Most recent encoder-side sample. Written by the stats loop, read here at
+    /// row-write time, so each row carries the latest snapshot rather than a
+    /// per-row stats call.
+    outbound: Arc<Mutex<OutboundSnapshot>>,
     first_packetize_timestamp_us: Option<u64>,
     previous_packetize_timestamp_us: Option<u64>,
     previous_frame_id: Option<u32>,
@@ -615,10 +687,15 @@ struct PublisherCsvLogger {
 }
 
 impl PublisherCsvLogger {
-    fn new(path: &Path, range: FrameLogRange) -> std::io::Result<Self> {
+    fn new(
+        path: &Path,
+        range: FrameLogRange,
+        outbound: Arc<Mutex<OutboundSnapshot>>,
+    ) -> std::io::Result<Self> {
         Ok(Self {
             writer: create_csv(path, PUBLISHER_CSV_HEADER)?,
             range,
+            outbound,
             first_packetize_timestamp_us: None,
             previous_packetize_timestamp_us: None,
             previous_frame_id: range.previous_to_start(),
@@ -658,10 +735,11 @@ impl PublisherCsvLogger {
             .and_then(|previous| packetize_timestamp_us.checked_sub(previous))
             .map(|interval_us| interval_us as f64 / 1_000.0);
         self.sample_count += 1;
+        let outbound = self.outbound.lock().clone();
 
         writeln!(
             self.writer,
-            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.sample_count,
             packetize_timestamp_us.saturating_sub(first_packetize_timestamp_us) as f64 / 1_000.0,
             frame_id,
@@ -686,6 +764,16 @@ impl PublisherCsvLogger {
             ),
             CsvOption(frame_id_gap),
             CsvFloat(packetize_interval_ms),
+            CsvFloat(outbound.target_bitrate_mbps),
+            CsvFloat(outbound.available_outgoing_bitrate_mbps),
+            CsvOption(outbound.quality_limitation_reason.as_deref().map(csv_text)),
+            CsvOption(outbound.quality_limitation_resolution_changes),
+            CsvOption(outbound.encoded_frame_width),
+            CsvOption(outbound.encoded_frame_height),
+            CsvFloat(outbound.frames_per_second),
+            CsvOption(outbound.qp_sum),
+            CsvOption(outbound.frames_encoded),
+            CsvOption(outbound.encoder_implementation.as_deref().map(csv_text)),
         )?;
 
         self.previous_frame_id = Some(frame_id);
@@ -985,7 +1073,9 @@ mod tests {
         let path = std::env::temp_dir()
             .join(format!("local-video-publisher-frame-log-{}.csv", std::process::id()));
         let range = FrameLogRange::new(Some(301), Some(302)).expect("range should be valid");
-        let mut logger = PublisherCsvLogger::new(&path, range).expect("log should be created");
+        let mut logger =
+            PublisherCsvLogger::new(&path, range, Arc::new(Mutex::new(OutboundSnapshot::default())))
+                .expect("log should be created");
         let sample = PublisherTimingSample {
             frame_id: Some(301),
             sensor_exposure_timestamp_us: 1_000,
@@ -1087,6 +1177,9 @@ async fn main() -> Result<()> {
 
 async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     let log_range = FrameLogRange::new(args.log_start_frame_id, args.log_end_frame_id)?;
+    // Shared between the stats loop that fills it and the CSV logger that reads
+    // it; declared here so both the logger and the task can be handed a clone.
+    let outbound_snapshot: Arc<Mutex<OutboundSnapshot>> = Arc::new(Mutex::new(OutboundSnapshot::default()));
     let logging_enabled = args.log_csv.is_some();
     let attach_timestamp = args.attach_timestamp || logging_enabled;
     let attach_frame_id = args.attach_frame_id || logging_enabled;
@@ -1336,7 +1429,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     let publisher_log = args
         .log_csv
         .as_deref()
-        .map(|path| PublisherCsvLogger::new(path, log_range))
+        .map(|path| PublisherCsvLogger::new(path, log_range, outbound_snapshot.clone()))
         .transpose()
         .with_context(|| {
             format!(
@@ -1344,6 +1437,27 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
                 args.log_csv.as_deref().expect("log path should be present").display()
             )
         })?;
+    // Provenance is written before the first frame, not after the last: a run
+    // killed mid-flight is exactly the one whose configuration is later disputed.
+    let mut run_manifest = args.log_csv.as_deref().map(|path| {
+        let mut manifest = run_manifest::RunManifest::new(path, "publisher");
+        manifest.set_media(
+            width,
+            height,
+            args.fps,
+            VideoCodec::from(args.codec).as_str(),
+            args.max_bitrate,
+            args.test_pattern.map(|mode| mode.description()),
+        );
+        manifest.set_window(args.log_start_frame_id, args.log_end_frame_id);
+        if let Err(e) = manifest.write() {
+            log::warn!("failed to write run manifest: {e}");
+        } else {
+            info!("Run manifest: {}", manifest.path().display());
+        }
+        manifest
+    });
+
     if let Some(path) = &args.log_csv {
         info!(
             "Writing publisher per-frame metrics to {} (frame-ID bounds are inclusive)",
@@ -1491,8 +1605,17 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     let user_data_channels =
         args.attach_user_data.then(|| Arc::new(Mutex::new([0.0f32; user_data::NUM_CHANNELS])));
 
-    let publish_stats_task =
-        tokio::spawn(update_publisher_video_stats(track.clone(), ctrl_c_received.clone()));
+    // Filled by the display path once it builds its shared buffer; the stats
+    // loop starts now and picks it up when it appears.
+    let overlay_sink: Arc<OnceLock<Arc<Mutex<SharedYuv>>>> = Arc::new(OnceLock::new());
+
+    let publish_stats_task = tokio::spawn(update_publisher_stats(
+        track.clone(),
+        overlay_sink.clone(),
+        outbound_snapshot.clone(),
+        args.stats_interval_ms,
+        ctrl_c_received.clone(),
+    ));
 
     match video_input {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -1520,11 +1643,10 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
                     shared.codec = actual_codec.as_str().to_ascii_uppercase();
                     shared.simulcast = args.simulcast;
                 }
-                let overlay_task = tokio::spawn(update_publisher_encoder_overlay(
-                    track.clone(),
-                    shared.clone(),
-                    ctrl_c_received.clone(),
-                ));
+                // The single stats loop owns encoder-implementation reporting now;
+                // handing it the buffer replaces the second task and its second
+                // get_stats() call.
+                let _ = overlay_sink.set(shared.clone());
                 let capture_task = tokio::spawn(run_capture_loop(
                     capture_config,
                     ctrl_c_received.clone(),
@@ -1548,7 +1670,6 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
 
                 let capture_result = capture_task.await?;
                 let _ = publish_stats_task.await;
-                let _ = overlay_task.await;
                 display_result?;
                 capture_result?;
             } else {
