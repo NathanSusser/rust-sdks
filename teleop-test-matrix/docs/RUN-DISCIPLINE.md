@@ -64,6 +64,47 @@ The correct response was to leave it marked as unverifiable rather than
 reconstruct a plausible history for it — reconstructing it would have been the
 same move the rest of this document is about, performed on the document itself.
 
+### Read the configuration for configuration questions
+
+Twice, a question about **how the system was set up** was attacked with
+measurements of **how it behaved**, when the setting itself was one command away
+and decisive:
+
+| Question | What was used | What would have settled it |
+|---|---|---|
+| Does keyframe cadence explain the latency tail? | An episode-grouping query over four runs' arrival data | `gopLength` and `idrPeriod` are both `NVENC_INFINITE_GOPLENGTH` — there is no periodic keyframe, so the hypothesis was impossible, not merely unsupported |
+| Which timestamping tier is each host on? | 27,851 samples of PTP path delay, read nightly for a different field | `ethtool -T` on each end |
+
+> **When a claim is about how the system was *configured*, read the
+> configuration. Measurement is for how it *behaved*.** Using behaviour to infer
+> configuration is slower, weaker, and in at least one case gave the wrong
+> answer outright.
+
+The sharper sub-case is the second row, and it is the one worth guarding
+against: **data already being collected for one purpose can answer a different
+question, and you will not notice, because you are parsing it through a filter
+shaped by the first question.** The path-delay field sat beside the `rms` field
+on every line that was read all night. Two hardware-timestamped ends on a
+back-to-back cable sit in single-digit microseconds; the measured p50 was
+74.6 µs with a 64 µs spread, which says plainly that the far end timestamps in
+software. It was discarded on every line.
+
+That mattered beyond the rig. PTP corrects for path delay by *assuming the two
+directions are symmetric*, so systematic asymmetry survives the correction as a
+constant offset the servo cannot see — the servo measures its own convergence,
+not its accuracy. A masthead reading of "PTP synced, −246 ns" was `pmc`'s
+`offsetFromMaster`: precision presented as accuracy, and on a mixed-tier link
+wrong by two orders. The honest bound is tens of microseconds. Nothing downstream
+changes — that is still three orders below a 19 ms floor — but the number was
+the wrong kind of number.
+
+**The A-series QP error is not an instance of this rule**, though it looks like
+one. That was a *measurement* carried from the run where it was taken to a run
+where it was assumed, which is the "mechanism travelled between runs" failure
+above. Keeping the two separate matters: one is solved by reading a config file,
+the other by refusing to reuse a finding across runs whose conditions were never
+compared.
+
 **The two that survived longest were the two both hosts agreed on** — and the
 mechanism is worse than a shared prior. On those claims the hosts were not two
 independent analysts at all. One host sent "the estimator settles at 1.2 Mbps";
@@ -348,12 +389,21 @@ evidence already rules out. Those are the expensive ones. A guard that warns
 loudly is worth more than a fix that silently works, because the fix will be
 reverted by a reboot and the guard will not.
 
-Defect 10 and the agreement failure in §1 are the same error at different
-scales, and are the two most transferable lines here: **a check can feel sound
-because it was applied uniformly, when what matters is whether it *acted*
-uniformly.** The startup filter was applied to every run and acted on two. The
-review protocol was applied to every claim and acted on all but the two both
-hosts already believed.
+Defect 10, the agreement failure in §1, and the discarded path-delay field are
+the same error at three scales, and are the most transferable lines here:
+
+> **A filter can feel sound because it was applied uniformly, when what matters
+> is whether it *acted* uniformly.**
+
+| The filter | Applied to | Acted on |
+|---|---|---|
+| The 90-frame startup exclusion | every run | two — stripping 85% of the worst frames from the loaded arms and 0% from the control |
+| The two-host review protocol | every claim | all but the two both hosts already believed |
+| A log parser reading `rms` | every `ptp4l` line, all night | one field — while the answer to a different question sat in the field beside it |
+
+The third is the most insidious, because nothing was excluded on purpose. The
+parse was simply shaped by the question being asked at the time, and it made a
+fact that was present 27,851 times invisible.
 
 Since the operator may be remote and without `sudo`, the publisher and
 subscriber scripts now warn on both governor **and** EPP: `cpufrequtils`
