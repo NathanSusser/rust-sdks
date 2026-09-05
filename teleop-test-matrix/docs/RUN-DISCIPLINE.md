@@ -1,0 +1,345 @@
+# Run discipline — what the 4–5 Sep 2026 session cost, and the rules that came out of it
+
+Two hosts, one night, a 5G teleoperation video rig. The session set out to find
+why WebRTC's bandwidth estimator "settled at 1.2 Mbps on a 10 Mbps link". It
+ended by establishing that the estimator was reporting the truth, that the
+uplink had fallen roughly 70× partway through, and that nothing in the rig could
+have detected the difference.
+
+This document is the part worth keeping. It is not a summary of findings — those
+live in `MEASUREMENT-DESIGN.md` and the run reports. It is the set of rules that
+would have made the night shorter, written where the next person will hit them.
+
+Each rule below cost something specific. The cost is stated, because a rule
+without its incident gets optimised away by whoever reads it next.
+
+---
+
+## 1. The withdrawal ledger
+
+Eleven claims were made and withdrawn in one session, between two hosts. They
+are listed together, rather than distributed politely through the text, because
+a reader who sees only the surviving conclusions will trust them more than the
+evidence supports. The withdrawal rate is the honest answer to "how confident
+are you".
+
+The third column records *how* each was caught, because it is the evidence for
+the second pattern below. Rows marked † are attributed from one host's memory
+and need confirming by the other.
+
+| Claim | Withdrawn because | Caught by |
+|---|---|---|
+| BWE decay over a run | Probes had no subscriber, so GCC had no receiver feedback at all | Other host's review |
+| SFU was dropping frames | Never separated from encoder-side drops | † |
+| Keyframe tail explained the p99 | Keyframe cadence did not correlate once measured | † |
+| The grant was being lost between components | `available_outgoing` and `target_bitrate` agree to 5% in the realistic arm | † |
+| A standing 2× `available`/`target` gap | Confined to arm 2b, a configuration already rejected; ratio pinned at 2.04 while both absolutes swung, so structural | Other host proposed it; own data settled it |
+| "The estimator settles at 1.2 Mbps" | It never settles. It starts at 3.3 Mbps, collapses by t+20 s, and is still climbing at t+120 s | **Neither — see below** |
+| "The estimator is wrong" | The uplink was 0.15 Mbps. It was measuring reality | **Neither — two curl commands, available all night** |
+| "The scaler never ratchets back up" | It does, in three of six runs — but only between the bottom two rungs, never toward the request | Other host's step table |
+| The `--log-end-frame-id` window was unreachable at 1 fps | Frame IDs advance at capture rate. The window closed on schedule; a dropped boundary frame hung the exit | Other host's review |
+| Arm 3-alt: publish over the PTP cable as a good-link control | The video goes publisher → SFU → subscriber. The SFU is unreachable from a /30 with no route off it | Other host's review |
+| arm 1's QP mechanism explains the A-series staircase | Opposite bitrate signatures. arm 1's bitrate falls 6.76 → 0.82 Mbps at flat bpp; A3 holds 9–10 Mbps while bpp climbs 0.30 → 2.00. Different links, hours apart | Other host's review |
+
+Two patterns run through that list.
+
+**Eight of the eleven were withdrawn because a quantity was assumed rather than
+measured** — receiver feedback, link capacity, drop attribution, the routing
+topology. In every case the measurement was cheap and available at the time.
+The uplink that invalidated a night's conclusions was two `curl` commands away
+from the first hour.
+
+A specific form of that assumption appeared three times and deserves its own
+name: **a mechanism established on one run was carried onto another run where it
+had only been assumed.** arm 1's QP evidence was applied to the A-series, which
+ran hours earlier on a link four times faster and shows the opposite bitrate
+signature. A capacity figure taken once became a standing property of the link.
+A subscriber's presence in one probe was assumed in the next. Runs are not
+interchangeable, and the rig gave no way to tell — which is what §4 exists to
+fix.
+
+**The two that survived longest were the two both hosts agreed on** — and the
+mechanism is worse than a shared prior. On those claims the hosts were not two
+independent analysts at all. One host sent "the estimator settles at 1.2 Mbps";
+the other reasoned forward from it and sent conclusions back; the first read its
+own claim returning as corroboration. The check both believed they were running
+was never run. It went through three messages and into a commit message before
+anyone plotted the series against time.
+
+So the rule is not "mutual agreement is a weak signal". It is narrower and
+actionable:
+
+> **Agreement counts only when the second analyst derived the claim from the
+> data rather than from the first analyst's message.** Nothing in the two-host
+> protocol distinguished those cases, even to the participants.
+
+Cross-checking worked everywhere else that night — a broken test caught before
+merge, a missing enum variant, a wrong window rule, an unrunnable experiment
+design. Every one of those was a claim one host made alone and the other checked
+against the artifact. The failure was confined to the beliefs both already held,
+which is exactly where a review protocol feels most reliable and is least.
+
+---
+
+## 2. A run must record how it ended
+
+**Rule.** `exit_reason` answers one question — how the process ended — and must
+be derived from something observable at the moment it ended. It must never be a
+constant, must never be inferred from a side effect, and must never be reused to
+report the failure of a different question.
+
+Three separate defects produced the identical outcome on the same day, reached
+by three different routes:
+
+| Mechanism | Effect |
+|---|---|
+| Hardcoded (`finish_from_csv(path, "completed")`) | Always reachable, always a lie. A run terminated by hand after overrunning its window by 19 minutes recorded a clean completion |
+| Unreachable (`set -e` aborted the script when the binary exited non-zero) | The close never ran. Killed runs left `outcome: null` |
+| Overwritten (a missing CSV replaced the status-derived value with `outcome_read_failed`) | A read failure destroyed the answer to an unrelated question |
+
+The invariant they all break: **the run that died is the run with no record of
+how it died** — and that is the run whose provenance gets argued about later.
+
+The general form is worth stating on its own, because a fourth mechanism is
+more likely than a repeat of one of these: *a field that answers one question
+must not be reused to report the failure of a different question, because the
+case where the second question fails is usually the case where the first answer
+matters most.* A read error belongs in its own field; the exit status is known
+from the process regardless of whether any CSV exists.
+
+Two corollaries, both learned the same night:
+
+- **Handle SIGTERM, not just SIGINT.** The rig stops runs with `kill`. Default
+  disposition killed the process outright and closed no manifest at all, losing
+  provenance for exactly the runs that had to be stopped by hand.
+- **Flush before counting.** `finish_from_csv` measures the file on disk, and
+  rows are flushed at most once a second. A manifest could report fewer rows
+  than the CSV it describes.
+
+> **Both hosts shipped a manifest bug that passed its own unit tests.** One
+> wrote `finish()` and never called it; the other made it unreachable behind
+> `set -e`. Test the wiring, not just the unit — the unit was correct in both
+> cases.
+
+---
+
+## 3. The window rule
+
+**Rule.** Publisher frame IDs advance at **capture** rate, independent of what
+the encoder delivers. A `--log-end-frame-id` of 3600 comes due 120 s into a
+30 fps run whether the encoder is producing 30 fps or 1 fps.
+
+This corrects an earlier version of this rule which claimed the window becomes
+unreachable when the frame rate collapses. It does not. Measured on arm 2b:
+frame IDs 8 → 3569 over 119.2 s is 29.86 ids/sec while delivery ran at 1.12
+rows/sec.
+
+The real defect was narrower and worse. `FrameLogRange::reaches_end` tested
+`end == frame_id` — equality against **one specific frame ID** — and
+`record()` returned before consulting it for any frame outside the window. So
+shutdown depended on that exact frame surviving the whole capture → packetize
+pipeline.
+
+At 30 fps with no drops, frame 3600 nearly always survives, which is why this
+held up for weeks. Arm 2b encoded roughly one frame in twenty-six, giving the
+end frame about a 4% chance. It lost. The publisher ran 19 minutes past its
+window, still publishing into the room.
+
+Fixed in `6f25679`: `>=`, evaluated before the containment gate.
+
+**The transferable form:** any termination condition that tests equality against
+a single event assumes that event is never dropped. Where the event travels
+through a lossy pipeline, use a threshold.
+
+---
+
+## 4. Measure the link next to the run
+
+**Rule.** Every run records uplink capacity at both ends, on **both hosts**.
+A run without it cannot be compared to another run on anything bandwidth-related.
+
+This is the control the session spent a night without. Every cross-run
+comparison assumed link capacity was constant between runs separated by tens of
+minutes. It was not: Host A's uplink fell from 10.0 Mbps to 0.14 during the
+session while its downlink stayed above 26 Mbps and Host B's uplink, same
+carrier and same room, still measured 12.8.
+
+An estimator reporting 0.030 Mbps therefore looked like a bug for hours. It was
+correct.
+
+**Uplink specifically, and on both hosts.** A downlink figure looked healthy
+throughout and would have deepened the confusion. A publisher-only figure would
+have shown the collapse but not that it was *one-sided* — and one-sided is what
+distinguishes a device or slice problem from the shared network. Neither host
+could have reached the diagnosis alone.
+
+### 4a. Check the instrument before believing the link
+
+A surprising capacity figure is a measurement artifact until these three are
+ruled out. Run them rather than re-deriving them:
+
+| Check | What it rules out | Observed when sound |
+|---|---|---|
+| Payload size sweep, 2 / 4 / 8 MB | TCP slow-start truncating a short probe | 13.7 / 15.2 / 12.6 Mbps — no systematic bias with size |
+| Pipe vs pre-generated file | `--data-binary @-` being the bottleneck | Pipe reads *higher* (13.0/12.0 vs 11.0/9.8) |
+| `/dev/urandom` throughput | The entropy source capping the probe | ~3800 Mbps, three orders of magnitude clear |
+
+### 4b. Know what two samples can and cannot say
+
+`uplink_mbps_start` and `uplink_mbps_end` **bound the link at the endpoints.
+They do not characterise it during the run.** Sampling continuously would have
+the probe competing with the run for the exact resource under measurement, which
+is what the before-and-after placement exists to avoid. The limit is stated
+rather than instrumented around.
+
+Two consequences:
+
+- A run whose two readings differ by more than about **2×** should not be
+  compared to another run on capacity at all. Host B's uplink swung 2.4× across
+  repeated measurements minutes apart with nothing changed; one 30 s
+  verification run on Host A read 0.026 then 0.157.
+- Never write "the uplink during this run was X". Write "it was between X and Y
+  at the endpoints".
+
+### 4c. Noise tells you which differences you may interpret
+
+The variance measurement is not only a caveat. It sets the threshold at which a
+difference becomes interpretable. A 2.4× swing within one host means a 2×
+difference *between* hosts would have been uninterpretable — and means the
+observed 70× gap is far outside the noise and can be read as real.
+
+Measuring your instrument's noise floor tells you which differences you are
+entitled to interpret. Do it before interpreting any of them.
+
+---
+
+## 5. Post-mortem: run a3r1
+
+**What was recorded at the time:** the run was invalidated because a previous
+publisher overlapped Host B's new subscriber, so the subscriber measured two
+streams. The response was a three-step publisher-stopped handshake before any
+subscriber comes up.
+
+**What actually happened:** the previous publisher had finished its measurement
+window and should have exited. It did not, because of the boundary-frame defect
+in §3, and it was still publishing into the room when the next run started.
+
+The handshake is worth keeping as belt-and-braces. But it treats the symptom,
+and a reader who takes it as *the fix* will leave the boundary bug in place —
+and the boundary bug is what silently corrupted a run. Since `6f25679` the
+publisher ends its own run and releases the room, which is the actual repair.
+
+**The general shape:** when a run is corrupted by another process, ask why that
+process was still alive before adding a protocol step to work around it.
+
+---
+
+## 6. Defects found in the runbooks themselves
+
+Nine corrections to `PTP-RUNBOOK-HOST-A.md` and the harness docs, all found by
+executing them rather than reading them.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | Paths given as `~/rust-sdks/...` | The tree is at `~/code/rust-sdks/...`. Every `cd` in Phases 9 and later is wrong as written |
+| 2 | Phase 9: "It exits by itself at the end frame" | Was false — see §3. True only since `6f25679`, and for a different reason than the text implies |
+| 3 | Troubleshooting sends a header-only CSV to the permissions entry | The file's own existence rules permissions out — see below. The cause is a frame-ID range that matched nothing |
+| 4 | Phase 7 titled "(optional; skip for a one-off test)" | The systemd units are what make the rig survive a reboot. Not optional for a multi-day programme, and the one-off framing invites skipping it |
+| 5 | CSV lacked resolution and bitrate columns | Added in `408acf2`. Without them the resolution staircase and the estimator trajectory are both invisible |
+| 6 | Phase 4 covers NTP but never the CPU governor | A bursty 30 fps duty cycle never convinces `powersave` to ramp; cost 13 ms of capture→buffer latency with no symptom other than the latency |
+| 7 | No instruction to run the full test suite before pushing | A filtered run passed while the shared branch was broken. Shared modules require the full unfiltered package suite |
+| 8 | Definition of done requires `phc2sys` with `s2` on Host A | Host A is the grandmaster; it disciplines *from* its own clock. Absent `phc2sys` is correct there, and the checklist marks a correct rig as failing |
+| 9 | Nothing warns that a `ptp4l` restart makes the restarted host's own sync check meaningless | The slave detects the gap loudly. The restarted host cannot — see below |
+
+### Defect 3 — a header-only CSV has already told you the answer
+
+The symptom is not a missing file. It is a file containing the header and
+nothing else, and that distinction is the entire diagnostic.
+
+`frame_log.rs` `create_csv` does `create_dir_all`, `File::create`, writes the
+header and flushes — all at logger construction, before a single frame arrives.
+So the artifact partitions the causes by itself:
+
+| What is on disk | What it proves |
+|---|---|
+| No file at all | `File::create` failed — genuinely a path or permissions problem |
+| Header, zero rows | `File::create` **succeeded**. Permissions are ruled out by the file's own existence; the frame-ID range matched nothing |
+
+A header-only CSV is *positive evidence against* the permissions hypothesis, and
+the runbook sends the reader at precisely the thing the artifact has already
+exonerated. The file is telling you the answer and the troubleshooting table
+talks you out of reading it.
+
+### Defect 9 — after a restart, the restarted host cannot check its own sync
+
+The original framing of this entry was wrong in three ways, and correcting it
+turns an anecdote into a rule.
+
+When Host A's `ptp4l` went down on 4 Sep, Host B's log shows the whole event:
+
+```
+19:19:24  port 1 (eno2): SLAVE to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES
+19:19:24  selected local clock c4efbb.fffe.32622d as best master
+19:19:24  port 1 (eno2): assuming the grand master role
+19:19:28  selected best master clock 345a60.fffe.5a6e7b
+19:19:29  port 1 (eno2): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+19:19:29  rms 5831 max 12953 freq +374977984 delay 70362
+```
+
+It **self-healed in five seconds** with no operator action. It was **not silent
+on the slave**: a grandmaster has no master to measure itself against, so
+`ptp4l` emits no `rms` lines at all while holding that role — nine seconds of
+silence bracketed by state transitions that name the condition in plain English.
+The existing "ptp4l reporting rms over 120 samples" pre-flight *fails* on this
+rather than passing. And the residue was one excursion, not a divergence: 13 µs
+against transport figures in the tens of milliseconds, three orders down,
+decayed within a second.
+
+The real defect is an asymmetry, and it points at the *other* host:
+
+> **After any `ptp4l` restart, the restarted host's sync-quality check is
+> uninformative until the window it averages over has fully elapsed since the
+> restart.** A freshly started daemon has no `rms` history, so a check that
+> counts samples over a window passes on a few seconds of convergence — and the
+> restarted host is also the one that believes it is the grandmaster, and
+> therefore never doubts itself.
+
+The slave detects this trivially. The host that cannot is the one that just
+restarted, which is the host most likely to be asked whether it is healthy.
+
+### What these two have in common
+
+Defects 3, 6 and 9 share a shape with the rest of this document: the rig reports
+success while the measurement is wrong, or reports a cause the evidence already
+rules out. Those are the expensive ones. A guard that warns loudly is worth more
+than a fix that silently works, because the fix will be reverted by a reboot and
+the guard will not.
+
+Since the operator may be remote and without `sudo`, the publisher and
+subscriber scripts now warn on both governor **and** EPP: `cpufrequtils`
+persists the governor across a reboot but does not manage EPP, which is an
+`intel_pstate` knob outside its scope and reverts to `balance_performance`. A
+freshly booted machine can read `performance` while the setting that matters has
+silently gone back.
+
+---
+
+## Still open
+
+Recorded here rather than dropped, because both are one measurement away from an
+answer and neither can be taken until the uplink recovers.
+
+- **Did the *encoder* step up, or did the SFU switch layers?** The delivered-side
+  up-steps are now confirmed independently: A2 shows six down-steps and three
+  up-steps alternating 320×180 and 480×268, on the same exact 5.00 s clock, and
+  A2-off matches. What is no longer in question is that delivered resolution
+  rose. What remains is strictly the mechanism — the encoder raising its output,
+  or the SFU selecting a different layer — and those runs predate the
+  encoder-side resolution column, so the encoder's own sequence is unknown for
+  them. On R1, where both sides were instrumented, the two agree on zero
+  up-steps: consistent, but a run with no up-steps cannot confirm how an up-step
+  happens. Needs a run that oscillates with both sides logged.
+- **Does the estimator recover past 1.65 Mbps given longer than 120 s?** Arm 1
+  was still climbing at cutoff and never plateaued. R1 was designed to answer
+  this and could not, because its link had already collapsed. Needs a repeat on
+  a link comparable to arm 1's.
