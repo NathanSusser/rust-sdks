@@ -40,20 +40,35 @@ END_FRAME=$(( START_FRAME + FPS * SECONDS_TO_RUN ))
 # A bursty 30fps duty cycle never convinces the powersave governor to ramp up, which
 # inflated capture->buffer from 0.17ms to 14.89ms with no visible symptom other than
 # the latency itself. The governor resets on reboot, so check rather than assume.
-GOV_FILE=/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-if [ -r "$GOV_FILE" ]; then
-  GOV="$(cat "$GOV_FILE")"
-  if [ "$GOV" != "performance" ]; then
-    echo >&2
-    echo "  ####################################################################" >&2
-    echo "  # WARNING: cpu governor is '$GOV', not 'performance'." >&2
-    echo "  # Publisher stage timings will be inflated several-fold and are NOT" >&2
-    echo "  # comparable to runs made with the performance governor." >&2
-    echo "  #   sudo cpupower frequency-set -g performance" >&2
-    echo "  ####################################################################" >&2
-    echo >&2
-  fi
-fi
+#
+# EPP is checked separately and is the one that actually bites: cpufrequtils
+# persists the governor across a reboot but does NOT manage EPP, which is an
+# intel_pstate knob outside its scope and reverts to balance_performance. So the
+# governor can read 'performance' on a freshly booted machine while EPP has
+# silently gone back to a power-saving setting -- the same invisible failure as
+# the original governor bug, one layer down. Neither can be repaired without
+# sudo, so warning loudly is the whole remedy.
+warn_power_setting() {
+  file="$1"; want="$2"; label="$3"; fix="$4"
+  [ -r "$file" ] || return 0
+  have="$(cat "$file" 2>/dev/null)"
+  [ "$have" = "$want" ] && return 0
+  echo >&2
+  echo "  ####################################################################" >&2
+  echo "  # WARNING: $label is '$have', not '$want'." >&2
+  echo "  # Publisher stage timings will be inflated and are NOT comparable to" >&2
+  echo "  # runs made at '$want'. Record this if you keep the run." >&2
+  echo "  #   $fix" >&2
+  echo "  ####################################################################" >&2
+  echo >&2
+}
+
+CPUFREQ=/sys/devices/system/cpu/cpu0/cpufreq
+warn_power_setting "$CPUFREQ/scaling_governor" performance \
+  "cpu governor" "sudo cpupower frequency-set -g performance"
+warn_power_setting "$CPUFREQ/energy_performance_preference" performance \
+  "energy performance preference (EPP)" \
+  "echo performance | sudo tee $CPUFREQ/energy_performance_preference"
 
 mkdir -p "$OUTDIR"
 BIN="$(dirname "$0")/../../../target/release/publisher"
