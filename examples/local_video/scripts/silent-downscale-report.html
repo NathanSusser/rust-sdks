@@ -155,7 +155,7 @@ ul.plain li{margin-bottom:9px}
   <div class="meta">
     <span class="mono">5 paired runs · 17,270 frames</span>
     <span class="mono">Host A → LiveKit SFU → Host B</span>
-    <span class="mono">PTP synced, −246 ns</span>
+    <span class="mono">PTP synced, tens of µs</span>
   </div>
 </header>
 
@@ -328,6 +328,7 @@ ul.plain li{margin-bottom:9px}
   <h2><span class="n">06</span>Is the data trustworthy?</h2>
   <p class="sub">What was validated, and how</p>
   <p>Transport is measured across two machines, so its error is the offset between their clocks. Both hosts are disciplined by PTP over a dedicated Ethernet cable that carries no video — the timing path is deliberately kept off the measured path, so congestion cannot move the clocks and the latency together.</p>
+  <p>The two hosts are not on the same timestamping tier, and that sets the real error bound. The subscriber timestamps in hardware; the publisher's NIC reports no PTP hardware clock and so timestamps in software. The measured path delay across the cable reflects it — a median of 74.6 µs over 27,851 samples, where two hardware-timestamped ends on a direct cable would sit in the single digits. PTP corrects for delay by assuming the two directions are symmetric, and any systematic asymmetry survives that correction as a constant offset. The servo's own report of a sub-microsecond offset is a statement about its precision, not its accuracy, and cannot see this. <strong>The honest bound is tens of microseconds</strong> — three orders below the smallest figure in this report, so nothing here changes, but it is the number to quote rather than the servo's.</p>
   <div class="twrap">
   <table>
     <thead><tr><th>Run</th><th class="num">Paired frames</th><th class="num">Negative samples</th><th class="num">Min transport</th><th class="num">p50</th><th class="num">Max</th></tr></thead>
