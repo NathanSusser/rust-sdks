@@ -187,7 +187,10 @@ def resolution_track(log: LogData) -> ResolutionTrack:
     previous: str | None = None
     for row in log.rows:
         width, height = row.get("frame_width"), row.get("frame_height")
-        if not width or not height:
+        # 0x0 appears on the first frames of a START_FRAME=0 run: the sink has not yet
+        # learned the dimensions. It is not a resolution the stream ever delivered, and
+        # counting it puts a fake first step in the header.
+        if not width or not height or width == "0" or height == "0":
             continue
         res = f"{width}x{height}"
         counts[res] = counts.get(res, 0) + 1
@@ -254,7 +257,7 @@ def pair_resolutions(publisher: LogData, subscriber: LogData) -> ResolutionPairi
     for row in subscriber.rows:
         fid = row.get("frame_id")
         width, height = row.get("frame_width"), row.get("frame_height")
-        if not fid or not width or not height or fid not in enc:
+        if not fid or not width or not height or width == "0" or height == "0" or fid not in enc:
             continue
         delivered = f"{width}x{height}"
         paired += 1

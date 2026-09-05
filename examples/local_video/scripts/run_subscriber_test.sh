@@ -59,6 +59,24 @@ fi
 
 mkdir -p "$OUTDIR"
 
+BIN="$(dirname "$0")/../../../target/release/subscriber"
+[ -x "$BIN" ] || { echo "build first: cargo build --release -p local_video --features desktop --bin publisher --bin subscriber" >&2; exit 1; }
+
+# Flag arrays are resolved HERE, before the manifest, because the manifest records the
+# argv it will actually exec. Defined after it, they expand to nothing and the manifest
+# silently omits flags the binary receives -- which is a run record that is wrong rather
+# than merely incomplete.
+TIMING_FLAG=()
+[ "${SHOW_TIMING:-1}" = "1" ] && TIMING_FLAG=(--display-timestamp)
+
+
+# LOW_LATENCY=1 disables WebRTC's receiver jitter buffer (zero playout delay). Off by
+# default so the documented invocation is unchanged. Measured cost of the buffer under
+# ~3.5 Mbps load: 8 ms at p50 and 124 ms at p95 on receive_to_gpu_complete, with no
+# reduction in stall-episode count.
+LOWLAT_FLAG=()
+[ "${LOW_LATENCY:-0}" = "1" ] && LOWLAT_FLAG=(--low-latency)
+
 # --- run manifest -------------------------------------------------------------
 # A run has to describe itself. Five confusions in this programme came from
 # reconstructing a run's meaning afterwards from shell history, scrollback and memory:
@@ -74,7 +92,7 @@ mkdir -p "$OUTDIR"
 MANIFEST="${OUTDIR}/subscriber.manifest.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAN_ARGV="$(printf '%s\037' "$BIN" --url "$URL" --room-name "$ROOM" --identity viewer-1 \
-  --participant cam-1 "${TIMING_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
+  --participant cam-1 "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" --log-end-frame-id "$END_FRAME")"
 MAN_PATH="$MANIFEST" MAN_ARGV="$MAN_ARGV" MAN_DIR="$SCRIPT_DIR" \
 MAN_START="$START_FRAME" MAN_END="$END_FRAME" MAN_FPS="$FPS" python3 - <<'PYEOF'
@@ -115,9 +133,13 @@ doc = {
     # whatever arrives. requested_* is publisher-only and delivered_resolutions is
     # subscriber-only; pairing them is the join that catches a silent downscale.
     "media": {"requested_fps": int(os.environ["MAN_FPS"]), "decoder_implementation": None},
+    # Derived from the argv actually constructed, never from the environment variable.
+    # An env var records what was asked for; argv records what the binary received. They
+    # diverged here once already -- LOW_LATENCY was read into the manifest while the exec
+    # line never passed the flag, which would have put a false claim in the run record.
     "flags": {
-        "low_latency": os.environ.get("LOW_LATENCY", "0") == "1",
-        "display_timestamp": os.environ.get("SHOW_TIMING", "1") == "1",
+        "low_latency": "--low-latency" in argv,
+        "display_timestamp": "--display-timestamp" in argv,
     },
     "sync": {
         "method": "journal",  # pmc needs root and this path has no TTY for a password
@@ -136,8 +158,6 @@ pathlib.Path(os.environ["MAN_PATH"]).write_text(json.dumps(doc, indent=2) + "\n"
 PYEOF
 echo "  manifest: $MANIFEST"
 # ------------------------------------------------------------------------------
-BIN="$(dirname "$0")/../../../target/release/subscriber"
-[ -x "$BIN" ] || { echo "build first: cargo build --release -p local_video --features desktop --bin publisher --bin subscriber" >&2; exit 1; }
 
 echo "subscriber -> $ROOM on $URL"
 echo "  frames $START_FRAME..$END_FRAME (~${SECONDS_TO_RUN}s at ${FPS}fps), exits on its own"
@@ -150,15 +170,13 @@ echo "  start the publisher now (or within ~30s)"
 # measured: fine on a desktop GPU, but if frames stall or the CSV stops growing
 # mid-run, drop this flag first -- on a laptop it has been enough to kill the
 # stream. Set SHOW_TIMING=0 to omit it.
-TIMING_FLAG=()
-[ "${SHOW_TIMING:-1}" = "1" ] && TIMING_FLAG=(--display-timestamp)
 
 "$BIN" \
   --url "$URL" \
   --room-name "$ROOM" \
   --identity viewer-1 \
   --participant cam-1 \
-  "${TIMING_FLAG[@]}" \
+  "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" \
   --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" \
   --log-end-frame-id "$END_FRAME"
