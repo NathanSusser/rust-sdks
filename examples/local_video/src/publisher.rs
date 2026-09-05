@@ -1623,6 +1623,12 @@ async fn run(
             args.test_pattern.map(|mode| mode.description()),
         );
         manifest.set_window(args.log_start_frame_id, args.log_end_frame_id);
+        // Costs up to 20 s before the stream starts, and is worth every second
+        // of it: without a capacity figure taken next to the run, a collapsed
+        // uplink is indistinguishable from a broken encoder, which is what cost
+        // the 4 Sep programme most of a night. SKIP_UPLINK_PROBE=1 opts out.
+        info!("Measuring uplink capacity before connecting...");
+        manifest.set_uplink_start();
         if let Err(e) = manifest.write() {
             log::warn!("failed to write run manifest: {e}");
         } else {
@@ -1884,6 +1890,9 @@ async fn run(
         if let Some(timing_state) = publish_timing_state.as_ref() {
             timing_state.lock().flush_frame_log();
         }
+        // After the stream has stopped, so the probe measures the link rather
+        // than competing with the run for it.
+        manifest.set_uplink_end();
         manifest.finish_from_csv(csv_path, shutdown_cause.reason());
         if let Err(e) = manifest.write() {
             log::warn!("failed to close run manifest: {e}");

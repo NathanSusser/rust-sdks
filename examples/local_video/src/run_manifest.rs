@@ -32,6 +32,46 @@ fn git_output(args: &[&str]) -> Option<String> {
     Some(text.trim().to_string())
 }
 
+/// Bytes pushed by the uplink probe. Small enough to finish on a bad link.
+const UPLINK_PROBE_BYTES: u64 = 2_000_000;
+/// Hard ceiling on the probe. A capacity measurement must never be able to
+/// delay the run it describes.
+const UPLINK_PROBE_TIMEOUT_S: u64 = 20;
+
+/// Uplink throughput in Mbps, measured by a short bounded POST.
+///
+/// This is the control the 4 Sep programme spent an entire night without.
+/// Every cross-run comparison assumed link capacity was constant between runs
+/// separated by tens of minutes. It was not: Host A's uplink fell roughly 70x
+/// during one session -- 10.0 Mbps to 0.14 -- while its downlink stayed above
+/// 26 Mbps and Host B's uplink, same carrier and same room, stayed at 12.8.
+/// Nothing in any manifest could have detected that, so an estimator reading
+/// 0.030 Mbps looked like a bug for hours when it was reporting the truth.
+///
+/// Uplink specifically, and on both hosts: a downlink figure would have looked
+/// healthy throughout, and a publisher-only figure would have shown the
+/// collapse without showing it was one-sided, which was the whole diagnosis.
+///
+/// Best-effort like everything else here -- `None` rather than a failed run.
+/// curl reports the transfer rate even when the timeout truncates the upload,
+/// which is exactly the case that matters: a link too slow to finish the probe
+/// is itself the finding, and must be recorded rather than lost as an error.
+fn measure_uplink_mbps() -> Option<f64> {
+    if std::env::var_os("SKIP_UPLINK_PROBE").is_some() {
+        return None;
+    }
+    let script = format!(
+        "head -c {UPLINK_PROBE_BYTES} /dev/urandom | \
+         curl -s -o /dev/null -w '%{{speed_upload}}' --max-time {UPLINK_PROBE_TIMEOUT_S} \
+         -X POST --data-binary @- https://speed.cloudflare.com/__up"
+    );
+    let out = Command::new("sh").arg("-c").arg(script).output().ok()?;
+    let bytes_per_s: f64 = String::from_utf8(out.stdout).ok()?.trim().parse().ok()?;
+    // A zero rate means the probe never moved anything; that is a failure to
+    // measure, not a measurement of zero.
+    (bytes_per_s > 0.0).then(|| bytes_per_s * 8.0 / 1_000_000.0)
+}
+
 /// Everything about the machine and the build that the run did not choose.
 fn environment() -> Value {
     // A dirty tree means the committed sha does not describe the binary, which
@@ -47,6 +87,11 @@ fn environment() -> Value {
         "git_dirty": dirty,
         "cuda_home": std::env::var("CUDA_HOME").ok(),
         "ssl_cert_file": std::env::var("SSL_CERT_FILE").ok(),
+        // Filled by `set_uplink_start` / `set_uplink_end`, never here: probing
+        // from the constructor would put a 20 s network call in the path of
+        // every test that builds a manifest.
+        "uplink_mbps_start": Value::Null,
+        "uplink_mbps_end": Value::Null,
     })
 }
 
@@ -104,6 +149,25 @@ impl RunManifest {
             "test_pattern": test_pattern,
             "encoder_implementation": Value::Null,
         });
+    }
+
+    /// Measures the uplink before the room connects, so the probe characterises
+    /// the link rather than competing with the stream for it.
+    pub(crate) fn set_uplink_start(&mut self) {
+        if self.root["environment"].is_object() {
+            self.root["environment"]["uplink_mbps_start"] = json!(measure_uplink_mbps());
+        }
+    }
+
+    /// Re-measures the uplink at close, so a run records the link it started on
+    /// and the link it finished on. R1 spent ten minutes on a link that had
+    /// collapsed before it began; a single start-of-run figure would still have
+    /// caught that, but a run during which capacity moves is the case a start
+    /// figure alone would misattribute to the encoder.
+    pub(crate) fn set_uplink_end(&mut self) {
+        if self.root["environment"].is_object() {
+            self.root["environment"]["uplink_mbps_end"] = json!(measure_uplink_mbps());
+        }
     }
 
     pub(crate) fn set_encoder_implementation(&mut self, implementation: &str) {
@@ -231,6 +295,41 @@ mod tests {
         assert_eq!(m.root["outcome"]["rows_written"], json!(0));
         assert!(m.root["outcome"]["first_frame_id"].is_null());
         assert_eq!(m.root["outcome"]["exit_reason"], json!("aborted"));
+    }
+
+    #[test]
+    fn constructing_a_manifest_does_not_probe_the_network() {
+        // Both uplink fields must be present and null on construction. Probing
+        // from the constructor put a 20 s network call in the path of every
+        // test that builds a manifest, and a unit suite that depends on a link
+        // is worse than useless on the machine whose link is under study.
+        let m = RunManifest::new(Path::new("/tmp/uplink.csv"), "publisher");
+        assert!(m.root["environment"]["uplink_mbps_start"].is_null());
+        assert!(m.root["environment"]["uplink_mbps_end"].is_null());
+    }
+
+    #[test]
+    fn a_skipped_uplink_probe_records_null_rather_than_zero() {
+        // A run that skips the probe must record that it does not know the
+        // capacity, not a plausible-looking 0.0 -- the same null-versus-zero
+        // distinction that made A3's bitrate cap ambiguous in review. Zero is
+        // also what a failed probe would naturally produce, so the two must not
+        // be allowed to collide.
+        temp_env_var("SKIP_UPLINK_PROBE", || {
+            assert!(measure_uplink_mbps().is_none());
+        });
+    }
+
+    /// Sets an env var for the duration of `body`. Serialised against the other
+    /// env-mutating tests: `set_var` is process-wide, so two tests touching the
+    /// same variable in parallel would flake.
+    fn temp_env_var(key: &str, body: impl FnOnce()) {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(key, "1");
+        body();
+        std::env::remove_var(key);
     }
 
     #[test]
