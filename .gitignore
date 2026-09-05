@@ -7,3 +7,10 @@ soxr-sys/test-output.wav
 .cursor
 __pycache__
 .livekit-demo/corp-ca.pem
+
+# Measurement data from the two-host teleop latency runs. Both hosts hold
+# overlapping-but-different subsets of the same runs; committing them from
+# either side produces conflicts in content that cannot be merged.
+examples/local_video/scripts/results/
+examples/local_video/scripts/results-*/
+llvm.sh

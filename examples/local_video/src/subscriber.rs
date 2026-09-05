@@ -924,6 +924,34 @@ fn update_receive_bitrate_from_stats(
     }
 }
 
+/// Copies the current stream profile into the per-frame CSV.
+///
+/// Runs are compared against each other, so each row has to record what was
+/// actually decoded: WebRTC adapts resolution and bitrate on its own, and a
+/// latency win is indistinguishable from a smaller picture without this.
+fn update_frame_log_stream_profile(
+    shared: &Arc<Mutex<SharedYuv>>,
+    subscriber_timing: &SubscriberTimingHandle,
+) {
+    let (width, height, bitrate_mbps, codec, decoder_implementation) = {
+        let shared = shared.lock();
+        (
+            shared.width,
+            shared.height,
+            shared.bitrate_mbps,
+            shared.codec.clone(),
+            shared.codec_implementation.clone(),
+        )
+    };
+    subscriber_timing.record_stream_profile(
+        width,
+        height,
+        bitrate_mbps,
+        &codec,
+        &decoder_implementation,
+    );
+}
+
 fn update_frame_log_quality(
     stats: &[livekit::webrtc::stats::RtcStats],
     subscriber_timing: &SubscriberTimingHandle,
@@ -1305,6 +1333,7 @@ async fn handle_track_subscribed(
                         &shared_stats,
                     );
                     update_frame_log_quality(&stats, &subscriber_timing_stats);
+                    update_frame_log_stream_profile(&shared_stats, &subscriber_timing_stats);
                     update_simulcast_quality_from_stats(&stats, &simulcast_stats);
                 }
                 Err(e) if !logged_initial => {

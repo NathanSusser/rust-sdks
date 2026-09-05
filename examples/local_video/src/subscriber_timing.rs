@@ -11,7 +11,7 @@ use livekit::track::{SubscribeTimingEvent, SubscribeTimingStage};
 use log::{info, warn};
 use parking_lot::Mutex;
 
-use crate::frame_log::{create_csv, CsvFloat, CsvLatency, CsvOption, FrameLogRange};
+use crate::frame_log::{create_csv, csv_text, CsvFloat, CsvLatency, CsvOption, FrameLogRange};
 
 const MAX_SUBSCRIBER_TIMING_SAMPLES: usize = 300;
 const DISPLAY_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
@@ -118,6 +118,26 @@ impl SubscriberTimingHandle {
     /// Returns whether per-frame CSV logging is enabled.
     pub(crate) fn has_frame_log(&self) -> bool {
         self.frame_log.is_some()
+    }
+
+    /// Updates the stream profile copied into future CSV rows.
+    pub(crate) fn record_stream_profile(
+        &self,
+        width: u32,
+        height: u32,
+        bitrate_mbps: Option<f64>,
+        codec: &str,
+        decoder_implementation: &str,
+    ) {
+        if let Some(frame_log) = &self.frame_log {
+            frame_log.lock().profile = Some(StreamProfileSnapshot {
+                width,
+                height,
+                bitrate_mbps,
+                codec: csv_text(codec),
+                decoder_implementation: csv_text(decoder_implementation),
+            });
+        }
     }
 
     /// Updates the cumulative WebRTC delivery-quality counters copied into future CSV rows.
@@ -401,7 +421,7 @@ impl SubscriberTimingState {
     }
 }
 
-const SUBSCRIBER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,webrtc_receive_timestamp_us,decoder_upload_timestamp_us,decoder_output_timestamp_us,frame_sink_timestamp_us,frame_selected_timestamp_us,frame_prepare_timestamp_us,frame_draw_encoded_timestamp_us,frame_gpu_complete_timestamp_us,exposure_to_receive_ms,receive_and_assembly_ms,decode_ms,render_ms,receive_to_decode_ms,decode_to_sink_ms,sink_to_select_ms,select_to_prepare_ms,prepare_to_draw_encoded_ms,draw_encoded_to_gpu_complete_ms,receive_to_gpu_complete_ms,e2e_to_gpu_complete_ms,frame_id_gap,gpu_complete_interval_ms,packets_lost,frames_dropped,freeze_count,total_freeze_duration_ms";
+const SUBSCRIBER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,webrtc_receive_timestamp_us,decoder_upload_timestamp_us,decoder_output_timestamp_us,frame_sink_timestamp_us,frame_selected_timestamp_us,frame_prepare_timestamp_us,frame_draw_encoded_timestamp_us,frame_gpu_complete_timestamp_us,exposure_to_receive_ms,receive_and_assembly_ms,decode_ms,render_ms,receive_to_decode_ms,decode_to_sink_ms,sink_to_select_ms,select_to_prepare_ms,prepare_to_draw_encoded_ms,draw_encoded_to_gpu_complete_ms,receive_to_gpu_complete_ms,e2e_to_gpu_complete_ms,frame_id_gap,gpu_complete_interval_ms,packets_lost,frames_dropped,freeze_count,total_freeze_duration_ms,frame_width,frame_height,receive_bitrate_mbps,codec,decoder_implementation";
 
 #[derive(Clone, Copy)]
 struct InboundQualitySnapshot {
@@ -409,6 +429,19 @@ struct InboundQualitySnapshot {
     frames_dropped: u32,
     freeze_count: u32,
     total_freeze_duration_ms: f64,
+}
+
+/// Stream profile copied into CSV rows so a run records what was actually decoded.
+///
+/// Without this, a latency comparison between runs cannot tell a faster pipeline
+/// from a smaller picture: WebRTC adapts resolution and bitrate on its own.
+#[derive(Clone)]
+struct StreamProfileSnapshot {
+    width: u32,
+    height: u32,
+    bitrate_mbps: Option<f64>,
+    codec: String,
+    decoder_implementation: String,
 }
 
 struct SubscriberCsvLogger {
@@ -419,6 +452,7 @@ struct SubscriberCsvLogger {
     previous_frame_id: Option<u32>,
     sample_count: u64,
     quality: Option<InboundQualitySnapshot>,
+    profile: Option<StreamProfileSnapshot>,
     quality_baseline: Option<InboundQualitySnapshot>,
     last_flush: Instant,
     failed: bool,
@@ -434,6 +468,7 @@ impl SubscriberCsvLogger {
             previous_frame_id: range.previous_to_start(),
             sample_count: 0,
             quality: None,
+            profile: None,
             quality_baseline: None,
             last_flush: Instant::now(),
             failed: false,
@@ -465,6 +500,7 @@ impl SubscriberCsvLogger {
             .and_then(|previous| frame_gpu_complete_timestamp_us.checked_sub(previous))
             .map(|interval_us| interval_us as f64 / 1_000.0);
         self.sample_count += 1;
+        let profile = self.profile.clone();
         let quality = self.quality.map(|current| {
             let baseline = *self.quality_baseline.get_or_insert(current);
             InboundQualitySnapshot {
@@ -479,7 +515,7 @@ impl SubscriberCsvLogger {
 
         let result = writeln!(
             self.writer,
-            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.sample_count,
             frame_gpu_complete_timestamp_us.saturating_sub(first_gpu_complete_timestamp_us) as f64
                 / 1_000.0,
@@ -541,6 +577,11 @@ impl SubscriberCsvLogger {
             CsvOption(quality.map(|quality| quality.frames_dropped)),
             CsvOption(quality.map(|quality| quality.freeze_count)),
             CsvFloat(quality.map(|quality| quality.total_freeze_duration_ms)),
+            CsvOption(profile.as_ref().map(|profile| profile.width)),
+            CsvOption(profile.as_ref().map(|profile| profile.height)),
+            CsvFloat(profile.as_ref().and_then(|profile| profile.bitrate_mbps)),
+            CsvOption(profile.as_ref().map(|profile| profile.codec.as_str())),
+            CsvOption(profile.as_ref().map(|profile| profile.decoder_implementation.as_str())),
         );
 
         let reached_end = self.range.reaches_end(frame_id);
@@ -1166,8 +1207,72 @@ mod tests {
         assert_eq!(first[column("receive_to_gpu_complete_ms")], "0.200");
         assert_eq!(first[column("e2e_to_gpu_complete_ms")], "0.300");
         assert_eq!(second[column("gpu_complete_interval_ms")], "34.000");
-        assert!(lines[1].ends_with(",0,,0,0,0,0.000"));
-        assert!(lines[2].ends_with(",1,34.000,2,1,1,100.000"));
+        // Looked up by name rather than by row suffix: appending a column must not
+        // require editing assertions that are not about that column.
+        assert_eq!(first[column("frame_id_gap")], "0");
+        assert_eq!(first[column("gpu_complete_interval_ms")], "");
+        assert_eq!(first[column("packets_lost")], "0");
+        assert_eq!(first[column("frames_dropped")], "0");
+        assert_eq!(first[column("freeze_count")], "0");
+        assert_eq!(first[column("total_freeze_duration_ms")], "0.000");
+        assert_eq!(second[column("frame_id_gap")], "1");
+        assert_eq!(second[column("packets_lost")], "2");
+        assert_eq!(second[column("frames_dropped")], "1");
+        assert_eq!(second[column("freeze_count")], "1");
+        assert_eq!(second[column("total_freeze_duration_ms")], "100.000");
+        // Profile was never recorded here, so those columns stay empty.
+        assert_eq!(first[column("frame_width")], "");
+        assert_eq!(first[column("decoder_implementation")], "");
+        std::fs::remove_file(path).expect("temporary log should be removable");
+    }
+
+    #[test]
+    fn subscriber_frame_log_records_stream_profile_and_sanitizes_text() {
+        let path = std::env::temp_dir().join(format!(
+            "subscriber-profile-{}-{}.csv",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let mut logger = SubscriberCsvLogger::new(&path, FrameLogRange::new(None, None).unwrap())
+            .expect("logger should be creatable");
+        // A comma in a stats string would otherwise shift every later column.
+        logger.profile = Some(StreamProfileSnapshot {
+            width: 1920,
+            height: 1080,
+            bitrate_mbps: Some(4.5),
+            codec: csv_text("H265"),
+            decoder_implementation: csv_text("ffmpeg, vaapi"),
+        });
+        logger
+            .record(SubscriberTimingSample {
+                sensor_exposure_timestamp_us: 1000,
+                frame_id: Some(1),
+                webrtc_receive_timestamp_us: Some(1100),
+                decoder_upload_timestamp_us: Some(1110),
+                decoder_output_timestamp_us: Some(1200),
+                frame_sink_timestamp_us: Some(1210),
+                frame_selected_timestamp_us: Some(1215),
+                frame_prepare_timestamp_us: Some(1220),
+                frame_draw_encoded_timestamp_us: Some(1250),
+                frame_gpu_complete_timestamp_us: Some(1300),
+            })
+            .expect("sample should be written");
+        logger.writer.flush().expect("log should flush");
+        drop(logger);
+
+        let contents = std::fs::read_to_string(&path).expect("log should be readable");
+        let lines: Vec<_> = contents.lines().collect();
+        let header: Vec<_> = lines[0].split(',').collect();
+        let row: Vec<_> = lines[1].split(',').collect();
+        assert_eq!(header.len(), row.len(), "sanitized text must not add columns");
+        let column = |name: &str| {
+            header.iter().position(|column| *column == name).expect("expected CSV column")
+        };
+        assert_eq!(row[column("frame_width")], "1920");
+        assert_eq!(row[column("frame_height")], "1080");
+        assert_eq!(row[column("receive_bitrate_mbps")], "4.500");
+        assert_eq!(row[column("codec")], "H265");
+        assert_eq!(row[column("decoder_implementation")], "ffmpeg; vaapi");
         std::fs::remove_file(path).expect("temporary log should be removable");
     }
 }

@@ -101,6 +101,18 @@ impl fmt::Display for CsvFloat {
     }
 }
 
+/// Makes a stats-provided string safe for an unquoted CSV cell.
+///
+/// Codec and decoder names come from WebRTC, not from this crate, so they are
+/// sanitized rather than trusted: a comma or newline would shift every later
+/// column in the row.
+pub(crate) fn csv_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c == ',' || c == '\n' || c == '\r' || c == '"' { ';' } else { c })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
