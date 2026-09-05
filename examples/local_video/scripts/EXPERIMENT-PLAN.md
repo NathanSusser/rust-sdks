@@ -445,56 +445,73 @@ publishers and it was moved aside rather than deleted.
 
 ### Run manifests — a run must describe itself
 
-Five separate confusions in this programme came from reconstructing a run's meaning
-afterwards, from shell history, scrollback and memory: an argv nobody recorded (§0.2), a
-bitrate cap nobody recorded (§0.1 — which was then reasoned about wrongly), a control that
-silently inherited a different cap, a run that overlapped the previous publisher, and a
-label ("A2-off") carrying meaning it could not hold (§0.3). None of those artifacts were
-ever meant to be evidence.
+Five confusions in this programme came from reconstructing a run's meaning afterwards, from
+shell history, scrollback and memory: an argv nobody recorded (§0.2), a bitrate cap nobody
+recorded (§0.1 — which was then reasoned about wrongly and blocked the gate), a control that
+silently inherited a different cap, a run that overlapped the previous publisher, and a label
+("A2-off") carrying meaning it could not hold (§0.3). None of those artifacts were ever meant
+to be evidence.
 
-Each host writes `run_manifest.json` into its own results directory, at run start, closed
-with the outcome at run end. **A run whose manifest is absent or incomplete is not
-citable** — this makes §0.2's rule enforceable when the run is written rather than
-discoverable months later.
+Each host writes a manifest beside its CSV — `publisher.manifest.json`,
+`subscriber.manifest.json` — at run start, closed with the outcome at run end. **A run whose
+manifest is absent or incomplete is not citable.** That makes §0.2's rule enforceable when
+the run is written rather than discoverable months later.
 
-**Field names must match exactly across hosts or the two halves will not join.**
-
-Shared fields, both hosts:
+Nesting and shared field names are identical across hosts:
 
 ```
-role host started_utc ended_utc
-argv git_sha git_dirty
-governor epp
-room url
-start_frame end_frame fps_requested
-rows_written frame_id_first frame_id_last elapsed_s complete
+role  started_utc
+invocation   { argv (array), cwd }
+environment  { hostname, kernel, cpu_governor, cpu_epp, git_sha, git_dirty, ... }
+media        { ... }
+window       { log_start_frame_id, log_end_frame_id }
+outcome      { rows_written, first_frame_id, last_frame_id, exit_reason, ended_utc }
 ```
 
-Host B adds: `low_latency`, `show_timing`, `ptp_port_state_start`, `ptp_grandmaster`,
-`ptp_rms_ns_start`, `phc2sys_servo_start`, `delivered_resolutions`, `resolution_changed`,
-`decoder_implementation`.
+Three design decisions, each aimed at a failure we actually hit:
 
-Host A adds: `width_requested`, `height_requested`, `max_bitrate_bps`, `test_pattern_mode`,
-`encoder_implementation`, `cuda_home`.
+- **Written before the first frame**, rewritten at the end. A run killed mid-flight is
+  precisely the one whose configuration gets disputed later — `a3r1` is that case. Waiting
+  until exit would leave it with no provenance at all.
+- **`requested_max_bitrate_bps` is `null` when absent, never `0`.** That distinction is what
+  let §0.1 be written against a guessed cap: "no cap passed, so a preset applied" and "a cap
+  of zero" are different facts, and a reader cannot separate them if both render as `0`.
+- **Implementation fields come from the stats tick, not the CLI flag.** The flag says what
+  was asked for; NVENC silently compiling out is exactly where those disagree.
 
-This also fixes the naming problem structurally. "A2-off" had to carry meaning a run name
-cannot hold; `low_latency: false` makes the flag authoritative and the name decorative.
+#### The asymmetry is the point, not an omission
 
-*Host B's emitter is in `run_subscriber_test.sh`. Deliberately shell rather than Rust: it
-already knows the argv, and it needs no rebuild to change.*
+Host A carries `media.requested_width/_height/_fps/_codec/_max_bitrate`. Host B **cannot** —
+the subscriber requests nothing, it receives whatever arrives. Conversely Host B carries
+`outcome.delivered_resolutions` and Host A cannot, because the publisher never sees what was
+delivered.
 
+**That pairing is the join: what was asked for against what arrived.** It is the exact
+comparison that would have caught the downscale on the day rather than three rounds later. A
+missing `requested_width` on the subscriber side is the design, not a gap.
 
+Host B adds `flags.low_latency` — which retires the A2-off naming problem, since the flag
+becomes authoritative and the run name decorative — plus `flags.display_timestamp`,
+`media.decoder_implementation`, `outcome.delivered_resolutions`,
+`outcome.resolution_changed`, and a `sync` block: `ptp_port_state`, `ptp_grandmaster`,
+`ptp_rms_ns_start/_end`, `phc2sys_servo_start/_end`, and `method`, which reads `"journal"`
+because `pmc` needs root and that path has no TTY for a password.
+
+Host A's emitter is `src/run_manifest.rs`; Host B's is shell in `run_subscriber_test.sh`,
+deliberately — it already knows the argv and needs no rebuild to change.
 
 - Note the `START_FRAME` change in run metadata. Runs before and after are **not** directly
   comparable on any startup-window metric.
 - Keep PTP running and keep the clock-check gate in `run_report.sh`. The negative-sample and
   floor checks in §06 are what make cross-machine transport defensible; do not drop them for
   a "quick" arm.
-- **Host A's `ptp4l` is a hand-started foreground process with no systemd unit, and Host A is
-  the grandmaster.** If that terminal closes, sync dies for both machines and Host B's
-  `phc2sys` goes on reporting `s2` against a clock nothing is disciplining. Install the
-  Phase 7 units before a multi-hour run session, or every arm after the terminal closes is
-  quietly worthless.
+- ~~Host A's `ptp4l` is a hand-started foreground process with no systemd unit~~ —
+  **resolved.** `ptp4l-A.service` is installed and enabled, so the grandmaster survives a
+  terminal close and a reboot. The hazard it named was real and was observed: when that
+  service was restarted, Host B promoted itself to grandmaster for 5 seconds and `phc2sys`
+  reported `s2` throughout. Only the port-state transition or `grandmasterIdentity` reveals
+  it — neither `offsetFromMaster` nor `s2` will. The manifest's `sync` block records both,
+  which is why it is there.
 - Do not change `SHOW_PREVIEW` / `SHOW_TIMING` between arms. The preview costs 0.24 ms at the
   median and more in the tail; it must be constant across a comparison.
 - Full unfiltered suite before every push:
