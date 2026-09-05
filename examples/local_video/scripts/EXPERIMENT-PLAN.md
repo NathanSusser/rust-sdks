@@ -45,10 +45,15 @@ Three consequences, all of which **remove** work rather than adding it:
    10 Mbps across A1, A2 and A3; resolution was the only deliberate variable. What else
    varied was the *delivered* rate, and that is an outcome of the estimator — the finding
    itself, not a confound.
-3. **§7 item 11 is withdrawn.** "The pipe was never the binding constraint" rested on the
-   overshoot; there is no overshoot. The capacity argument stands on its original evidence:
-   9.6 Mbps delivered into a 10.0 Mbps measured uplink, zero packet loss, and a collapse to
-   640×360 regardless.
+3. **§7 item 11 is withdrawn, and so is the capacity argument that replaced it.**
+   "The pipe was never the binding constraint" rested on the overshoot, and there is no
+   overshoot. But the replacement offered here — "9.6 Mbps delivered into a 10.0 Mbps
+   measured uplink" — was itself withdrawn on 2026-09-05. The 10.0 Mbps was a spot reading
+   taken beside the runs, and repeated probing later showed the figure moves 2.4× within
+   minutes. **Do not reinstate any claim of the form "delivered X against a capacity of Y".**
+   What survives needs no capacity term at all: A3 sustained 9.1–10.1 Mbps of real coded
+   picture with zero packet loss and collapsed to 640×360 anyway. A link that carried
+   9.6 Mbps demonstrably carried 9.6 Mbps.
 
 **This section also contradicted §0.2**, which correctly states the A-runs were direct binary
 invocations and not the committed script. §0.2 is the correct one; this section then reasoned
@@ -204,13 +209,22 @@ depends on a stats estimate, and the known sampler-reads-the-wrong-PC trap does 
 
 ## 2. The arms
 
-Baseline for all arms: **1920×1080, 30 fps, 120 s, 10 Mbps uplink.** That is the arm that
+Baseline for all arms: **1920×1080, 30 fps, 120 s, 10 Mbps encoder target.** That last term
+is the configured `--max-bitrate`, not a link capacity — this document previously wrote it as
+"10 Mbps uplink", which states a spot measurement as a standing property of the link. That is
+the arm that
 collapsed to 640×360 and the pixel-equivalent of the 1600×1300 production feed
 (2.07 vs 2.08 MP).
 
-**`--max-bitrate` is set explicitly and held constant across every arm.** This is the
-correction to the previous plan. Pick one value — 5 Mbps, matching what A3 implicitly got —
-and pass it on every run so resolution is the only thing that varies.
+**`--max-bitrate` is set explicitly and held constant across every arm at 10 Mbps.** This is
+the correction to the previous plan. Pass it on every run so resolution is the only thing that
+varies.
+
+> **Corrected 2026-09-05.** This previously read "5 Mbps, matching what A3 implicitly got",
+> which contradicted §0.1 in this same document: A3 got 10 Mbps *explicitly*, as did every
+> other A-run. Following the old text would have made every arm non-comparable to the run the
+> whole plan exists to explain, and the arms would have looked internally consistent while
+> being wrong. The value is 10 Mbps.
 
 | Arm | Change | Question it answers |
 |---|---|---|
@@ -562,9 +576,12 @@ own finding**.
    as explanations and makes the single-stream scaler claim airtight.
 10. **Add the `MaintainFramerate` default** (§1.1). "We told it to shed resolution" is a
     stronger and more actionable finding than "libwebrtc chose to."
-11. ~~**Withdraw or qualify "the pipe was never the binding constraint"**~~ — **withdrawn,
-    see §0.1.** There was no overshoot: A3's cap was 10 Mbps, not 5, so 9.6 Mbps delivered is
-    under the ceiling. The claim stands on its original evidence and needs no correction.
+11. **Withdraw "the pipe was never the binding constraint"** — and note that the first
+    attempt to withdraw it substituted a second claim that has since gone the same way. There
+    was no overshoot: A3's cap was 10 Mbps, not 5, so 9.6 Mbps delivered is under the ceiling.
+    But "9.6 into a 10.0 Mbps measured uplink" is not the replacement evidence; that uplink
+    figure was withdrawn on 2026-09-05 for being a single instant quoted as a standing
+    property. See §0.1 point 3 for what survives without a capacity term.
 
 ---
 

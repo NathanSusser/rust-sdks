@@ -14,8 +14,26 @@ Two machines:
 | Hostname | `matt-dedonato-CORSAIR-ONE-i500` | `MZ0126SD` |
 | PTP link | `192.168.99.1` | `192.168.99.2` |
 | PTP role | grandmaster | slave |
+| PTP timestamping | software (NIC reports no PHC) | hardware (`PTP Hardware Clock: 0`) |
 | GPU | RTX 5070 (NVENC) | Intel UHD 730 (software decode) |
-| 5G uplink | 10.0 Mbps measured | 33.4 Mbps measured |
+| 5G uplink | not a fixed property — see below | not a fixed property — see below |
+
+**Uplink capacity is not a rig property and this table will not carry a number
+for it.** It previously read "10.0 Mbps measured" and "33.4 Mbps measured",
+which states a single instant as a standing property. Repeated probing on the
+subscriber swung 2.4× (12.8 / 5.7 / 13.7 / 9.8 Mbps) within minutes with nothing
+changed, and the publisher's uplink separately fell to 0.14 Mbps for over an
+hour. Read the capacity beside the run that needs it, record it in that run's
+manifest at both ends, and do not quote it anywhere a reader could mistake it
+for a constant.
+
+**The two hosts are not on the same timestamping tier**, which sets the accuracy
+bound on every cross-machine latency figure: PTP corrects for path delay by
+assuming direction symmetry, so on a mixed-tier link a systematic asymmetry
+survives as a constant offset the servo cannot see. Measured path delay across
+the cable is 74.6 µs median over 27,851 samples, where two hardware-timestamped
+ends would sit in the single digits. Quote the bound as tens of microseconds;
+`pmc offsetFromMaster` reports the servo's precision, not its accuracy.
 
 ## How to edit this file
 
