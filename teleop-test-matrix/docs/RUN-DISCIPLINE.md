@@ -92,6 +92,34 @@ Applied to this document, that sweep found one: a claim that the A-series ran
 derived from exactly the kind of spot capacity reading being withdrawn. It now
 cites the two measured delivered bitrates instead.
 
+### The reinstatement reflex: a withdrawal is not a prompt for a replacement
+
+Every claim withdrawn this session was immediately followed by reaching for a
+substitute. Three times the substitute was offered as the *replacement evidence*
+for the claim being retracted — and twice it was weaker than saying nothing:
+
+| Withdrawn | Substituted | Outcome |
+|---|---|---|
+| "capacity to spare" | "9.6 Mbps delivered into a 10.0 Mbps measured uplink" | The substitute rests on the same spot capacity reading, withdrawn for the same reason |
+| the same, in a second section | the same figure, plus "needs no correction" | Same |
+| The A-series staircase mechanism | *nothing* — "the collapse proceeded while every signal the scaler is documented to respond to was healthy" | The only one that has held |
+
+The survivor is the one that named what had become **unknown** instead of
+substituting a new mechanism. It is also the more useful statement, because it
+distinguishes an unidentified trigger from a mismeasurement — and only the
+second would be our own fault.
+
+> **When a claim falls, the honest replacement is usually a smaller claim or an
+> explicit unknown, not a different claim of the same size.** A retraction that
+> arrives with a ready substitute should be suspected: the substitute was
+> generally chosen to preserve the conclusion rather than derived from what
+> survived.
+
+The A-series case shows what survives when the capacity term is dropped
+entirely: A3 sustained 9.1–10.1 Mbps of real coded picture with zero packet loss
+and collapsed anyway. A link that carried 9.6 Mbps carried 9.6 Mbps. No ceiling
+needs to be known for that to be damning.
+
 ### Read the configuration for configuration questions
 
 Twice, a question about **how the system was set up** was attacked with

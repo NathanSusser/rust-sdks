@@ -63,32 +63,43 @@ connection error that reads as a network fault.
 |---|---|---|---|
 | CPU governor `performance` | A | Yes — `cpufrequtils`, `GOVERNOR="performance"` | Yes — guard in `run_publisher_test.sh` |
 | CPU governor `performance` | B | **No** — `cpufrequtils` absent | **No** — no guard on this side |
-| EPP `performance` | A | **No** — `cpufrequtils` does not manage EPP | Partly — the guard checks governor, not EPP |
+| EPP `performance` | A | **No** — `cpufrequtils` does not manage EPP | Yes — the guard checks EPP as well as governor (`3835405`) |
 | EPP `performance` | B | **No** | **No** |
 | `ptp4l` / `phc2sys` running | B | Yes — systemd units, `enabled` | Yes — pre-flight checks `s2` and faults |
-| `ptp4l` / `phc2sys` running | A | **No** — foreground process, no units exist | **No** — and see the warning below |
+| `ptp4l` running | A | Yes — `ptp4l-A.service`, `enabled`, `Restart=always` | Yes — unit state is checkable; and see the restart caveat below |
+| `phc2sys` running | A | n/a — **correctly absent**: software tier, NIC reports no PHC | n/a — there is no clock to discipline from |
 | `systemd-timesyncd` disabled | both | Yes | — |
 | NetworkManager profile edits | both | Yes — persisted by definition | — |
 | `/etc/linuxptp/ptp4l-B.conf` | B | Yes — on disk | — |
 | TLS bundle for the SFU | B | Yes — `.livekit-demo/corp-ca.pem`, on disk | — |
-| TLS bundle for the SFU | A | **No** — in a session-temporary directory | **No** — reads as a network fault |
+| TLS root for the SFU | A | Yes — installed in `/usr/local/share/ca-certificates/` | n/a — no longer a failure mode |
 | `CC` / `CXX` for builds | both | **No** — environment only, per shell | Yes — build fails outright |
 | `CUDA_HOME=/usr` | A | **No** — in no shell profile | **No** — NVENC compiles out with only a `cargo:warning` |
 
 *Host A rows reported by Host A from their own audit; their section below is
 theirs to write.*
 
-> **Host A's grandmaster has no systemd unit.** `ptp4l` there is a foreground
-> process started by hand. If that terminal closes, sync dies for **both**
-> machines — and Host B's `phc2sys` would go on reporting `s2` against a clock
-> that has stopped being disciplined. Host B's units protect it from its own
-> terminal, not from Host A's.
+> **Resolved — `ptp4l-A.service` was installed at 19:19 on 4 Sep** (`enabled`,
+> `Restart=always`). It previously ran as a foreground process with no unit, so
+> closing that terminal would have killed sync for **both** machines while Host
+> B's `phc2sys` went on reporting `s2` against a clock that had stopped being
+> disciplined. That failure mode is gone.
+>
+> The caveat that replaces it: `Restart=always` means the daemon comes back by
+> itself, and **a restarted host cannot check its own sync**. A fresh `ptp4l`
+> has no `rms` history, so a check counting samples over a window passes on a
+> few seconds of convergence — and Host A is also the host that believes it is
+> grandmaster and therefore never doubts itself. Host B detects the gap
+> trivially; Host A cannot. After any restart, wait for the full averaging
+> window before believing Host A's own sync report.
 
-> **Host A's TLS bundle is in a session-temporary directory.** When that
-> session ends the file is deleted, and Host A can no longer reach the SFU:
-> `invalid peer certificate: UnknownIssuer`. The T-Mobile enterprise root is
-> not in `/usr/local/share/ca-certificates/` there. This is the most urgent
-> item on either machine.
+> **Resolved — the T-Mobile enterprise root is now in Host A's system trust
+> store** (`/usr/local/share/ca-certificates/tmobile-ent-root.crt`, alongside
+> `figure-ai-root.crt`). Verified by reaching the SFU with `SSL_CERT_FILE`
+> explicitly unset: HTTP 200. It was previously a bundle in a
+> session-temporary directory, which would have vanished with the session and
+> resurfaced as `invalid peer certificate: UnknownIssuer` — a certificate
+> problem that reads as a network fault.
 
 ---
 
