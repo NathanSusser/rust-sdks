@@ -176,6 +176,56 @@ and decisive:
 > configuration is slower, weaker, and in at least one case gave the wrong
 > answer outright.
 
+#### The limit of that rule: the source is only the configuration you wrote
+
+Applying the rule produced a confident wrong answer within hours of its being
+written, and the correction is a genuine boundary on it rather than a caveat.
+
+The claim was that NVENC filler-data insertion is off, on the grounds that
+`enableFillerDataInsertion` is assigned nowhere in the tree. The search was
+sound — re-run unscoped, all file types, with a positive control first to prove
+it could find anything at all. The literal result holds: the field is assigned
+nowhere outside the two vendor-header lines that declare it.
+
+The inference does not follow, because the encoder does not build its
+configuration from zero:
+
+```
+NvEncoder.cpp:169   memset(encodeConfig, 0, sizeof(NV_ENC_CONFIG))
+NvEncoder.cpp:201   nvEncGetEncodePresetConfig(...)          <- asks the DRIVER
+NvEncoder.cpp:203   memcpy(encodeConfig, &presetConfig.presetCfg, ...)
+h264_encoder_impl.cpp:207   presetGuid = NV_ENC_PRESET_P4_GUID
+```
+
+The struct is zeroed, the driver's preset is copied over it wholesale, and only
+selected fields are overridden afterwards. `enableFillerDataInsertion` is not
+one of them, so its value is whatever NVIDIA's P4 preset sets — and this source
+tree cannot show that.
+
+> **"Never assigned in our sources" and "off" are different claims.** Where a
+> preset or a default is fetched at runtime from a component outside the
+> repository, the source is not the configuration; it is only the part of the
+> configuration we wrote. Reading it gives a confident answer about the wrong
+> object.
+
+This is the rule above eating itself one step along: the search was right, the
+reading of the search was right, and the inference from source to system
+behaviour was wrong, because here the configuration *is* the behaviour of a
+driver. What would settle it needs a machine, not a repository — read the live
+config back after initialisation, or count filler NAL units in a captured
+bitstream.
+
+What survives the retraction, stated separately so it is not carried off with
+it: the bytes reached the decoder and cost time proportional to their size
+(r² = 0.81 across sixteen cells), which rules out RTP padding, since padding is
+dropped at depacketisation and never reaches a decoder. The open question
+shrinks to whether a *minority* of those bytes were filler rather than
+coefficients — a smaller claim than the one withdrawn, which is what the
+reinstatement rule predicts. And the CBR explanation is untouched either way:
+CBR obliges the encoder to reach its target, and whether it gets there with
+coefficients or partly with filler, it is still spending ten megabits on colour
+bars because it was told to.
+
 The sharper sub-case is the second row, and it is the one worth guarding
 against: **data already being collected for one purpose can answer a different
 question, and you will not notice, because you are parsing it through a filter
@@ -221,6 +271,24 @@ merge, a missing enum variant, a wrong window rule, an unrunnable experiment
 design. Every one of those was a claim one host made alone and the other checked
 against the artifact. The failure was confined to the beliefs both already held,
 which is exactly where a review protocol feels most reliable and is least.
+
+**What made the working half work is worth naming, because it was accidental.**
+Each host read the other's claims adversarially and its own confirmatorily, and
+the difference was not care or competence. One host found the other's
+`scale_resolution_down_by` error inside a minute of reading it, while missing a
+faulty inference of its own for hours *in the document it was writing at the
+time*. The same asymmetry appears in both directions all night.
+
+Two consequences, one practical and one to be wary of:
+
+- The only mechanism either host would now trust is the one they ran by
+  accident: **each checks the other's work, and neither checks their own.**
+  Self-review was not weaker here. It was close to absent, while feeling
+  identical from the inside.
+- Auditing primes you to believe absence. A confident negative feels like a
+  *result* when you are looking for defects, rather than the surprise it should
+  be — which is how the `scale_resolution_down_by` error survived a pass whose
+  entire purpose was catching that class of thing.
 
 ---
 
