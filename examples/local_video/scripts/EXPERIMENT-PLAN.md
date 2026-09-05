@@ -118,7 +118,7 @@ to catch. Nothing below is repaired.
 | # | Finding |
 |---|---|
 | 1 | **Arm 3 is unrunnable.** `--min-bitrate` does not exist. Verified against both the source and the built binary's `--help`, which lists only `--max-bitrate` and `--degradation-preference`. |
-| 2 | **Arm 4 is unrunnable and not trivially fixable.** `scale_resolution_down_by` appears nowhere in `livekit/src` — it is absent from the SDK, not just from our CLI. A4 says "add the flag"; there is nothing to set it on. A flag was written and then removed rather than ship one that silently does nothing. |
+| 2 | **Arm 4 is blocked, but by a missing *public entry point*, not a missing field. Corrected 2026-09-05 by the other host, against source.** The original finding read "`scale_resolution_down_by` appears nowhere in `livekit/src` — it is absent from the SDK". It is present and fully plumbed: `libwebrtc/src/rtp_parameters.rs:138` declares it on `RtpEncodingParameters`, `webrtc-sys/src/rtp_parameters.cpp:127` and `:319` convert it in both directions, and `livekit/src/room/options.rs:359` already sets it when computing simulcast layers. What is missing is a way for a caller to supply its own encodings: `publish_track_with_video_send_encodings` at `local_participant.rs:377` accepts `Option<Vec<RtpEncodingParameters>>` and honours it at `:415`, but it is **private**. The two public entry points pass `None` (SDK computes from presets) or `Some(vec![])` (no encodings). So the work is exposing one existing private method, not adding a field and FFI plumbing — hours rather than days, and the original wording would have sent someone to build what already exists. |
 
 **Design-level — the replication scheme assumes something now known false:**
 
