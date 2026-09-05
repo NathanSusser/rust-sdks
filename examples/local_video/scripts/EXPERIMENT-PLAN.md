@@ -105,6 +105,77 @@ label everywhere it appears.
 
 ---
 
+### 0.4 Executor review, 2026-09-05 — DO NOT EXECUTE THIS PLAN AS WRITTEN
+
+Read end to end by Host A as an executor rather than an author, after two
+separate audits each found a live contradiction. Findings are **listed, not
+fixed** — repairing a section while reading it is how it gets quietly adjusted
+to match what the reader assumed it meant, which is the failure this pass exists
+to catch. Nothing below is repaired.
+
+**Blocking — two of the six arms cannot be run as specified:**
+
+| # | Finding |
+|---|---|
+| 1 | **Arm 3 is unrunnable.** `--min-bitrate` does not exist. Verified against both the source and the built binary's `--help`, which lists only `--max-bitrate` and `--degradation-preference`. |
+| 2 | **Arm 4 is unrunnable and not trivially fixable.** `scale_resolution_down_by` appears nowhere in `livekit/src` — it is absent from the SDK, not just from our CLI. A4 says "add the flag"; there is nothing to set it on. A flag was written and then removed rather than ship one that silently does nothing. |
+
+**Design-level — the replication scheme assumes something now known false:**
+
+| # | Finding |
+|---|---|
+| 3 | **"Three runs per arm… 15+ runs × 120 s ≈ 30–40 min of capture. This is cheap."** Cheap in time, but it assumes link capacity is stationary across those 40 minutes. It is not: uplink moved 2.4× between measurements minutes apart, and 70× across one session. Runs separated in time are not comparable on any bandwidth-sensitive quantity without the concurrent capacity measurement now in the manifests. The replication design needs revisiting, not just the arm parameters. |
+| 4 | **The 120 s baseline is too short for the quantity being measured.** arm 1's estimator had not plateaued at cutoff — still climbing at +0.102 Mbps in the final 10 s bucket. A 120 s window measures a recovery ramp and reports its mean. |
+
+**Stale — work the plan asks for that is already done, or already answered:**
+
+| # | Finding |
+|---|---|
+| 5 | **A0 ("fix the TLS root before anything else") is complete.** The root is in `/usr/local/share/ca-certificates/`; verified by reaching the SFU with `SSL_CERT_FILE` unset, HTTP 200. The first instruction an executor meets is a no-op. |
+| 6 | **Arm 1, the gate, has already run and returned `Bandwidth`** (99.7% of samples). Worse, arm 2b later returned `None` throughout — and the plan says `None` means "do not proceed to arms until this reads something". An executor following the text literally halts on a gate that has been passed. |
+| 7 | **A2, A3, A5, A6, A7 are all complete** (stats loops merged, `--stats-interval-ms`, the ten outbound columns, script variables with explicit `--max-bitrate`, `START_FRAME=0`, provenance manifests). The plan reads as a to-do list for finished work. |
+| 8 | **A4 lists three `--degradation-preference` variants; there are four.** `MaintainFramerateAndResolution` is missing, and it is the one that was actually run as arm 2b. |
+| 9 | **Arm 2 is specified as `MaintainResolution`, which has not been run.** `MaintainFramerateAndResolution` was, and was catastrophic: resolution held at 1080p, framerate collapsed to 1.13 fps, 1,818 ms end-to-end, 96% frame loss. The plan has no record of this. |
+
+**§0.2 is substantially dischargeable, which *reduces* scope:**
+
+The A-series argv is recoverable for every parameter that bears on the
+conclusions, so those runs are citable and need not be re-run:
+
+| Run | Resolution | fps | Encoder | Pattern | Bitrate |
+|---|---|---|---|---|---|
+| A1 | 640×360 | 30 | NVIDIA H264 | 1 (animated) | 10 Mbps explicit |
+| A2 | 960×540 | 30 | NVIDIA H264 | 1 | 10 Mbps explicit |
+| A2-off | 960×540 | 30 | NVIDIA H264 | 1 | 10 Mbps explicit |
+| A3 | 1920×1080 | 30 | NVIDIA H264 | 1 | 10 Mbps explicit |
+
+Sources: resolution, fps and encoder from the surviving run logs; test pattern
+established three ways (the Noise mode did not exist until 18:56 that day, the
+A-series ran 16:44–17:10, and `--test-pattern 2` was a *rejected* argument
+before then); bitrate from the §0.1 refutation. Not recoverable: the verbatim
+argv string. Nothing that changes an interpretation is missing.
+
+> **Both audits that preceded this one found contradictions in sections that
+> *consumed* a correction made elsewhere, not in sections anyone had recently
+> edited.** That is the failure mode to expect here too, and it is why this pass
+> checked every arm's parameters against §0's established facts rather than
+> reading for sense.
+
+**A limit of this pass, stated so nobody over-trusts it.** Reading end to end
+catches contradictions *within* the document. It does not catch a section that
+is internally consistent, consistent with §0, and derived from a fact corrected
+in a **different file**. Findings 1, 2, 5, 6, 7, 8 and 9 above are all of that
+kind — none contradicts anything else in this plan, and every one was caught by
+checking the claim against the machine or the source tree rather than against
+the text. Seven of nine. A reader who audits this document against itself will
+find almost none of them.
+
+That is not a procedure anyone has yet, and this note is not one. It is a
+category to watch for: **the sections most likely to be wrong are the ones
+whose facts live somewhere else.**
+
+---
+
 ## 1. What the code says, verified
 
 Every code claim below was checked against the working tree at `e9f77936`. These are
