@@ -658,7 +658,7 @@ fn format_timing_line(timings: &PublisherTimingSummary) -> String {
 
 const MAX_PUBLISH_TIMING_SAMPLES: usize = 300;
 
-const PUBLISHER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,frame_buffer_timestamp_us,encoder_upload_timestamp_us,encoder_output_timestamp_us,webrtc_packetize_timestamp_us,capture_to_buffer_ms,buffer_to_encoder_ms,encode_ms,encoder_to_packetize_ms,capture_to_packetize_ms,frame_id_gap,packetize_interval_ms,target_bitrate_mbps,available_outgoing_bitrate_mbps,quality_limitation_reason,quality_limitation_resolution_changes,encoded_frame_width,encoded_frame_height,frames_per_second,qp_sum,frames_encoded,encoder_implementation";
+const PUBLISHER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,frame_buffer_timestamp_us,encoder_upload_timestamp_us,encoder_output_timestamp_us,webrtc_packetize_timestamp_us,capture_to_buffer_ms,buffer_to_encoder_ms,encode_ms,encoder_to_packetize_ms,capture_to_packetize_ms,frame_id_gap,packetize_interval_ms,target_bitrate_mbps,available_outgoing_bitrate_mbps,quality_limitation_reason,quality_limitation_resolution_changes,encoded_frame_width,encoded_frame_height,frames_per_second,qp_sum,frames_encoded,encoder_implementation,media_bytes_sent,transport_bytes_sent";
 
 /// Encoder-side stats, sampled by the stats loop and copied onto each CSV row.
 ///
@@ -680,6 +680,15 @@ struct OutboundSnapshot {
     qp_sum: Option<u64>,
     frames_encoded: Option<u32>,
     encoder_implementation: Option<String>,
+    /// Media bytes on this outbound-rtp stream: coded picture only.
+    media_bytes_sent: Option<u64>,
+    /// Every byte the transport put on the wire -- media, RTX, RTCP, and any
+    /// padding the pacer generated. The DIFFERENCE against `media_bytes_sent`
+    /// is the quantity of interest: R2's encoder produced 0.443 Mbps against a
+    /// 6.093 Mbps target, and nothing recorded could say whether the wire
+    /// carried 0.44 or 6.09. Two counters make that subtraction possible
+    /// instead of arguable.
+    transport_bytes_sent: Option<u64>,
 }
 
 impl OutboundSnapshot {
@@ -699,8 +708,22 @@ impl OutboundSnapshot {
             qp_sum: Some(o.qp_sum),
             frames_encoded: Some(o.frames_encoded),
             encoder_implementation: Some(o.encoder_implementation.clone()),
+            media_bytes_sent: Some(outbound.sent.bytes_sent),
+            transport_bytes_sent: find_transport_bytes_sent(stats),
         })
     }
+}
+
+/// Total bytes the transport has put on the wire, across all streams.
+///
+/// Sits beside the outbound-rtp media counter so the two can be differenced.
+/// libwebrtc reports no padding counter of its own, so padding and probing
+/// traffic are invisible in the media figure and visible only here.
+fn find_transport_bytes_sent(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<u64> {
+    stats.iter().find_map(|stat| match stat {
+        livekit::webrtc::stats::RtcStats::Transport(t) => Some(t.transport.bytes_sent),
+        _ => None,
+    })
 }
 
 fn find_available_outgoing_bitrate(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<f64> {
@@ -798,7 +821,7 @@ impl PublisherCsvLogger {
 
         writeln!(
             self.writer,
-            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.sample_count,
             packetize_timestamp_us.saturating_sub(first_packetize_timestamp_us) as f64 / 1_000.0,
             frame_id,
@@ -833,6 +856,8 @@ impl PublisherCsvLogger {
             CsvOption(outbound.qp_sum),
             CsvOption(outbound.frames_encoded),
             CsvOption(outbound.encoder_implementation.as_deref().map(csv_text)),
+            CsvOption(outbound.media_bytes_sent),
+            CsvOption(outbound.transport_bytes_sent),
         )?;
 
         self.previous_frame_id = Some(frame_id);

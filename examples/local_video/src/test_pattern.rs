@@ -438,8 +438,13 @@ mod tests {
     fn animated_fast_path_matches_reference() {
         // Odd and tiny dimensions exercise the chroma rounding and the box clamping,
         // which is where a row-replication rewrite is most likely to diverge.
+        // 1920x1080 is here because it is the geometry the experiment arms
+        // actually run, and it was the one size the original list omitted --
+        // the A-series ran the reference path and every run after 712526d ran
+        // the fast path, so an divergence at 1080p would mean those runs were
+        // not measuring the same source.
         for (width, height) in
-            [(1280usize, 720usize), (64, 36), (17, 13), (31, 17), (2, 2), (1, 1)]
+            [(1920usize, 1080usize), (1280, 720), (64, 36), (17, 13), (31, 17), (2, 2), (1, 1)]
         {
             let chroma_width = width.div_ceil(2);
             let chroma_height = height.div_ceil(2);
