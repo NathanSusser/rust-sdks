@@ -145,6 +145,17 @@ def journal(unit, pattern, since=None):
     hits = re.findall(pattern, sh(*cmd) or "")
     return hits[-1] if hits else None
 
+def restart_count():
+    """systemd's phc2sys restart counter, as an absolute count.
+
+    Compared start-to-end it says whether a restart landed inside this run.
+    Absolute rather than a boolean so two runs can also be ordered against each
+    other, and so a reader can see the fault is chronic rather than a one-off.
+    """
+    out = sh("journalctl", "-u", "phc2sys-B", "-q", "--no-pager",
+             "--since", "2026-09-04", "-g", "Scheduled restart job")
+    return len(re.findall(r"restart counter is at (\d+)", out or "")) or None
+
 argv = [a for a in os.environ["MAN_ARGV"].split("\x1f") if a]
 d = os.environ["MAN_DIR"]
 doc = {
@@ -182,6 +193,14 @@ doc = {
         "ptp_rms_ns_end": None,
         "phc2sys_servo_start": journal("phc2sys-B", r" (s[0-2]) ", "1 min ago"),
         "phc2sys_servo_end": None,
+        # phc2sys on this host dies on `ioctl PTP_SYS_OFFSET_PRECISE: Connection
+        # timed out` and is restarted by systemd every 15-30 min. Each restart
+        # leaves CLOCK_REALTIME undisciplined for ~2-3 s and re-converges through
+        # an excursion peaking near 20 us -- negligible against millisecond
+        # transport, but a run must be able to say whether one landed inside it
+        # rather than leaving the reader to reconstruct it from the journal.
+        "phc2sys_restarts_start": restart_count(),
+        "phc2sys_restarts_end": None,
     },
     "window": {"log_start_frame_id": int(os.environ["MAN_START"]),
                "log_end_frame_id": int(os.environ["MAN_END"])},
@@ -244,6 +263,16 @@ def journal(unit, pattern):
 rms = journal("ptp4l-B", r"rms\s+(\d+)")
 doc["sync"]["ptp_rms_ns_end"] = int(rms) if rms else None
 doc["sync"]["phc2sys_servo_end"] = journal("phc2sys-B", r" (s[0-2]) ")
+def restart_count():
+    try:
+        out = subprocess.run(["journalctl", "-u", "phc2sys-B", "-q", "--no-pager",
+                              "--since", "2026-09-04", "-g", "Scheduled restart job"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None
+    return len(re.findall(r"restart counter is at (\d+)", out or "")) or None
+
+doc["sync"]["phc2sys_restarts_end"] = restart_count()
 
 outcome = {
     "ended_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
