@@ -148,3 +148,92 @@ were considered and dismissed.
    threshold — while its downlink is 212–224 Mbps at a 1.05× spread, 22× the
    offered load. The publisher's uplink probe is the correct direction; the
    subscriber needs a downlink probe added.
+
+---
+
+# OUTCOMES — scored 6 Sep, after the runs
+
+Recorded against the predictions above and against R4's, which was registered by
+message before that run started. Scored strictly: a prediction whose falsifying
+condition never arose is **untested**, not confirmed.
+
+## R2 and the paired run — bars, 1080p, 10 Mbps cap
+
+Both ran `--test-pattern 1`. Neither was a repeat of A3, which is the whole
+story of this section: **the A-series ran `--test-pattern 2`, noise.** The
+comparison these runs were designed to make was invalid from the start.
+
+| Prediction | Outcome |
+|---|---|
+| Host A: the collapse reproduces | **WRONG.** 1080p held, zero steps, both runs |
+| Host A's premise — "granted 10 Mbps and fully delivered, so headroom is invisible" | **ALSO WRONG.** The grant was 6.093 then 3.264 Mbps, never the cap |
+| Host B: QP high before each down-step | **WRONG** here — QP 12 then 17, near-lossless. Right about A3, tested in R4 |
+| Host B: `quality_limitation_reason` = Bandwidth | **WRONG** here — `None`, 3596/3596 and 3594/3594 |
+
+What they did establish, and it stands independently of the source confusion:
+
+- The encoder **undershoots its grant** on cheap content — 0.443 and 0.521 Mbps
+  against 6.093 and 3.264 Mbps targets. Corroborated by Host B at 0.54 Mbps from
+  a *software* encoder on different silicon.
+- **No padding.** `transport_bytes_sent / media_bytes_sent` = 1.039, i.e. RTP
+  headers and RTCP. The pacer adds nothing.
+- **Cross-validation at 100.2%**: publisher outbound 0.521 Mbps against
+  subscriber inbound 0.521 Mbps, opposite ends of a two-hop path, different
+  codebases. The first time both legs were measured in one run.
+
+## R4 — noise, 1080p, 10 Mbps cap, on 2.5× A3's uplink
+
+| Host B's prediction | Outcome |
+|---|---|
+| The staircase persists | **CORRECT** |
+| Steps land in the first seconds | **CORRECT** — all three inside 12.08 s |
+| 5.00 s scaler cadence | **CORRECT** to a hundredth: 2.00 / 5.00 / 5.00 |
+| Settles where bpp reaches 1.4–2.2 | **CORRECT** — 1.419 |
+| Terminal rung *below* 640×360, conditional on a ~6 Mbps grant | **UNTESTED.** The grant was the full 10 Mbps cap, so the falsifying condition never arose. The model predicted the observed rung once the grant was known, but in a form registered only after the fact |
+
+Host A registered no prediction for R4, having been wrong twice that day.
+
+**The model is unfalsified here, not confirmed**, and the distinction is Host B's
+own insistence. In a programme with a twelve-row withdrawal ledger it is the
+difference that matters.
+
+## What R4 settled
+
+- **The mechanism**: 1080p noise costs ~1.4 bpp; a 10 Mbps grant at 1080p30
+  offers 0.16. QP pins at the H.264 ceiling of **51 before every down-step** and
+  relaxes to 38 only on reaching an affordable rung, at which point stepping
+  stops. Read directly from the encoder, not inferred.
+- **Bandwidth excluded by measurement**: 10 Mbps granted, 9.8 taken, **15 Mbps of
+  uplink never asked for**, and the collapse happened anyway. 2.5× the headroom
+  changed neither the rungs nor the destination.
+- **Replication**: A3 vs R4 agree on rungs, order, terminal resolution
+  (640×360), delivered bitrate (9.59 vs 10.02 Mbps), bpp (1.39 vs 1.45), decode
+  p50 (3.65 vs 3.63 ms) and zero loss.
+
+## Two mechanisms proposed *after* the fact, flagged as such
+
+Neither is registered, both are well supported, and both are the kind of claim
+this programme has withdrawn before. Recorded so a later reader can weigh them
+accordingly rather than finding them stated as findings.
+
+1. **Why the estimator "wandered" on bars.** A bars encoder sends 0.44 Mbps and
+   gives GCC almost nothing to probe with, so the estimate drifts (6.093, then
+   3.264). A noise encoder consumes its allocation, so the estimate is exercised
+   and sits at the cap (10.000). Both hosts reached this independently after
+   seeing R4. It retires an earlier claim that the estimator was unstable.
+2. **Why bars are so cheap.** Each frame is the previous one translated
+   horizontally, which motion compensation captures almost exactly. Checkable in
+   the source independently of any run, which is what distinguishes it from a
+   rationalisation.
+
+## Still not measured, and it is the only thing that matters to the deliverable
+
+**Real camera video.** Every number in this programme comes from a source chosen
+to be the hardest possible case. Noise at 1.4 bpp is not teleoperation footage,
+which compresses one to two orders of magnitude better. The mechanism is content
+cost against grant — so the honest expectation is that the production feed does
+**not** behave like this.
+
+Host A has no camera: no `/dev/video*`, no UVC device on USB. The run needs
+hardware from the operator and no new code — omitting `--test-pattern` already
+selects a UVC source.
