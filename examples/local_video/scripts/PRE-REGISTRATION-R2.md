@@ -39,15 +39,44 @@ reproduce, then something about link capacity was reaching the encoder in A3
 through a channel we did not measure** — and "the delivered bitrate was flat, so
 bandwidth was not the constraint" is wrong in a way we have not identified.
 
-### Host B's prediction
+### Host B's prediction: the collapse reproduces, and QP is HIGH before each step
 
-- Collapse reproduces → bandwidth excluded; three times A3's headroom and the
-  picture still steps down is a resolution-decision problem, and QP settles
-  which decision.
-- Collapse does not reproduce → A3 was closer to a ceiling than its flat
-  9–10 Mbps suggested; the §03 withdrawal was right for a reason not yet
-  identified.
-- Anything in between → say so, and do not pick whichever half fits.
+Same call as Host A, and their reasoning is the stronger one — a satisfied grant
+makes headroom invisible. But "the staircase happens" is a weak thing to predict
+when both of us expect it, so here is a sharper one that can be wrong on its own.
+
+**QP will be high before each down-step, not low — and specifically it will be
+high at 1080p while the full 10 Mbps is flowing.**
+
+The arithmetic behind it. 10 Mbps at 1080p30 is **0.16 bits per pixel**. In A3
+the encoder stepped down until it reached 1.4–2.2 bpp and then stopped, in A2 and
+A2-off it oscillated around the rung that gave roughly 2 bpp, and it did that
+while spending its whole grant. If 1.4–2.2 bpp is what this content costs at an
+acceptable quantiser, then 0.16 bpp at 1080p is **an order of magnitude short**,
+and the encoder is quantising hard to fit — which is exactly the condition
+WebRTC's quality scaler is built to respond to.
+
+That would make the staircase the scaler working correctly on content that is
+far more expensive than "animated colour bars" suggests: the moving checkerboard
+produces residuals everywhere, so the flat-region intuition is wrong.
+
+This corrects something I asserted earlier in the programme. I wrote that CBR at
+a 10 Mbps target on trivially compressible content should drive the quantiser
+*low*, and called it strange that the picture shrank anyway. The bpp figures were
+in front of me and say the opposite: the encoder's own revealed preference across
+four runs is 1.4–2.2 bpp, and it never once settled at a rung offering less.
+
+**How this is wrong.** If QP reads low before the steps, this prediction fails and
+the scaler is not driving the staircase — the trigger is somewhere else entirely
+(`quality_limitation_reason` of `Cpu`, the bitrate allocator, or encoder-internal
+adaptation below libwebrtc). That would be the more interesting result and I would
+rather it than a confirmation.
+
+**Secondary prediction, recorded to be scored:** `quality_limitation_reason` reads
+`Bandwidth` for most of the run despite ~30 Mbps of uplink and zero loss — because
+the field reports the encoder being unable to meet quality within its *grant*, not
+the link being full. If it reads `Cpu` or `None`, I am wrong about the mechanism
+and not merely about the label.
 
 ### Agreed in advance
 
