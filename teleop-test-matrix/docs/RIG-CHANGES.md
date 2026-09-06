@@ -258,8 +258,17 @@ Root fingerprint, sha256:
   the figures that supported it. This row read "1.27 ms at 640×360, 3.65 ms at
   1080p, against a 33.3 ms frame budget". Measured across every run that logged
   resolution: 640×360 is **3.76 ms** p50, and 1080p is **9.16 ms** p50 with a
-  **27.84 ms** maximum — 84% of the frame budget, not 11% of it. The 3.65 ms
-  figure does not correspond to any measurement in the data.
+  **27.84 ms** maximum — 84% of the frame budget, not 11% of it.
+
+  *Amended 2026-09-06, a second time.* This entry first said the 3.65 ms figure
+  "does not correspond to any measurement in the data". It does: 3.65 ms is A3's
+  **run-wide** decode median, and A3 spent 74% of its frames at 640×360. The
+  6 September replication reproduces it at 3.63 ms. The number was real and the
+  **label** was wrong — 640×360 decode recorded as 1080p. The withdrawn
+  conclusion stays withdrawn and so does the point that steady-state 1080p decode
+  has never been measured. But reaching for "this figure is invented" before
+  "this figure is mislabelled" is its own bias, and it belongs in a document
+  about exactly that.
 
   The deeper problem is that the 1080p number cannot be quoted at all. There are
   **16 frames of 1080p in the entire programme**, all of them the opening frames
