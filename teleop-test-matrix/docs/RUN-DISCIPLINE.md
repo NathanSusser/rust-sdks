@@ -1,10 +1,14 @@
 # Run discipline — what the 4–5 Sep 2026 session cost, and the rules that came out of it
 
-Two hosts, one night, a 5G teleoperation video rig. The session set out to find
-why WebRTC's bandwidth estimator "settled at 1.2 Mbps on a 10 Mbps link". It
-ended by establishing that the estimator was reporting the truth, that the
-uplink had fallen roughly 70× partway through, and that nothing in the rig could
-have detected the difference.
+Two hosts, a 5G teleoperation video rig, 4–6 Sep 2026. The programme set out to
+find why WebRTC's bandwidth estimator "settled at 1.2 Mbps on a 10 Mbps link",
+and why the picture collapsed from 1080p to 320×180.
+
+Neither was a defect. The estimator was reporting a real uplink collapse the rig
+could not see, and the resolution staircase was ordinary rate control on a test
+source deliberately chosen to be incompressible — a fact misidentified for two
+days by both hosts. Both answers were available on day one, in a `curl` command
+and a log line respectively.
 
 This document is the part worth keeping. It is not a summary of findings — those
 live in `MEASUREMENT-DESIGN.md` and the run reports. It is the set of rules that
@@ -17,8 +21,8 @@ without its incident gets optimised away by whoever reads it next.
 
 ## 1. The withdrawal ledger
 
-Eleven claims were made and withdrawn in one session, between two hosts. They
-are listed together, rather than distributed politely through the text, because
+Twelve claims were made and withdrawn across this programme, between two
+hosts. They are listed together, rather than distributed politely through the text, because
 a reader who sees only the surviving conclusions will trust them more than the
 evidence supports. The withdrawal rate is the honest answer to "how confident
 are you".
@@ -38,11 +42,12 @@ the second pattern below.
 | "The scaler never ratchets back up" | It does, in three of six runs — but only between the bottom two rungs, never toward the request | Other host's step table |
 | The `--log-end-frame-id` window was unreachable at 1 fps | Frame IDs advance at capture rate. The window closed on schedule; a dropped boundary frame hung the exit | Other host's review |
 | Arm 3-alt: publish over the PTP cable as a good-link control | The video goes publisher → SFU → subscriber. The SFU is unreachable from a /30 with no route off it | Other host's review |
+| **The A-series published animated colour bars** | It published near-incompressible **noise**. Three "independent" proofs all reasoned about git — commit timestamps, the tree at a commit, a file in the repo — while the runs used a binary built from an uncommitted tree, which git cannot see. The run's own log said `pseudo-random noise` on line one | Other host asking what the proof was *about*; settled by the log |
 | arm 1's QP mechanism explains the A-series staircase | Opposite bitrate signatures. arm 1's bitrate falls 6.76 → 0.82 Mbps at flat bpp; A3 holds 9–10 Mbps while bpp climbs 0.30 → 2.00. Different links, hours apart | Other host's review |
 
 Two patterns run through that list.
 
-**Eight of the eleven were withdrawn because a quantity was assumed rather than
+**Nine of the twelve were withdrawn because a quantity was assumed rather than
 measured** — receiver feedback, link capacity, drop attribution, the routing
 topology. In every case the measurement was cheap and available at the time.
 The uplink that invalidated a night's conclusions was two `curl` commands away
@@ -131,6 +136,49 @@ surprising if true has earned one more check, by a different method. The cost of
 the one that survived: a finding that sent a reader to add a field, write FFI
 conversions both ways and rebuild `webrtc-sys`, when all of that already existed
 and worked, and the actual blockage was one private method.
+
+### Arguments from one kind of evidence are one argument
+
+The costliest error of the programme was defended by three proofs that looked
+independent and were not. The claim was that the A-series published animated
+colour bars. The proofs:
+
+1. the noise mode "did not exist until commit 712526d at 18:56", and the runs
+   were at 16:42–17:08
+2. `--test-pattern 2` "would have been rejected" — the test at `712526d^` asserts
+   it fails to parse
+3. the run script "hardcodes `--test-pattern 1`"
+
+Each is sound about the object it addresses. All three address **git**: a commit
+timestamp, a tree at a commit, a file in the repo. The runs were direct binary
+invocations from a working tree with uncommitted changes, which git cannot see —
+and (3) is about a script those runs never used.
+
+So it was one argument stated three times. Presented as three-way corroboration,
+it bought two days of confidence, and a **fourth** git argument would have made
+it more confident and no more correct.
+
+What refuted it was one line of a different *kind* of evidence — the run's own
+log, written by the process at the moment it ran:
+
+```
+Test pattern enabled: pseudo-random noise (near-incompressible) at 1920x1080
+```
+
+That line was on disk the whole time, in files already being quoted from for
+resolution and frame rate.
+
+> **Independence is a property of the *class* of evidence, not the number of
+> arguments.** Before counting proofs, ask what kind each one is. Three
+> arguments from the repository, three from one log, three from one stats
+> column: each set is one argument. Reach for a different class — the artifact
+> instead of the source, the process instead of the plan, the wire instead of
+> the counter.
+
+The corollary that cost the most here: **a claim proved about a script says
+nothing about runs that bypassed it.** The A-runs were direct binary
+invocations, recorded as such in `EXPERIMENT-PLAN` §0.2, in a document both
+hosts had edited.
 
 ### The reinstatement reflex: a withdrawal is not a prompt for a replacement
 
@@ -614,28 +662,40 @@ answer and neither can be taken until the uplink recovers.
   this and could not, because its link had already collapsed. Needs a repeat on
   a link comparable to arm 1's.
 
-- **Why did the A-series picture shrink while nothing was starved?** The encoder
-  runs `NV_ENC_PARAMS_RC_CBR` (`h264_encoder_impl.cpp:225`), and
-  `enableFillerDataInsertion` is never set *by us*. That last point is weaker
-  than it reads: `CreateDefaultEncoderParams` zeroes the config struct and then
-  copies the **driver's** preset over it wholesale, overriding only selected
-  fields afterwards, so the flag's actual value is not determined by this source
-  tree. Taking filler as disabled, NVENC satisfies CBR the only
-  remaining way — by lowering QP until the target is consumed — so ~10 Mbps of
-  *real* coded picture on trivially compressible colour bars is the rate control
-  working as configured. That accounts for the flat bitrate, the bpp climbing
-  0.30 → 2.00 as resolution fell, and A3's frames carrying 6.7× the bytes of
-  arm 1's at identical 640×360.
+- **RESOLVED 6 Sep — the A-series picture shrank because the content was
+  near-incompressible noise, and nobody knew it.** The runs were published with
+  `--test-pattern 2`, not the animated bars every analysis assumed. Once that is
+  known the mechanism is ordinary: 1080p noise costs ~1.4 bpp, a 10 Mbps grant at
+  1080p30 offers 0.16, so the encoder quantises to the H.264 ceiling, the scaler
+  sheds pixels on a 5.00 s clock until bits-per-pixel is affordable, QP relaxes,
+  and it stops.
 
-  What it does not account for is the staircase. WebRTC's quality scaler steps
-  down on *high* QP; CBR at a 10 Mbps target on that content should have driven
-  QP low. The picture stepped down four times on an exact 5.00 s clock while
-  bitrate held, packet loss was zero, and QP pressure should have been absent.
-  The honest statement is not "mechanism unknown" but the more specific **the
-  collapse proceeded while every signal the scaler is documented to respond to
-  was healthy.** Settling it needs a repeat with the encoder-side QP column,
-  which did not exist during the A-series — reasoning about QP from an encoder
-  config instead of from QP is the substitution this document exists to prevent.
+  Replicated as R4 on a link with 2.5x the headroom, and the replication is what
+  makes it settled rather than plausible:
+
+  | | A3 (4 Sep, ~10 Mbps up) | R4 (6 Sep, ~25 Mbps up) |
+  |---|---|---|
+  | staircase | 1080 → 720 → 540 → 360 | identical |
+  | terminal rung | 640×360 | 640×360 |
+  | delivered | 9.59 Mbps | 10.02 Mbps |
+  | bits per pixel | 1.39 | 1.45 |
+  | decode p50 | 3.65 ms | 3.63 ms |
+  | packets lost | 0 | 0 |
+
+  QP — the column A3 never had — reads **51, the ceiling, before every
+  down-step**, relaxing to 38 only on reaching a rung it can afford.
+  `quality_limitation_reason` is `Bandwidth` for 3406 of 3414 samples.
+
+  **Bandwidth is excluded by direct measurement, not by argument.** The encoder
+  was granted its full 10 Mbps cap into a link with 24–30 Mbps available, took
+  9.8 of it, and collapsed anyway. Two and a half times the headroom changed
+  neither the rungs nor the destination. The scaler responds to content cost
+  against its grant, and the link never entered into it.
+
+  The sentence this replaces — *"the collapse proceeded while every signal the
+  scaler is documented to respond to was healthy"* — was false. It was written
+  about a run whose content had been misidentified, and it survived because both
+  hosts believed the misidentification.
 
 ---
 
