@@ -1112,10 +1112,22 @@ async fn handle_track_subscribed(
     repaint_ctx: &Arc<OnceLock<egui::Context>>,
     subscriber_timing: SubscriberTimingHandle,
 ) {
-    // If a participant filter is set, skip others
+    // If a participant filter is set, skip others.
+    //
+    // Warn rather than debug. A filtered-out track and an absent publisher both
+    // present as "connected, subscribed, zero rows", and a run that logs nothing
+    // gives no other clue which it was -- a paired run was lost to exactly this,
+    // with the only trace a debug line nobody was capturing. The identity is
+    // operator-supplied on both hosts, so a mismatch is a typo away and costs a
+    // full run to discover.
     if let Some(ref allow) = allowed_identity {
         if participant.identity().as_str() != allow {
-            debug!("Skipping track from '{}' (filter set to '{}')", participant.identity(), allow);
+            warn!(
+                "IGNORING video from participant '{}': --participant is set to '{}'. \
+                 Nothing will be logged unless a participant with that exact identity publishes.",
+                participant.identity(),
+                allow
+            );
             return;
         }
     }
