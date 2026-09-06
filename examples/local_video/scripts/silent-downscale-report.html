@@ -164,6 +164,7 @@ ul.plain li{margin-bottom:9px}
   <div class="eyebrow">Correction · 6 September 2026 · supersedes the correction of 5 September</div>
   <p><strong>The mechanism is established, and it is an ordinary one.</strong> The source in these runs was <em>pseudo-random noise</em>, generated deliberately to be near-incompressible. At 1920×1080 and 30 fps, a 10 Mbps budget is 0.16 bits per pixel. Noise costs 1.4 to 2.2. The encoder was short by an order of magnitude, quantised as hard as it could, and then shed pixels until bits-per-pixel was workable — stopping at the rung where it was. That is a rate controller doing its job, not a congestion controller malfunctioning.</p>
   <p><strong>What this corrects is a correction.</strong> On 5 September this notice said the mechanism was unestablished, and section 07 withdrew the explanation above as "the most comfortable available", on the grounds that these runs used animated colour bars rather than noise. That was wrong. It rested on three arguments about the project's git history — when the noise mode was committed, what the tree contained at that commit, what the run script hardcodes — and the runs in question were launched directly, from a working tree that already contained the code, bypassing the script entirely. Each host's own run log named the source in plain text the whole time. Neither of us read it.</p>
+  <p><strong>It has since been reproduced deliberately.</strong> On 6 September the same configuration was run again on a link with two and a half times the uplink, with the encoder-side columns the original runs lacked. It reproduced the original staircase almost exactly — and this time the quantiser could be read directly, pinned at the H.264 ceiling through every step. Section 03 carries that evidence.</p>
   <p>Everything measured below stands as recorded: the staircase, its timing, the five-second cadence, the zero packet loss, and the finding that the load ladder was never a ladder. Section 07 carries the full account.</p>
 </div>
 </div>
@@ -234,6 +235,40 @@ ul.plain li{margin-bottom:9px}
   </div>
 
   <p>An encoder that is losing its bitrate allocation cannot spend a flat 10 Mbps while it happens. Whatever drove the staircase, a collapsing bandwidth estimate is not visible in this run.</p>
+
+  <h3 style="font-size:19px;font-weight:600;margin:34px 0 8px">The replication, with the column the original runs lacked</h3>
+  <p>The run below is the original 1080p configuration repeated two days later, on a link measured at 24.7–29.7 Mbps against the original's ~10. Two and a half times the headroom changed nothing:</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr><th></th><th>Original (4 Sep, ~10 Mbps uplink)</th><th>Replication (6 Sep, ~25 Mbps uplink)</th></tr></thead>
+    <tbody>
+      <tr><td class="name">Staircase</td><td>1080p → 720 → 540 → 360</td><td>1080p → 720 → 540 → 360</td></tr>
+      <tr><td class="name">Modal resolution</td><td>640×360 (73.6%)</td><td>640×360 (94.7%)</td></tr>
+      <tr><td class="name">Delivered bitrate</td><td>9.59 Mbps</td><td>10.02 Mbps</td></tr>
+      <tr class="hl"><td class="name">Bits per pixel</td><td>1.39</td><td>1.42 – 1.45</td></tr>
+      <tr><td class="name">Decode p50</td><td>3.65 ms</td><td>3.63 ms</td></tr>
+      <tr><td class="name">Packets lost</td><td>0</td><td>0</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The encoder was granted its full 10 Mbps cap and took 9.8 of it, while 15 Mbps of uplink sat unused. Transport carried 1.031× the media bytes, so nothing was padding. <strong>The extra capacity was never asked for, and the picture collapsed anyway.</strong></p>
+
+  <p>And the quantiser, the measurement the original runs could not make:</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr><th>Step</th><th>To</th><th class="num">QP before</th><th class="num">QP after</th></tr></thead>
+    <tbody>
+      <tr><td class="name">2.08 s</td><td>1280×720</td><td class="num">51.0</td><td class="num">51.0</td></tr>
+      <tr><td class="name">7.08 s</td><td>960×540</td><td class="num">51.0</td><td class="num">51.0</td></tr>
+      <tr class="hl"><td class="name">12.08 s</td><td>640×360</td><td class="num">51.0</td><td class="num">38.0</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>51.0 is the H.264 maximum. The encoder is quantising as hard as the format allows through every step, and only relaxes once the picture is small enough to afford — at which point the stepping stops. <span class="mono">quality_limitation_reason</span> reads <span class="mono">Bandwidth</span> in 3,406 of 3,414 samples, which means the encoder could not meet quality within its <em>grant</em>; it does not mean the link was full, and the link demonstrably was not.</p>
 
   <div class="call">
     <div class="eyebrow">Withdrawn: "every signal the scaler responds to was healthy"</div>
