@@ -57,6 +57,29 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   exit 1
 fi
 
+# A locked Wayland session withholds frame callbacks, so eframe never redraws.
+# The subscriber then receives and decodes at full rate while rendering exactly
+# one frame, and writes a CSV containing only its header -- decode health reads
+# perfectly throughout, so nothing but the row count betrays it. A paired run was
+# lost to this. Xwayland is not throttled the same way, so unsetting
+# WAYLAND_DISPLAY restores logging without unlocking the screen.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${ALLOW_LOCKED_WAYLAND:-}" ]; then
+  locked="$(loginctl show-session "$(loginctl list-sessions --no-legend 2>/dev/null     | awk '$NF ~ /ago/ || $0 ~ /seat/ {print $1; exit}')" -p LockedHint --value 2>/dev/null || true)"
+  if [ "$locked" = "yes" ]; then
+    echo "ERROR: the Wayland session is LOCKED (LockedHint=yes)." >&2
+    echo "Video will arrive and decode normally, but the compositor will not present" >&2
+    echo "the window, so nothing renders and the CSV gets only its header." >&2
+    echo "" >&2
+    echo "Re-run over Xwayland, which is not throttled while locked:" >&2
+    echo "  env -u WAYLAND_DISPLAY $0 $*" >&2
+    echo "" >&2
+    echo "Note that render_ms and e2e figures from an Xwayland run are not" >&2
+    echo "comparable to a native-Wayland run; receive, decode, resolution and" >&2
+    echo "bitrate are unaffected. Set ALLOW_LOCKED_WAYLAND=1 to override." >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$OUTDIR"
 
 BIN="$(dirname "$0")/../../../target/release/subscriber"
