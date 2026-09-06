@@ -341,12 +341,27 @@ ul.plain li{margin-bottom:9px}
 <section>
   <h2><span class="n">04</span>What this means for the production feed</h2>
   <p class="sub">1600×1300 · 30 fps · ~10 Mbps</p>
-  <p>The production video is 1600×1300 — <strong>2.08 megapixels</strong>, essentially identical to the 2.07 of the 1920×1080 run. On this link, that run reached 640×360 within 11.03 seconds and held it for 2,536 frames, then stepped down again to 480×268 at 96 seconds.</p>
-  <p>An operator would be driving on <strong>one ninth of the intended pixels within eleven seconds of every session</strong> — 640×360 in place of 1920×1080 — with no packet loss and no drop in the bitrate being delivered.</p>
-  <div class="call warn">
-    <div class="eyebrow">The redirect is withdrawn with the mechanism</div>
-    <p>This box previously concluded that the congestion controller, not the pipe, was the binding constraint on resolution, and that the codec plan was therefore aimed at the wrong problem. That conclusion rested entirely on section 03, and section 03 is withdrawn. Naming the congestion controller as the culprit is not supported by a run whose bitrate never fell.</p>
-    <p>What survives is narrower and still worth acting on: <strong>the feed does not hold its configured resolution on this link, and nothing in the existing logging would have told you.</strong> That is a reason to instrument before choosing a codec, not a reason to have chosen a different one. Deciding between codec work and rate-control work requires knowing why the picture shrank, and we do not yet know.</p>
+  <p>The production video is 1600×1300 — <strong>2.08 megapixels</strong>, essentially identical to the 2.07 of the 1920×1080 run. At 30 fps on a 10 Mbps budget, that is <strong>0.16 bits per pixel</strong> available, and the mechanism above turns that into a straightforward test.</p>
+  <p><strong>The feed holds its resolution if the picture costs less than 0.16 bits per pixel at acceptable quality, and collapses if it costs more.</strong> That is the whole criterion. Both sides of it have now been measured, two orders of magnitude apart:</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr><th>Source</th><th class="num">Cost</th><th>Result at 1080p on a 10 Mbps grant</th></tr></thead>
+    <tbody>
+      <tr class="hl"><td class="name">Pseudo-random noise</td><td class="num">~1.4 bpp</td><td>Collapses to 640×360 within 12 s, quantiser pinned at maximum</td></tr>
+      <tr class="okrow"><td class="name">Animated colour bars</td><td class="num">~0.008 bpp</td><td>Holds 1920×1080 for the full run, quantiser resting at 12</td></tr>
+      <tr><td class="name">Real camera video</td><td class="num">not measured</td><td><strong>Unknown — and this is the only case that matters</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Camera footage sits between these two, and much nearer the cheap end: ordinary 1080p30 camera content is typically encoded at 4–8 Mbps for good quality, which is 0.06–0.13 bits per pixel. That is <em>below</em> the 0.16 threshold, so the expectation is that the production feed holds its resolution and that none of the collapse described in this report happens to it.</p>
+  <p>That expectation is reasoning from the established mechanism, not a measurement, and it should not be trusted further than that. A moving scene, a noisy sensor, high detail or a higher frame rate all push the cost up, and the margin is less than a factor of two. <strong>The one run that would settle it has not been performed, because neither test machine has a camera attached.</strong> It requires no new code — omitting the test-pattern flag already selects a camera — and it is the single most valuable measurement remaining.</p>
+  <div class="call">
+    <div class="eyebrow">What this does and does not justify</div>
+    <p>Earlier versions of this box concluded first that the congestion controller was the binding constraint and the codec plan was misaimed, and then, after that was withdrawn, that the mechanism was unknown. Neither stands. The mechanism is ordinary rate control, and the constraint is <strong>content cost against the allowed bitrate</strong> — a quantity the codec choice directly changes.</p>
+    <p>So the codec plan is not misaimed. A codec that encodes the same picture in fewer bits moves the feed further below the threshold, which is exactly the right lever. What this report does justify is measuring the production content's actual cost before sizing anything, because that single number decides whether there is a problem at all.</p>
+    <p>The finding that survives independently of all of this: <strong>the feed can lose seven eighths of its pixels with no packet loss, no bitrate drop, and nothing in either machine's logging to show it.</strong> Whatever the production content turns out to cost, that blind spot is real and worth closing.</p>
   </div>
 </section>
 </div>
