@@ -224,6 +224,25 @@ and decisive:
 > configuration is slower, weaker, and in at least one case gave the wrong
 > answer outright.
 
+#### And reading the right file is not the same as reading it
+
+The `scaling_settings = kOff` line sits a few lines below the `qp_ = -1`
+assignment. Both hosts had that exact function open, in that exact file, while
+diagnosing the QP defect — and neither looked down.
+
+So this is not a failure to consult the configuration. The configuration was
+open on screen. It is a failure of *scope within* the thing being read: having
+decided the question was "does this report QP", the adjacent line answering
+"would anything act on it" was invisible.
+
+> **A search shaped by a conclusion stops at the conclusion.** When a
+> configuration line explains a defect, read what surrounds it before believing
+> the explanation — particularly the lines that would say whether the thing you
+> think is broken was ever switched on.
+
+The cost: a causal claim published twice, in a commit message and to the
+operator, that one adjacent line refuted.
+
 #### The limit of that rule: the source is only the configuration you wrote
 
 Applying the rule produced a confident wrong answer within hours of its being
@@ -688,12 +707,21 @@ answer and neither can be taken until the uplink recovers.
 
   > **Correction, 7 Sep — the component was misattributed.** This entry
   > previously said WebRTC's *quality scaler* sheds the pixels. It does not, and
-  > cannot: both NVENC paths advertise
-  > `info.scaling_settings = VideoEncoder::ScalingSettings::kOff`
-  > (`h264_encoder_impl.cpp:411`, `av1_encoder_impl.cpp:432`), which disables
-  > QP-based quality scaling outright. Neither encoder adapts geometry itself
-  > either — both only reconfigure rates — so the adaptation happens above them
-  > in libwebrtc, driven by something other than QP.
+  > cannot. QP-based quality scaling is disabled across **every hardware encoder
+  > in the SDK** — eight assignments, no exceptions, none of them `kOn`:
+  >
+  > ```
+  > nvidia/h264_encoder_impl.cpp:411    nvidia/h265_encoder_impl.cpp:333
+  > nvidia/av1_encoder_impl.cpp:432     jetson/h264_encoder_impl.cpp:374
+  > jetson/h265_encoder_impl.cpp:274    jetson/av1_encoder_impl.cpp:393
+  > vaapi/h264_encoder_impl.cpp:268     passthrough_video_encoder.cpp:333
+  > ```
+  >
+  > Every codec, every vendor, including the Jetson paths that production
+  > hardware would use. Neither NVENC path adapts geometry itself either —
+  > checked, they never write `encodeWidth`/`encodeHeight` after init, only
+  > reconfigure rates — so the adaptation happens above them in libwebrtc,
+  > driven by something other than QP.
   >
   > **Every measurement above stands**; only the name of the component is wrong.
   > What replaces it is deliberately left blank rather than filled with a second
