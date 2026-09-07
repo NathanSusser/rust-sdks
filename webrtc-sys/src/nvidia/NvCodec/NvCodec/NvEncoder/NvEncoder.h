@@ -179,6 +179,24 @@ class NvEncoder {
   int GetEncodeHeight() const { return m_nHeight; }
 
   /**
+   *  @brief  Average quantiser NVENC reported for the most recently locked
+   *  bitstream, or -1 before any frame has been encoded.
+   *
+   *  NVENC already supplies this in NV_ENC_LOCK_BITSTREAM::frameAvgQP and the
+   *  wrapper discarded it. WebRTC's QualityScaler adapts resolution from QP
+   *  samples, so an encoder that reports no QP silently disables downscaling
+   *  altogether -- the AV1 path hardcoded qp_ = -1 and therefore held 1080p on
+   *  content it could not afford, losing two thirds of its frame rate instead
+   *  of shedding pixels. The H.264 path never needed this because it parses QP
+   *  out of the slice header; AV1 has no equally cheap field to parse.
+   *
+   *  When a single encode produces multiple bitstream packets, every packet
+   *  sees the QP of the last one locked. The QualityScaler averages over many
+   *  frames, so that imprecision does not affect its decisions.
+   */
+  int GetLastFrameAvgQP() const { return m_nLastFrameAvgQP; }
+
+  /**
    *   @brief  This function is used to get the current frame size based on
    * pixel format.
    */
@@ -494,6 +512,9 @@ class NvEncoder {
   bool m_bUseIVFContainer = true;
 
  private:
+  // Average quantiser of the most recently locked bitstream; see
+  // GetLastFrameAvgQP. -1 until the first frame is encoded.
+  int m_nLastFrameAvgQP = -1;
   uint32_t m_nWidth;
   uint32_t m_nHeight;
   NV_ENC_BUFFER_FORMAT m_eBufferFormat;

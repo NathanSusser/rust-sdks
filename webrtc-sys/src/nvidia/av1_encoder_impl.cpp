@@ -392,7 +392,12 @@ int32_t NvidiaAV1EncoderImpl::ProcessEncodedFrame(
       EncodedImageBuffer::Create(packet.data(), packet.size()));
   encoded_image_.set_size(packet.size());
 
-  encoded_image_.qp_ = -1;
+  // Was hardcoded to -1. WebRTC's QualityScaler adapts resolution from QP
+  // samples, so reporting none disabled downscaling entirely: AV1 held 1080p on
+  // incompressible content and lost two thirds of its frame rate instead of
+  // shedding pixels, while every health metric read normal. NVENC supplies the
+  // value; the wrapper was discarding it.
+  encoded_image_.qp_ = encoder_->GetLastFrameAvgQP();
 
   CodecSpecificInfo codecInfo;
   codecInfo.codecType = kVideoCodecAV1;

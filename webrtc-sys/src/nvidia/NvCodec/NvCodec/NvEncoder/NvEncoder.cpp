@@ -622,6 +622,9 @@ void NvEncoder::GetEncodedPacket(std::vector<NV_ENC_OUTPUT_PTR>& vOutputBuffer,
     lockBitstreamData.doNotWait = false;
     NVENC_API_CALL(m_nvenc.nvEncLockBitstream(m_hEncoder, &lockBitstreamData));
 
+    // Carried out for WebRTC's QualityScaler; see GetLastFrameAvgQP.
+    m_nLastFrameAvgQP = static_cast<int>(lockBitstreamData.frameAvgQP);
+
     uint8_t* pData = (uint8_t*)lockBitstreamData.bitstreamBufferPtr;
     if (vPacket.size() < i + 1) {
       vPacket.push_back(std::vector<uint8_t>());

@@ -686,6 +686,21 @@ answer and neither can be taken until the uplink recovers.
   down-step**, relaxing to 38 only on reaching a rung it can afford.
   `quality_limitation_reason` is `Bandwidth` for 3406 of 3414 samples.
 
+  > **Correction, 7 Sep — the component was misattributed.** This entry
+  > previously said WebRTC's *quality scaler* sheds the pixels. It does not, and
+  > cannot: both NVENC paths advertise
+  > `info.scaling_settings = VideoEncoder::ScalingSettings::kOff`
+  > (`h264_encoder_impl.cpp:411`, `av1_encoder_impl.cpp:432`), which disables
+  > QP-based quality scaling outright. Neither encoder adapts geometry itself
+  > either — both only reconfigure rates — so the adaptation happens above them
+  > in libwebrtc, driven by something other than QP.
+  >
+  > **Every measurement above stands**; only the name of the component is wrong.
+  > What replaces it is deliberately left blank rather than filled with a second
+  > guess: three claims have already been withdrawn to the reflex of answering a
+  > retraction with a same-sized substitute. Establishing the real driver means
+  > reading libwebrtc's adaptation path, not inferring it from our own logs.
+
   **Bandwidth is excluded by direct measurement, not by argument.** The encoder
   was granted its full 10 Mbps cap into a link with 24–30 Mbps available, took
   9.8 of it, and collapsed anyway. Two and a half times the headroom changed
