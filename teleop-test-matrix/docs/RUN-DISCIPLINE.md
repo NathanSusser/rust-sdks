@@ -207,6 +207,46 @@ The proposal came within minutes of both hosts agreeing the rig cannot measure
 codec efficiency, on the exact question just closed. Worth noting as the
 reinstatement reflex reaching for a *number* rather than a mechanism.
 
+### "The guard did not fire" and "the guard is broken" look identical from outside
+
+A newly added inactivity timeout appeared not to work. It was very nearly filed
+as a bug in the fix that had just been written. The guard was correct: it arms
+only after frames have arrived, and the verification had killed the publisher
+25 s in — while the run script's uplink probe still had ~15 s to go, so no frame
+had ever arrived and the guard was right not to arm.
+
+Nothing distinguishes those two states from outside the process. A guard that
+stays silent because its precondition was never met and a guard that is broken
+produce the same observable: silence.
+
+> **When a guard does not fire, verify its precondition before doubting the
+> guard.** Design the test around the arming condition, not around the wall
+> clock — and be aware that anything which delays the first real event (a
+> capacity probe, a connection handshake) shifts that condition later than the
+> obvious moment.
+
+The near-miss is the point: a correct piece of code was one step from being
+"fixed" on the strength of a mistimed test.
+
+### `pkill -f` matches the shell that invoked it
+
+Hit independently by both hosts in the same programme, costing two cycles each
+time. A pattern-matching kill sees its own invocation, because the shell's
+command line contains the pattern:
+
+```
+pkill -f 'room-name my-test'      # kills the publisher AND this shell
+pgrep -f 'release/publisher'      # counts wrapper shells as matches
+```
+
+The failure is loud but illegible — the shell dies, exit 144, no output — and it
+looks like the command produced nothing rather than like it killed the wrong
+process. It also silently inflates every `pgrep -c` used as a "stray process"
+check, which reported 2 stray publishers on a host that had none.
+
+> Match on the binary path and exclude interpreters (`pgrep -af … | grep -v
+> '/bin/bash'`), or capture the PID at launch and signal that.
+
 ### A binary can be stale without any of its own sources changing
 
 The third form of the staleness trap, after "never rebuilt" and "rebase moved
