@@ -511,6 +511,22 @@ struct PendingPaintSample {
     prepare_timestamp_us: u64,
 }
 
+/// Process exit status meaning "the publisher went quiet", as distinct from a clean
+/// end-of-window exit.
+///
+/// The run script derives `exit_reason` for the manifest from the process's exit
+/// status. Before this existed, the inactivity path exited 0 with rows written, which
+/// is indistinguishable from reaching `--log-end-frame-id` -- so a run that timed out
+/// was recorded as one that finished. The subscriber knows exactly why it stopped and
+/// must not discard that at the process boundary for the script to guess at.
+const EXIT_PUBLISHER_INACTIVITY: i32 = 3;
+
+/// Set when the run ended because no frames arrived, read by `main` to choose the
+/// exit status. A process-wide flag rather than another `Arc` threaded through the
+/// track-subscription chain: there is exactly one subscriber per process, and the
+/// alternative is six call sites of plumbing for one bit.
+static STOPPED_BY_INACTIVITY: AtomicBool = AtomicBool::new(false);
+
 /// How long the subscriber waits for a frame before concluding the publisher is gone.
 ///
 /// Its only other exit is reaching `--log-end-frame-id`, which cannot fire if the
@@ -1351,6 +1367,7 @@ async fn handle_track_subscribed(
                 last_frame_count = seen;
                 last_progress = Instant::now();
             } else if seen > 0 && last_progress.elapsed() >= PUBLISHER_INACTIVITY_TIMEOUT {
+                STOPPED_BY_INACTIVITY.store(true, Ordering::Release);
                 if !ctrl_c_stats.swap(true, Ordering::AcqRel) {
                     warn!(
                         "No frame for {:?} after {seen} frames; publisher appears to have \
@@ -2005,6 +2022,12 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
 
     // If the window was closed manually, still signal shutdown to background threads.
     ctrl_c_received.store(true, Ordering::Release);
+
+    // Report the inactivity stop through the exit status. Returning Ok here would tell
+    // the run script this run reached its end frame, which is the one thing it did not do.
+    if STOPPED_BY_INACTIVITY.load(Ordering::Acquire) {
+        std::process::exit(EXIT_PUBLISHER_INACTIVITY);
+    }
 
     Ok(())
 }

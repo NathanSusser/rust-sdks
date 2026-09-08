@@ -304,10 +304,17 @@ outcome = {
     "first_frame_id": None, "last_frame_id": None, "elapsed_s": None,
     "delivered_resolutions": None, "resolution_changed": None,
 }
-# Recorded from the process's real exit status, not inferred from row count. A run with
-# rows can still have been killed, and that distinction is the whole point of the field.
+# Recorded from the process's real exit status. A run with rows can still have been
+# killed or timed out, and that distinction is the whole point of the field.
+#
+# Status 3 is the subscriber's own signal that the publisher went quiet. It was added
+# because the inactivity path previously exited 0 with rows written, which this code
+# then reported as end_frame_reached -- the one thing such a run definitely did not do.
+# Keep any new terminating condition on its own status rather than widening a branch here.
 _status = os.environ.get("MAN_STATUS", "")
-if _status == "0":
+if _status == "3":
+    outcome["exit_reason"] = "publisher_inactivity_timeout"
+elif _status == "0":
     outcome["exit_reason"] = "end_frame_reached" if rows > 0 else "exited_clean_no_rows"
 elif _status in ("143", "130"):
     outcome["exit_reason"] = "terminated_by_signal_%s" % _status
