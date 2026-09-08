@@ -12,6 +12,7 @@ gives 0.99), so no quality figure derived from received pixels can be trusted ye
 Everything here comes from the encoder's own stats and is unaffected by that.
 """
 import argparse
+import collections
 import csv
 import glob
 import json
@@ -19,6 +20,26 @@ import os
 import statistics
 
 PIX_PER_S = 1600 * 1300 * 30  # production geometry
+
+
+def cell_is_complete(path):
+    """Whether the cell's run actually finished.
+
+    A snapshot file grows while its run is in flight, so summarising one mid-run
+    describes the part that has happened so far and says nothing about the rest.
+    That is not a partial answer, it is a wrong one: e2-1500k-r1 read as "holds
+    1600x1300, zero steps" when summarised 40 s in, and stepped down twice at t+84
+    and t+89. The completion line in the run log is the only thing that says the
+    cell is over.
+    """
+    log = path[: -len(".jsonl")] + ".log"
+    if not os.path.exists(log):
+        return False
+    try:
+        with open(log, errors="replace") as fh:
+            return "run complete:" in fh.read()
+    except OSError:
+        return False
 
 
 def cell_summary(path):
@@ -51,7 +72,24 @@ def cell_summary(path):
             widths.add((vo["frame_width"], vo["frame_height"]))
     last = rows[-1][1]
 
+    # The ladder as it actually happened, with the time of each change, and how long
+    # the encoder spent at each rung. "Final resolution" alone hides a cell that held
+    # production geometry for 84 s and then collapsed.
+    t0 = rows[0][0]
+    ladder, prev = [], None
+    for t, vo in rows:
+        r = (vo.get("frame_width"), vo.get("frame_height"))
+        if r != prev:
+            ladder.append((t - t0, r))
+            prev = r
+    dwell = collections.Counter(
+        (vo.get("frame_width"), vo.get("frame_height")) for _, vo in rows).most_common()
+
     return {
+        "ladder": ladder,
+        "dwell": dwell,
+        "held_source_s": sum(1 for _, vo in rows
+                             if (vo.get("frame_width"), vo.get("frame_height")) == (1600, 1300)),
         "encoder": last.get("encoder_implementation", ""),
         "grant_mbps": statistics.mean(grants) / 1e6 if grants else float("nan"),
         "sent_mbps": statistics.mean(sent) / 1e6 if sent else float("nan"),
@@ -78,17 +116,22 @@ def main():
     ap.add_argument("--out-csv", help="write the sweep table here")
     args = ap.parse_args()
 
-    cells = {}
+    cells, skipped = {}, []
     for p in sorted(glob.glob(os.path.join(args.dir, "e2-*.jsonl"))):
         room = os.path.basename(p)[: -len(".jsonl")]
+        if not cell_is_complete(p):
+            skipped.append(room)
+            continue
         s = cell_summary(p)
         if s:
             cap_k = int(room.split("-")[1].rstrip("k"))
             s["room"], s["cap_mbps"] = room, cap_k / 1000
             cells[room] = s
 
+    if skipped:
+        print(f"IN FLIGHT, not summarised: {', '.join(skipped)}\n")
     if not cells:
-        print(f"no usable cells in {args.dir}")
+        print(f"no completed cells in {args.dir}")
         return
 
     hdr = (f"{'cell':<16}{'cap':>6}{'grant':>8}{'sent':>8}{'bpp':>8}"
@@ -109,8 +152,10 @@ def main():
     print("\nresolutions encoded per cell (the staircase)")
     for room in sorted(cells, key=lambda r: cells[r]["cap_mbps"]):
         c = cells[room]
-        rungs = " -> ".join(f"{w}x{h}" for w, h in sorted(c["resolutions"], reverse=True))
-        print(f"  {room:<16} {rungs}   (counter says {c['res_changes']})")
+        rungs = " -> ".join(f"{w}x{h}@{t:.0f}s" for t, (w, h) in c["ladder"])
+        print(f"  {room:<16} {rungs}")
+        dwell = ", ".join(f"{w}x{h} {n}/{c['polls']}" for (w, h), n in c["dwell"])
+        print(f"  {'':<16} dwell: {dwell}   (counter says {c['res_changes']})")
 
     # The cell is only interpretable when the CAP was the binding constraint. If the
     # grant came in below it, congestion control set the rate and the cell measured
