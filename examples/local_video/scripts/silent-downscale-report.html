@@ -356,13 +356,20 @@ ul.plain li{margin-bottom:9px}
     <tbody>
       <tr class="hl"><td class="name">Pseudo-random noise</td><td class="num">~1.4 bpp</td><td>Collapses to 640×360 within 12 s, quantiser pinned at maximum</td></tr>
       <tr class="okrow"><td class="name">Animated colour bars</td><td class="num">~0.008 bpp</td><td>Holds 1920×1080 for the full run, quantiser resting at 12</td></tr>
-      <tr><td class="name">Real camera video</td><td class="num">not measured</td><td><strong>Unknown — and this is the only case that matters</strong></td></tr>
+      <tr><td class="name">IP camera footage</td><td class="num">0.043 bpp<br><span class="mono" style="font-size:11px">at crf 23</span></td><td>Fits, with 3.7× headroom</td></tr>
+      <tr class="hl"><td class="name">Actual robot capture</td><td class="num">0.082 bpp<br><span class="mono" style="font-size:11px">at crf 23</span></td><td><strong>Fits at 1.95×. But near-transparent quality does not — see below</strong></td></tr>
     </tbody>
   </table>
   </div>
 
-  <p>Camera footage sits between these two, and much nearer the cheap end: ordinary 1080p30 camera content is typically encoded at 4–8 Mbps for good quality, which is 0.06–0.13 bits per pixel. That is <em>below</em> the 0.16 threshold, so the expectation is that the production feed holds its resolution and that none of the collapse described in this report happens to it.</p>
-  <p>That expectation is reasoning from the established mechanism, not a measurement, and it should not be trusted further than that. A moving scene, a noisy sensor, high detail or a higher frame rate all push the cost up, and the margin is less than a factor of two. <strong>The one run that would settle it has not been performed, because neither test machine has a camera attached.</strong> It requires no new code — omitting the test-pattern flag already selects a camera — and it is the single most valuable measurement remaining.</p>
+  <p><strong>Both figures are now measured rather than expected, on uncompressed frames captured off the robot itself.</strong> At crf 23 — good quality, the sort of setting a production feed would use — the robot content costs 0.082 bits per pixel against the 0.160 budget. It fits, with a little under twice the headroom it needs.</p>
+
+  <div class="call warn">
+    <div class="eyebrow">Correction · the headroom is half what earlier footage suggested</div>
+    <p>An earlier version of this section used footage from an IP camera and reported 3.7× headroom. Measured on frames captured from the <em>actual robot</em>, the same content costs <strong>1.89× more</strong> — 0.082 bpp against 0.043 — and the headroom is <strong>1.95×, not 3.7×</strong>.</p>
+    <p>The consequence that matters: <strong>near-transparent quality no longer fits.</strong> At crf 18, robot content needs 15.68 Mbps, or 0.251 bpp — 1.57× the budget. On the IP camera footage the same setting fitted at 0.87×. So the earlier reading was optimistic by a factor of about two, and it was optimistic because the content was not the content.</p>
+    <p>Constant-bitrate encoding at the full 10 Mbps budget lands at 0.162 bpp, fractionally over the line. The feed is workable at good quality and has no room at excellent quality.</p>
+  </div>
   <div class="call">
     <div class="eyebrow">What this does and does not justify</div>
     <p>Earlier versions of this box concluded first that the congestion controller was the binding constraint and the codec plan was misaimed, and then, after that was withdrawn, that the mechanism was unknown. Neither stands. The mechanism is ordinary rate control, and the constraint is <strong>content cost against the allowed bitrate</strong> — a quantity the codec choice directly changes.</p>
