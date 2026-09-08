@@ -31,18 +31,54 @@ import sys
 
 import numpy as np
 
-W, H = 1600, 1300
+W, H = 1600, 1300          # the SOURCE geometry; samples may be smaller
 Y_SIZE = W * H
-FRAME_SIZE = Y_SIZE * 3 // 2
+
+# Resampler used whenever a frame has to be scaled to meet the reference. Recorded
+# in the output because it is not a free choice: bilinear and Lanczos differ by a
+# real amount, and a figure computed with one is not comparable to one computed
+# with the other.
+RESAMPLER_NAME = "lanczos"
 
 
-def load_y(path):
-    """Read the Y plane of a raw I420 frame."""
+def load_y(path, width=W, height=H, stride_y=None):
+    """Read the Y plane of a raw I420 frame at its own geometry.
+
+    Geometry comes from the subscriber's index.csv, never from an assumption: a
+    cell whose encoder stepped down writes smaller frames, and reading those at the
+    source geometry produces a confidently wrong image rather than an error.
+    """
+    stride = stride_y or width
     with open(path, "rb") as fh:
-        buf = fh.read(Y_SIZE)
-    if len(buf) < Y_SIZE:
-        raise ValueError(f"{path}: short read, {len(buf)} of {Y_SIZE} bytes")
-    return np.frombuffer(buf, dtype=np.uint8).reshape(H, W)
+        buf = fh.read(stride * height)
+    if len(buf) < stride * height:
+        raise ValueError(f"{path}: short read, {len(buf)} of {stride * height} bytes")
+    plane = np.frombuffer(buf, dtype=np.uint8).reshape(height, stride)
+    return plane[:, :width]
+
+
+def read_index(samples_dir):
+    """Per-frame geometry written by the subscriber, keyed by frame id."""
+    path = os.path.join(samples_dir, "index.csv")
+    if not os.path.exists(path):
+        return {}
+    out = {}
+    with open(path) as fh:
+        for row in csv.DictReader(fh):
+            try:
+                out[int(row["frame_id"])] = (
+                    int(row["width"]), int(row["height"]), int(row["stride_y"]))
+            except (KeyError, ValueError):
+                continue
+    return out
+
+
+def resize_y(y, size):
+    """Scale a luma plane to (width, height)."""
+    from PIL import Image
+    if (y.shape[1], y.shape[0]) == size:
+        return y
+    return np.asarray(Image.fromarray(y).resize(size, Image.LANCZOS))
 
 
 def signature(y):
@@ -106,10 +142,28 @@ def main():
     # gap between neighbouring frames -- measured at 31-40 dB apart on this clip
     # against a 42 dB encode. That margin is real but thin, so roughly half the
     # samples cannot be pinned on content alone and pass 2 places them.
-    samples = [(os.path.basename(sp), load_y(sp)) for sp in sample_paths]
+    index = read_index(args.samples)
+    if not index:
+        print("WARNING: no index.csv; assuming every sample is at source geometry. "
+              "A cell whose encoder stepped down will be read wrongly.", file=sys.stderr)
+
+    # Samples are scored at BOTH geometries when they differ from the source, because
+    # the two answer different questions and must never be pooled:
+    #   at_reference  upscale the sample to the source size -- "how good is the picture
+    #                 the operator sees", which charges the codec for the resolution drop
+    #   at_delivered  downscale the source to the sample's size -- "how good is the codec
+    #                 at the size it chose", which hides the drop entirely
+    samples = []
+    for sp in sample_paths:
+        name = os.path.basename(sp)
+        digits = "".join(ch for ch in os.path.splitext(name)[0] if ch.isdigit())
+        fid = int(digits) if digits else None
+        w, h, sy = index.get(fid, (W, H, W))
+        y = load_y(sp, w, h, sy)
+        samples.append((name, resize_y(y, (W, H)) if (w, h) != (W, H) else y, (w, h), y))
     confident = {}
     per_sample = {}
-    for idx, (name, y) in enumerate(samples):
+    for idx, (name, y, _native, _raw) in enumerate(samples):
         d = np.linalg.norm(sig_matrix - signature(y), axis=1)
         shortlist = np.argsort(d)[:15]
         scored = sorted(((psnr_y(y, refs[i]), i) for i in shortlist), reverse=True)
@@ -138,32 +192,42 @@ def main():
     total_mse = 0.0
     n_scored = 0
     ssims = []
-    for idx, (name, y) in enumerate(samples):
+    for idx, (name, y, native, raw) in enumerate(samples):
         best_db, best_i, margin = per_sample[idx]
         if idx in confident:
             ref_i, how = confident[idx], "content"
         elif idx in placed:
             ref_i, how = placed[idx], "sequence"
         else:
-            rows.append({"sample": name, "ref_index": "", "psnr_y_db": "",
-                         "ssim_y": "", "margin_db": f"{margin:.3f}", "matched_by": "none",
-                         "status": "UNMATCHED"})
+            rows.append({"sample": name, "ref_index": "", "delivered_res": "", "psnr_at_reference_db": "",
+                         "psnr_at_delivered_db": "", "ssim_y": "", "margin_db": f"{margin:.3f}",
+                         "resampler": RESAMPLER_NAME, "matched_by": "none", "status": "UNMATCHED"})
             continue
         db = psnr_y(y, refs[ref_i])
         # A correct placement must beat what its neighbour would score; otherwise the
         # sequence fit has drifted and the frame is left unscored rather than guessed.
         neighbour = refs[ref_i + 1] if ref_i + 1 < len(refs) else refs[ref_i - 1]
         if db <= psnr_y(y, neighbour):
-            rows.append({"sample": name, "ref_index": "", "psnr_y_db": "",
-                         "ssim_y": "", "margin_db": f"{margin:.3f}", "matched_by": how,
-                         "status": "REJECTED"})
+            rows.append({"sample": name, "ref_index": "", "delivered_res": "", "psnr_at_reference_db": "",
+                         "psnr_at_delivered_db": "", "ssim_y": "", "margin_db": f"{margin:.3f}",
+                         "resampler": RESAMPLER_NAME, "matched_by": how, "status": "REJECTED"})
             continue
         s = ssim_y(y, refs[ref_i])
         ssims.append(s)
         total_mse += (255.0**2) / (10 ** (db / 10.0))
         n_scored += 1
-        rows.append({"sample": name, "ref_index": ref_i + 1, "psnr_y_db": f"{db:.3f}",
+        # Scored at the delivered size too, when the encoder stepped down.
+        if native != (W, H):
+            ref_small = resize_y(refs[ref_i], native)
+            db_delivered = f"{psnr_y(raw, ref_small):.3f}"
+        else:
+            db_delivered = f"{db:.3f}"
+        rows.append({"sample": name, "ref_index": ref_i + 1,
+                     "delivered_res": f"{native[0]}x{native[1]}",
+                     "psnr_at_reference_db": f"{db:.3f}",
+                     "psnr_at_delivered_db": db_delivered,
                      "ssim_y": f"{s:.5f}", "margin_db": f"{margin:.3f}",
+                     "resampler": RESAMPLER_NAME,
                      "matched_by": how, "status": "ok"})
 
     ok = [r for r in rows if r["status"] == "ok"]
@@ -172,7 +236,7 @@ def main():
           f"sequence {sum(1 for r in ok if r['matched_by']=='sequence')})  "
           f"unscored {len(rows) - len(ok)}")
     if ok:
-        p = sorted(float(r["psnr_y_db"]) for r in ok)
+        p = sorted(float(r["psnr_at_reference_db"]) for r in ok)
         # ffmpeg averages the MSE across frames and converts once. Averaging per-frame
         # dB instead reads ~3 dB high on this content, which would look like a codec
         # result rather than an arithmetic choice.
