@@ -183,18 +183,18 @@ impl PeerTransport {
             || sdp.contains(" H264/90000")
             || sdp.contains(" H265/90000");
         if has_video {
-            let start_kbps = {
-                let inner = self.inner.lock().await;
-                Self::compute_start_bitrate_kbps(inner.max_send_bitrate_bps)
-            };
-            if let Some(start_kbps) = start_kbps {
+            let max_bps = { self.inner.lock().await.max_send_bitrate_bps };
+            let mut munged = sdp.clone();
+            if let Some(start_kbps) = Self::compute_start_bitrate_kbps(max_bps) {
                 log::info!("Initial offer: applying x-google-start-bitrate={} kbps", start_kbps);
-
-                let munged = Self::munge_x_google_start_bitrate(&sdp, start_kbps);
-                if munged != sdp {
-                    if let Ok(parsed) = SessionDescription::parse(&munged, offer.sdp_type()) {
-                        offer = parsed;
-                    }
+                munged = Self::munge_x_google_start_bitrate(&munged, start_kbps);
+            }
+            if Self::pin_bitrate_to_max() {
+                munged = Self::munge_min_bitrate_to_max(&munged, max_bps);
+            }
+            if munged != sdp {
+                if let Ok(parsed) = SessionDescription::parse(&munged, offer.sdp_type()) {
+                    offer = parsed;
                 }
             }
         }
@@ -348,7 +348,50 @@ impl PeerTransport {
             || codec.starts_with("H265/90000")
     }
 
+    /// Whether to pin the allocated bitrate to the configured maximum.
+    ///
+    /// Off unless explicitly set, so default behaviour is unchanged.
+    ///
+    /// Congestion control normally hands the encoder `min(estimate, max_bitrate)`. When
+    /// the estimate is the smaller term, the configured maximum stops being the
+    /// independent variable — a bitrate sweep whose cells all get the same estimate is
+    /// measuring the link, not the cells. Setting `x-google-min-bitrate` to the maximum
+    /// removes the estimate's ability to lower the allocation, which makes
+    /// `--max-bitrate` the operative setting again.
+    ///
+    /// This deliberately disables the mechanism that keeps a sender inside the link's
+    /// capacity. On a link that cannot carry the configured rate, the pacer queue grows,
+    /// latency climbs and packets are lost — which is the correct outcome to *observe*
+    /// and an unacceptable one to ship. It is a measurement mode, not a control law.
+    fn pin_bitrate_to_max() -> bool {
+        matches!(
+            std::env::var("LK_PIN_BITRATE_TO_MAX").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE")
+        )
+    }
+
+    /// Applies `x-google-min-bitrate` to every video codec, pinning the allocation floor.
+    ///
+    /// Returns the SDP unchanged when the caller has no configured maximum, since there
+    /// is then nothing to pin to.
+    fn munge_min_bitrate_to_max(sdp: &str, max_send_bitrate_bps: Option<u64>) -> String {
+        let Some(max_bps) = max_send_bitrate_bps else {
+            return sdp.to_string();
+        };
+        let kbps = (max_bps / 1000) as u32;
+        if kbps == 0 {
+            return sdp.to_string();
+        }
+        Self::munge_fmtp_video_param(sdp, "x-google-min-bitrate", kbps)
+    }
+
     fn munge_x_google_start_bitrate(sdp: &str, start_bitrate_kbps: u32) -> String {
+        Self::munge_fmtp_video_param(sdp, "x-google-start-bitrate", start_bitrate_kbps)
+    }
+
+    /// Sets `key=value` in the `a=fmtp:` line of every video codec, replacing any
+    /// existing value for that key and appending it when absent.
+    fn munge_fmtp_video_param(sdp: &str, key: &str, value: u32) -> String {
         // Detect what line ending the original SDP uses
         let uses_crlf = sdp.contains("\r\n");
         let eol = if uses_crlf { "\r\n" } else { "\n" };
@@ -383,18 +426,15 @@ impl PeerTransport {
                 let prefix = format!("a=fmtp:{pt} ");
                 if rewritten.starts_with(&prefix) {
                     // Replace if present; append if not present
-                    if let Some(pos) = rewritten.find("x-google-start-bitrate=") {
+                    let needle = format!("{key}=");
+                    if let Some(pos) = rewritten.find(&needle) {
                         // replace existing value up to next ';' or end
                         let after = &rewritten[pos..];
                         let end =
                             after.find(';').map(|i| pos + i).unwrap_or_else(|| rewritten.len());
-                        rewritten.replace_range(
-                            pos..end,
-                            &format!("x-google-start-bitrate={start_bitrate_kbps}"),
-                        );
+                        rewritten.replace_range(pos..end, &format!("{key}={value}"));
                     } else {
-                        rewritten
-                            .push_str(&format!(";x-google-start-bitrate={start_bitrate_kbps}"));
+                        rewritten.push_str(&format!(";{key}={value}"));
                     }
                     break;
                 }
@@ -431,9 +471,8 @@ impl PeerTransport {
                 let pt = it.next().unwrap_or("");
                 let codec = it.next().unwrap_or("");
                 if Self::is_video_codec(codec) && !pt.is_empty() && !pts_with_fmtp.contains(pt) {
-                    // Create fmtp line with x-google-start-bitrate
-                    let fmtp_line =
-                        format!("a=fmtp:{pt} x-google-start-bitrate={start_bitrate_kbps}");
+                    // Create the fmtp line this codec lacks, carrying the parameter.
+                    let fmtp_line = format!("a=fmtp:{pt} {key}={value}");
                     log::debug!("Creating fmtp line for {} (pt={}): {}", codec, pt, fmtp_line);
                     final_out.push(fmtp_line);
                 }
@@ -518,25 +557,37 @@ impl PeerTransport {
             || sdp.contains(" H264/90000")
             || sdp.contains(" H265/90000");
         if has_video {
+            let mut munged = sdp.clone();
             if let Some(start_kbps) = Self::compute_start_bitrate_kbps(inner.max_send_bitrate_bps) {
                 log::info!(
                     "Applying x-google-start-bitrate={} kbps (target_bps={:?})",
                     start_kbps,
                     inner.max_send_bitrate_bps
                 );
-
-                let munged = Self::munge_x_google_start_bitrate(&sdp, start_kbps);
-                if munged != sdp {
-                    log::debug!("SDP munged successfully for video codec");
-                    match SessionDescription::parse(&munged, offer.sdp_type()) {
-                        Ok(parsed) => offer = parsed,
-                        Err(e) => log::warn!(
-                            "Failed to parse munged SDP, falling back to original offer: {e}"
-                        ),
-                    }
-                } else {
-                    log::debug!("SDP munging produced no changes");
+                munged = Self::munge_x_google_start_bitrate(&munged, start_kbps);
+            }
+            // Applied independently of the start bitrate: the start value is skipped for
+            // low targets, but pinning must still take effect there.
+            if Self::pin_bitrate_to_max() {
+                log::warn!(
+                    "LK_PIN_BITRATE_TO_MAX: pinning x-google-min-bitrate to {:?} bps. \
+                     Congestion control can no longer lower the allocation; the sender may \
+                     exceed link capacity, and queueing delay and loss are expected on a \
+                     link that cannot carry it.",
+                    inner.max_send_bitrate_bps
+                );
+                munged = Self::munge_min_bitrate_to_max(&munged, inner.max_send_bitrate_bps);
+            }
+            if munged != sdp {
+                log::debug!("SDP munged successfully for video codec");
+                match SessionDescription::parse(&munged, offer.sdp_type()) {
+                    Ok(parsed) => offer = parsed,
+                    Err(e) => log::warn!(
+                        "Failed to parse munged SDP, falling back to original offer: {e}"
+                    ),
                 }
+            } else {
+                log::debug!("SDP munging produced no changes");
             }
         }
 
@@ -871,6 +922,39 @@ a=fmtp:98 profile-id=0;x-google-start-bitrate=1000\n";
         assert!(!out.contains("x-google-start-bitrate=1000"));
         // ensure only one occurrence
         assert_eq!(out.matches("x-google-start-bitrate=").count(), 1);
+    }
+
+    /// Pinning must set a floor on every video codec, so congestion control cannot
+    /// allocate below the configured maximum.
+    #[test]
+    fn pinning_sets_a_min_bitrate_on_every_video_codec() {
+        let sdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 98\r\na=rtpmap:96 VP8/90000\r\na=fmtp:96 max-fs=12288\r\na=rtpmap:98 H264/90000\r\na=fmtp:98 profile-level-id=42e01f\r\n";
+        let out = PeerTransport::munge_min_bitrate_to_max(sdp, Some(10_000_000));
+        assert!(out.contains("a=fmtp:96 max-fs=12288;x-google-min-bitrate=10000"), "{out}");
+        assert!(
+            out.contains("a=fmtp:98 profile-level-id=42e01f;x-google-min-bitrate=10000"),
+            "{out}"
+        );
+    }
+
+    /// With no configured maximum there is nothing to pin to, and the SDP must be
+    /// returned untouched rather than pinned to zero.
+    #[test]
+    fn pinning_without_a_configured_maximum_changes_nothing() {
+        let sdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\na=fmtp:96 max-fs=12288\r\n";
+        assert_eq!(PeerTransport::munge_min_bitrate_to_max(sdp, None), sdp);
+        assert_eq!(PeerTransport::munge_min_bitrate_to_max(sdp, Some(0)), sdp);
+    }
+
+    /// Start and min are independent keys: applying one must not overwrite the other,
+    /// which is what a single hardcoded key in the munger would have done.
+    #[test]
+    fn start_and_min_bitrate_coexist_in_one_fmtp_line() {
+        let sdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\na=fmtp:96 max-fs=12288\r\n";
+        let out = PeerTransport::munge_x_google_start_bitrate(sdp, 900);
+        let out = PeerTransport::munge_min_bitrate_to_max(&out, Some(10_000_000));
+        assert!(out.contains("x-google-start-bitrate=900"), "{out}");
+        assert!(out.contains("x-google-min-bitrate=10000"), "{out}");
     }
 
     #[test]
