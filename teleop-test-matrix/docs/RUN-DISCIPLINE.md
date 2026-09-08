@@ -916,3 +916,39 @@ grant rather than anything under test.
 An A/B whose arms run sequentially on this link measures the link. Any comparison
 must either interleave its arms and repeat, or match cells on the grant they
 actually received and discard those that cannot be matched.
+
+## 9. The startup order was the defect, and it looked obviously correct
+
+The SFU deletes a room once it has been empty for roughly 60 seconds. Our protocol
+was "subscriber up first, then publish", which guarantees exactly that condition:
+the subscriber joins an empty room and starts a garbage-collection clock against
+itself. When the publisher arrived late, the room had been deleted and the
+publisher created a *new* room instance with the same name and a different SID.
+
+From inside the subscriber this is indistinguishable from a receive fault. It is
+connected, its arguments are right, it has no participant filter, and it receives
+nothing — because it is attached to a room that no longer exists.
+
+Four runs died of this. One, `livecam-2500k`, sat in the manifest for a day as
+"cause NOT established". Every run that worked, worked because the publisher
+happened to start inside the window.
+
+> **Publish first, then subscribe.** The publisher needs no subscriber to start,
+> so the room is never empty and the clock never runs. Where the order cannot be
+> inverted, the subscriber must join within the empty-room timeout, which is
+> fragile and depends on pre-flight duration.
+
+Two things generalise past this SFU:
+
+- **A rig that works most of the time is evidence about your timing, not about
+  your protocol.** Both hosts held "subscriber first" from the first run and
+  neither questioned it, because it kept appearing to work.
+- **The assumption that never gets stated is the one that never gets checked.**
+  Startup order was never written down as a decision, so it was never a candidate
+  when runs failed. Every failure was investigated as a receive problem.
+
+The subscriber compounded it by not handling `RoomEvent::Disconnected` at all: it
+logged one line and waited indefinitely, and both of its liveness guards arm only
+once frames have arrived, so neither could fire on a session that never delivered
+one. That is the fourth guard in this programme to assume the session was still
+alive — after end-of-window, silence, and clean unpublish.
