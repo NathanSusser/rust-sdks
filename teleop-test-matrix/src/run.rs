@@ -294,12 +294,18 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
 
     let (pub_room, pub_events) =
         session::connect(&credentials, &args.room_name, &publisher_identity).await?;
-    let (sub_room, sub_events) =
-        session::connect(&credentials, &args.room_name, &subscriber_identity).await?;
+    // Publish-only skips the second connection entirely: no local receiver, so the media
+    // path is A -> SFU -> real subscriber rather than looping back onto this host.
+    let sub = if args.publish_only {
+        None
+    } else {
+        Some(session::connect(&credentials, &args.room_name, &subscriber_identity).await?)
+    };
+    let sub_room = sub.as_ref().map(|(room, _)| Arc::clone(room));
 
     // Both CSVs are timed from one origin so the two files share an x-axis in the report.
     let frame_csv_origin_us = clock.wall_us();
-    let subscriber_frames = match args.frame_csv_out.as_ref() {
+    let subscriber_frames = match args.frame_csv_out.as_ref().filter(|_| !args.publish_only) {
         Some(prefix) => {
             let path = frame_csv_path(prefix, "sub");
             Some(Mutex::new(SubscriberFrameLog::create(&path, frame_csv_origin_us).map_err(
@@ -436,14 +442,16 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
         Arc::clone(&shutdown),
     )));
 
-    tasks.push(tokio::spawn(subscriber_event_loop(
-        Arc::clone(&sub_room),
-        sub_events,
-        Arc::clone(&shared),
-        clock.clone(),
-        args.clone(),
-        Arc::clone(&shutdown),
-    )));
+    if let Some((room, events)) = sub {
+        tasks.push(tokio::spawn(subscriber_event_loop(
+            room,
+            events,
+            Arc::clone(&shared),
+            clock.clone(),
+            args.clone(),
+            Arc::clone(&shutdown),
+        )));
+    }
 
     let sampler = StatsSampler::new(
         args.clone(),
@@ -453,7 +461,7 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
         Arc::clone(&snapshots),
         video.track.clone(),
         audio.as_ref().map(|a| a.track.clone()),
-        Arc::clone(&sub_room),
+        sub_room.clone(),
         Arc::clone(&shutdown),
     );
     let sampler_result = sampler.run().await;
@@ -484,8 +492,10 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
     if let Err(e) = pub_room.close().await {
         log::warn!("publisher room close failed: {e}");
     }
-    if let Err(e) = sub_room.close().await {
-        log::warn!("subscriber room close failed: {e}");
+    if let Some(sub_room) = sub_room.as_ref() {
+        if let Err(e) = sub_room.close().await {
+            log::warn!("subscriber room close failed: {e}");
+        }
     }
 
     // Written after the last snapshot so its absence marks an incomplete run, and before

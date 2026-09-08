@@ -187,7 +187,7 @@ pub struct StatsSampler {
     writer: Arc<Mutex<JsonLinesWriter>>,
     video_track: LocalVideoTrack,
     audio_track: Option<LocalAudioTrack>,
-    subscriber_room: Arc<Room>,
+    subscriber_room: Option<Arc<Room>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -202,7 +202,7 @@ impl StatsSampler {
         writer: Arc<Mutex<JsonLinesWriter>>,
         video_track: LocalVideoTrack,
         audio_track: Option<LocalAudioTrack>,
-        subscriber_room: Arc<Room>,
+        subscriber_room: Option<Arc<Room>>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -454,7 +454,12 @@ impl StatsSampler {
     async fn remote_stats(&self) -> (Vec<livekit::webrtc::stats::RtcStats>, bool) {
         let mut merged = Vec::new();
         let mut rpc_failed = false;
-        for (_, participant) in self.subscriber_room.remote_participants() {
+        let Some(subscriber_room) = self.subscriber_room.as_ref() else {
+            // Publish-only: no local receiver exists, so there are no remote stats to
+            // merge. Not an error, and not an RPC failure.
+            return (merged, rpc_failed);
+        };
+        for (_, participant) in subscriber_room.remote_participants() {
             for (_, publication) in participant.track_publications() {
                 let Some(track) = publication.track() else {
                     continue;

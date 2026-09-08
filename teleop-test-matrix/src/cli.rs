@@ -414,6 +414,21 @@ pub struct Args {
     #[arg(long = "publisher-seq-log")]
     pub publisher_seq_log: Option<std::path::PathBuf>,
 
+    /// Publish only: do not open a second, local subscriber connection.
+    ///
+    /// The harness normally connects twice from one host, once to publish and once to
+    /// subscribe, so a single process measures both ends. That makes the media path
+    /// A -> SFU -> A, which is not the topology a deployment has: it puts an extra decode
+    /// and an extra downlink stream on the publishing host, and it measures a return leg
+    /// that no real receiver takes.
+    ///
+    /// With this set the host publishes and nothing else. Receive-side measurement comes
+    /// from a real subscriber on another machine, and `<prefix>.sub.csv` is not written --
+    /// there is no local receiver to write it. The snapshots keep every `video_out.*`
+    /// field and lose the `video_in.*` ones.
+    #[arg(long = "publish-only", default_value_t = false)]
+    pub publish_only: bool,
+
     /// Publish an audio track alongside video.
     #[arg(long, default_value_t = false)]
     pub audio: bool,
