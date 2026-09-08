@@ -511,6 +511,17 @@ struct PendingPaintSample {
     prepare_timestamp_us: u64,
 }
 
+/// Process exit status meaning "the track we were logging was unpublished".
+///
+/// Distinct from EXIT_PUBLISHER_INACTIVITY because it is a different ending and the
+/// manifest should say which. Silence means the publisher stopped sending; unpublish
+/// means it left deliberately. Collapsing them would be the same overloading that made
+/// status 0 ambiguous.
+const EXIT_TRACK_UNPUBLISHED: i32 = 4;
+
+/// Set when the run ended because our track went away. See STOPPED_BY_INACTIVITY.
+static TRACK_UNPUBLISHED: AtomicBool = AtomicBool::new(false);
+
 /// Process exit status meaning "the publisher went quiet", as distinct from a clean
 /// end-of-window exit.
 ///
@@ -1377,7 +1388,20 @@ async fn handle_track_subscribed(
                 }
                 break;
             }
+            // Our track went away. Before 5082a3e this simply broke the loop, which meant
+            // the inactivity branch below was never evaluated for the COMMON ending -- a
+            // publisher that finishes its run and unpublishes cleanly. The timeout only ever
+            // covered a publisher killed mid-stream, which is the failure that was simulated
+            // when testing it rather than the one that occurs. A subscriber then sat on a
+            // finished room for eight minutes holding a connection and a render window.
             if active_sid_stats.lock().as_ref() != Some(&my_sid_stats) {
+                if frames_arrived_stats.load(Ordering::Acquire) > 0 {
+                    TRACK_UNPUBLISHED.store(true, Ordering::Release);
+                    if !ctrl_c_stats.swap(true, Ordering::AcqRel) {
+                        warn!("Track unpublished after {} frames; ending the run.",
+                              frames_arrived_stats.load(Ordering::Acquire));
+                    }
+                }
                 break;
             }
 
@@ -2027,6 +2051,9 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     // the run script this run reached its end frame, which is the one thing it did not do.
     if STOPPED_BY_INACTIVITY.load(Ordering::Acquire) {
         std::process::exit(EXIT_PUBLISHER_INACTIVITY);
+    }
+    if TRACK_UNPUBLISHED.load(Ordering::Acquire) {
+        std::process::exit(EXIT_TRACK_UNPUBLISHED);
     }
 
     Ok(())

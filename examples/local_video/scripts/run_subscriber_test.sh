@@ -97,6 +97,15 @@ TIMING_FLAG=()
 # default so the documented invocation is unchanged. Measured cost of the buffer under
 # ~3.5 Mbps load: 8 ms at p50 and 124 ms at p95 on receive_to_gpu_complete, with no
 # reduction in stall-episode count.
+# --participant is a STRICT identity filter: a track from any other identity is
+# dropped and the run logs nothing, which is indistinguishable from "no publisher"
+# except by the row count. That cost a full paired run once. PARTICIPANT= (empty)
+# omits the flag entirely and takes whatever publishes, which is the safe choice
+# when the publisher's identity is not known for certain.
+PARTICIPANT="${PARTICIPANT-cam-1}"
+PARTICIPANT_FLAG=()
+[ -n "$PARTICIPANT" ] && PARTICIPANT_FLAG=(--participant "$PARTICIPANT")
+
 LOWLAT_FLAG=()
 [ "${LOW_LATENCY:-0}" = "1" ] && LOWLAT_FLAG=(--low-latency)
 
@@ -146,7 +155,7 @@ UPLINK_START="$(measure_uplink_mbps)"
 MANIFEST="${OUTDIR}/subscriber.manifest.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAN_ARGV="$(printf '%s\037' "$BIN" --url "$URL" --room-name "$ROOM" --identity viewer-1 \
-  --participant cam-1 "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
+  "${PARTICIPANT_FLAG[@]}" "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" --log-end-frame-id "$END_FRAME")"
 MAN_PATH="$MANIFEST" MAN_ARGV="$MAN_ARGV" MAN_DIR="$SCRIPT_DIR" \
 MAN_START="$START_FRAME" MAN_END="$END_FRAME" MAN_FPS="$FPS" MAN_UPLINK_START="$UPLINK_START" python3 - <<'PYEOF'
@@ -250,7 +259,7 @@ echo "  start the publisher now (or within ~30s)"
   --url "$URL" \
   --room-name "$ROOM" \
   --identity viewer-1 \
-  --participant cam-1 \
+  "${PARTICIPANT_FLAG[@]}" \
   "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" \
   --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" \
@@ -314,6 +323,8 @@ outcome = {
 _status = os.environ.get("MAN_STATUS", "")
 if _status == "3":
     outcome["exit_reason"] = "publisher_inactivity_timeout"
+elif _status == "4":
+    outcome["exit_reason"] = "track_unpublished"
 elif _status == "0":
     outcome["exit_reason"] = "end_frame_reached" if rows > 0 else "exited_clean_no_rows"
 elif _status in ("143", "130"):
