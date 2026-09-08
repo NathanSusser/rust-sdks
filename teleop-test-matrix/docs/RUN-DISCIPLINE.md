@@ -874,3 +874,45 @@ that is stationary across forty minutes — which this programme measured moving
 2.4× in minutes. Those are design decisions for the operator, not repairs, and
 they are recorded in that document's §0.4 rather than fixed.
 
+
+---
+
+## 7. A capability can vanish from a build without any source changing
+
+`webrtc-sys/build.rs` compiles the NVENC encoders only if `cuda.h` is found under
+`$CUDA_HOME/include`, defaulting to `/usr/local/cuda`. On this machine `cuda.h`
+lives in `/usr/include`, so a build without `CUDA_HOME=/usr` silently produces a
+binary with **no hardware encoder at all**. The only signal is one `cargo:warning`
+among hundreds of lines.
+
+Three runs were completed and analysed on OpenH264 before anyone noticed. One of
+them showed a four-rung resolution staircase, which is a *software* encoder's
+quality scaler — the hardware paths all set `ScalingSettings::kOff` — and would
+have been pooled with the NVENC staircase runs.
+
+`CUDA_HOME` is not declared in `cargo:rerun-if-env-changed`, so setting it does
+not invalidate the cached build. Correcting the variable appeared to change
+nothing until `build.rs` was touched.
+
+> **Read the encoder implementation out of the run's own stats, every run.**
+> `video_out.encoder_implementation` is one string and it is the difference
+> between measuring the deliverable's encoder and measuring a fallback. This is
+> the same rule as reading the source out of the run's own log, and it failed the
+> same way.
+
+**Related defect, not yet fixed:** `--encoder nvenc` silently fell back to
+OpenH264. The harness deliberately makes an unopenable camera fatal, because "a
+run labelled `camera` that actually ran the pattern would be pooled with pattern
+runs and could not be detected afterwards." An explicitly requested encoder
+deserves exactly the same treatment and does not currently get it.
+
+## 8. On this link, sequential runs are not a comparison
+
+Four runs minutes apart, same room, same content, same cap, differed in their
+congestion-control grant by **7.3x** — 0.492, 0.548, 0.732 and 3.600 Mbps. Every
+run spent essentially its whole grant (ratios 0.74 to 1.01), and QP tracked the
+grant rather than anything under test.
+
+An A/B whose arms run sequentially on this link measures the link. Any comparison
+must either interleave its arms and repeat, or match cells on the grant they
+actually received and discard those that cannot be matched.

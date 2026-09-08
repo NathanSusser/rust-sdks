@@ -55,6 +55,11 @@ pub enum RunError {
     Output(crate::writer::WriteError),
     /// The subscriber never saw the publisher's video track.
     NoSubscription,
+    /// The publisher's own video track never reported outbound stats.
+    ///
+    /// The `--publish-only` counterpart of [`Self::NoSubscription`]: with no local
+    /// receiver, the send side is the only side this process can check.
+    NoOutboundVideo,
     /// The session ended before the run duration elapsed.
     SessionLost(String),
     /// A camera was requested and could not be opened.
@@ -78,6 +83,9 @@ impl std::fmt::Display for RunError {
             Self::Output(e) => write!(f, "{e}"),
             Self::NoSubscription => {
                 write!(f, "subscriber never received the published video track")
+            }
+            Self::NoOutboundVideo => {
+                write!(f, "publisher never reported outbound video stats")
             }
             Self::SessionLost(reason) => write!(f, "session lost mid-run: {reason}"),
             Self::Camera(e) => write!(f, "{e}"),
@@ -513,7 +521,14 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
     if let Some(reason) = shared.session_lost.lock().clone() {
         return Err(RunError::SessionLost(reason));
     }
-    if !sampler_result.saw_subscription {
+    // Under `--publish-only` there is no local receiver, so `saw_subscription` is
+    // false by construction and would fail every such run. The send-side counterpart
+    // is the liveness check that actually applies.
+    if args.publish_only {
+        if !sampler_result.saw_outbound_video {
+            return Err(RunError::NoOutboundVideo);
+        }
+    } else if !sampler_result.saw_subscription {
         return Err(RunError::NoSubscription);
     }
 
@@ -1027,6 +1042,19 @@ mod tests {
     #[test]
     fn missing_subscription_is_an_error_not_an_empty_run() {
         assert!(RunError::NoSubscription.to_string().contains("never received"));
+    }
+
+    /// The two liveness failures must be distinguishable in the record. A publish-only
+    /// run has no local receiver, so reporting its failure as "the subscriber never
+    /// received the track" would name a subscriber that was never supposed to exist and
+    /// send the reader looking for a receive-side fault that cannot be there.
+    #[test]
+    fn a_publish_only_liveness_failure_does_not_blame_a_subscriber() {
+        let publish_only = RunError::NoOutboundVideo.to_string();
+        assert!(publish_only.contains("outbound"));
+        assert!(!publish_only.contains("subscriber"));
+        assert_ne!(publish_only, RunError::NoSubscription.to_string());
+        assert!(!RunError::NoOutboundVideo.is_retryable());
     }
 
     /// Only a failure to connect may be retried. A lost session or an absent

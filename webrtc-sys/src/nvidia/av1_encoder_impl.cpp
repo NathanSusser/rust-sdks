@@ -7,6 +7,7 @@
 
 #include "../av1_bitstream.h"
 #include "i420_buffer_cuda.h"
+#include "nvenc_rate_control.h"
 #include "api/video/video_codec_constants.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
 #include "modules/video_coding/include/video_codec_interface.h"
@@ -197,6 +198,21 @@ int32_t NvidiaAV1EncoderImpl::InitEncode(
       ClampToUint32(vbv_buffer_size);
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+
+  // See kNvencTargetQualityEnv. The target is on the 0-51 QP scale for every
+  // codec -- NVENC maps it internally -- so it is NOT the AV1 qindex, and an
+  // AV1 run and an H.264 run given the same value are asking for comparable
+  // quality rather than the same numeric quantiser.
+  const uint8_t target_quality = ReadNvencTargetQualityFromEnv();
+  if (target_quality != 0) {
+    nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+    nv_encode_config_.rcParams.targetQuality = target_quality;
+    nv_encode_config_.rcParams.targetQualityLSB = 0;
+    nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
+    RTC_LOG(LS_INFO) << "NVENC AV1 rate control: VBR at target quality "
+                     << static_cast<int>(target_quality) << " (QP scale), "
+                     << "capped at " << configuration_.target_bps << " bps";
+  }
 
   try {
     encoder_->CreateEncoder(&nv_initialize_params_);

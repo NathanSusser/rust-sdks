@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <string>
 
 #include "i420_buffer_cuda.h"
+#include "nvenc_rate_control.h"
 #include "absl/strings/match.h"
 #include "absl/types/optional.h"
 #include "api/video/video_codec_constants.h"
@@ -231,6 +233,20 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
       5;
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+
+  // See kNvencTargetQualityEnv. VBR lets the bitrate float toward what the
+  // target quantiser costs; maxBitRate keeps it inside the granted bitrate, and
+  // SetRates() re-applies that ceiling on every congestion-control update.
+  const uint8_t target_quality = ReadNvencTargetQualityFromEnv();
+  if (target_quality != 0) {
+    nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+    nv_encode_config_.rcParams.targetQuality = target_quality;
+    nv_encode_config_.rcParams.targetQualityLSB = 0;
+    nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
+    RTC_LOG(LS_INFO) << "NVENC H264 rate control: VBR at target quality "
+                     << static_cast<int>(target_quality) << " (QP scale), "
+                     << "capped at " << configuration_.target_bps << " bps";
+  }
 
   try {
     encoder_->CreateEncoder(&nv_initialize_params_);

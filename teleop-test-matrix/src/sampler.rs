@@ -163,6 +163,13 @@ pub struct SamplerResult {
     /// Whether a remote video track was ever subscribed. A run that never saw one
     /// measured nothing on the receive side.
     pub saw_subscription: bool,
+    /// Whether the local video track ever reported outbound stats.
+    ///
+    /// Under `--publish-only` there is no local receiver, so `saw_subscription` can
+    /// never become true and cannot be the liveness check. This is its publisher-side
+    /// counterpart: a run that never sent video measured nothing on the send side
+    /// either, and must not be reported as a success.
+    pub saw_outbound_video: bool,
     /// Last observed negotiated codec MIME type, for the run-level record.
     pub negotiated_codec_mime: Option<String>,
     /// Last observed encoder implementation string.
@@ -255,6 +262,9 @@ impl StatsSampler {
                 .await;
             if snapshot.video_in.is_some() {
                 result.saw_subscription = true;
+            }
+            if snapshot.video_out.is_some() {
+                result.saw_outbound_video = true;
             }
 
             match snapshot.to_jsonl() {
