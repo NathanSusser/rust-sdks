@@ -457,7 +457,19 @@ struct Args {
 struct SampledFrame {
     frame_id: u32,
     capture_timestamp_us: u64,
-    buffer: livekit::webrtc::video_frame::I420Buffer,
+    width: u32,
+    height: u32,
+    /// Planes copied out on the sink thread, NOT a handle into a decoder buffer.
+    ///
+    /// The first version sent an I420Buffer handle and let the writer read its planes
+    /// later. `to_i420()` on an already-I420 frame is a refcount bump, so that cost
+    /// +0.001 ms at the tap -- and the cheapness was the bug. The decoder recycles its
+    /// buffers, so by the time the writer read the planes they had been overwritten by
+    /// later frames. Each file held real pixels from several moments at once: structure
+    /// intact, no decoder error, every counter clean, and consecutive samples correlating
+    /// at 0.32-0.71 where real video sits at 0.99. Copying here costs a memcpy on the
+    /// measured path and is the price of the samples being what they claim to be.
+    planes: Vec<u8>,
 }
 
 fn record_received_frame_sample(
@@ -508,20 +520,21 @@ fn spawn_frame_sampler(dir: PathBuf, every: u32) -> anyhow::Result<FrameSampler>
         "frame_id,capture_timestamp_us,width,height,stride_y,stride_u,stride_v,bytes_written",
     )?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SampledFrame>();
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
+    // A plain task, not spawn_blocking. The sampler handle is a process-wide static, so its
+    // Sender never drops and recv() never returns None -- and a spawn_blocking thread in that
+    // state keeps the runtime alive forever, so the process logs "shutting down" and then
+    // hangs. A regular task is dropped when the runtime shuts down. Writes are synchronous
+    // inside it, which is fine at one 3 MB frame per second and keeps the ordering obvious.
+    tokio::spawn(async move {
         let mut written = 0_u64;
-        while let Some(sample) = rt.block_on(rx.recv()) {
-            let (w, h) = (sample.buffer.chroma_width() * 2, sample.buffer.chroma_height() * 2);
-            let (sy, su, sv) = sample.buffer.strides();
-            let (dy, du, dv) = sample.buffer.data();
+        while let Some(sample) = rx.recv().await {
+            let (w, h) = (sample.width, sample.height);
+            let (sy, su, sv) = (w, w / 2, w / 2);
             let path = dir.join(format!("{:08}.i420", sample.frame_id));
-            let bytes = dy.len() + du.len() + dv.len();
+            let bytes = sample.planes.len();
             let ok = std::fs::File::create(&path).and_then(|mut f| {
                 use std::io::Write;
-                f.write_all(dy)?;
-                f.write_all(du)?;
-                f.write_all(dv)
+                f.write_all(&sample.planes)
             });
             if let Err(e) = ok {
                 warn!("frame sampler: writing {} failed: {e}", path.display());
@@ -554,7 +567,19 @@ impl FrameSampler {
             return;
         }
         let buffer = frame.buffer.to_i420();
-        let _ = self.tx.send(SampledFrame { frame_id, capture_timestamp_us, buffer });
+        let (w, h) = (buffer.chroma_width() * 2, buffer.chroma_height() * 2);
+        let (dy, du, dv) = buffer.data();
+        let mut planes = Vec::with_capacity(dy.len() + du.len() + dv.len());
+        planes.extend_from_slice(dy);
+        planes.extend_from_slice(du);
+        planes.extend_from_slice(dv);
+        let _ = self.tx.send(SampledFrame {
+            frame_id,
+            capture_timestamp_us,
+            width: w,
+            height: h,
+            planes,
+        });
     }
 }
 
@@ -567,6 +592,14 @@ struct SharedYuv {
     codec: String,
     codec_implementation: String,
     bitrate_mbps: Option<f64>,
+    /// Mean quantiser of frames decoded in the last stats interval.
+    ///
+    /// Derived as delta(qp_sum)/delta(frames_decoded) rather than from the cumulative
+    /// totals, so it describes the interval rather than the run to date. This is the
+    /// receive-side counterpart to the publisher's encoder QP: comparing them is the
+    /// only "quality sent versus quality received" measure that needs no reference
+    /// frames, no pixel scoring and no sampling.
+    receive_qp: Option<f64>,
     fps: f32,
 }
 
@@ -896,6 +929,41 @@ struct ReceiveBitrateSnapshot {
     at: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct ReceiveQpSnapshot {
+    qp_sum: u64,
+    frames_decoded: u32,
+}
+
+/// Records the mean QP of frames decoded since the previous poll.
+///
+/// A codec's QP scale is its own -- H.264 is 0-51 and AV1 0-255 -- so this is only
+/// comparable within a codec, and never across one. It is recorded per interval
+/// because a run-to-date mean hides exactly the thing worth seeing: the encoder
+/// quantising harder as the link degrades.
+fn update_receive_qp_from_stats(
+    stats: &[livekit::webrtc::stats::RtcStats],
+    previous: &mut Option<ReceiveQpSnapshot>,
+    shared: &Arc<Mutex<SharedYuv>>,
+) {
+    let Some(inbound) = find_video_inbound_stats(stats) else {
+        return;
+    };
+    let current = ReceiveQpSnapshot {
+        qp_sum: inbound.inbound.qp_sum,
+        frames_decoded: inbound.inbound.frames_decoded,
+    };
+    let qp = previous.and_then(|prev| {
+        let frames = current.frames_decoded.checked_sub(prev.frames_decoded)?;
+        let qp_delta = current.qp_sum.checked_sub(prev.qp_sum)?;
+        (frames > 0).then(|| qp_delta as f64 / frames as f64)
+    });
+    *previous = Some(current);
+    if let Some(qp) = qp {
+        shared.lock().receive_qp = Some(qp);
+    }
+}
+
 fn seconds_to_ms(seconds: f64) -> f64 {
     seconds * 1_000.0
 }
@@ -1083,12 +1151,13 @@ fn update_frame_log_stream_profile(
     shared: &Arc<Mutex<SharedYuv>>,
     subscriber_timing: &SubscriberTimingHandle,
 ) {
-    let (width, height, bitrate_mbps, codec, decoder_implementation) = {
+    let (width, height, bitrate_mbps, receive_qp, codec, decoder_implementation) = {
         let shared = shared.lock();
         (
             shared.width,
             shared.height,
             shared.bitrate_mbps,
+            shared.receive_qp,
             shared.codec.clone(),
             shared.codec_implementation.clone(),
         )
@@ -1097,6 +1166,7 @@ fn update_frame_log_stream_profile(
         width,
         height,
         bitrate_mbps,
+        receive_qp,
         &codec,
         &decoder_implementation,
     );
@@ -1197,6 +1267,7 @@ mod tests {
     #[test]
     fn subscriber_diagnostics_show_status_without_timing() {
         let shared = Arc::new(Mutex::new(SharedYuv {
+            receive_qp: None,
             room_name: "video-room".to_string(),
             self_identity: "viewer".to_string(),
             remote_identity: Some("publisher".to_string()),
@@ -1470,6 +1541,7 @@ async fn handle_track_subscribed(
         let mut logged_initial = false;
         let mut jitter_buffer_snapshot = None;
         let mut receive_bitrate_snapshot = None;
+        let mut receive_qp_snapshot = None;
         let mut last_jitter_buffer_log =
             Instant::now().checked_sub(Duration::from_secs(5)).unwrap_or_else(Instant::now);
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -1534,6 +1606,7 @@ async fn handle_track_subscribed(
                         &mut receive_bitrate_snapshot,
                         &shared_stats,
                     );
+                    update_receive_qp_from_stats(&stats, &mut receive_qp_snapshot, &shared_stats);
                     update_frame_log_quality(&stats, &subscriber_timing_stats);
                     update_frame_log_stream_profile(&shared_stats, &subscriber_timing_stats);
                     update_simulcast_quality_from_stats(&stats, &simulcast_stats);
@@ -1565,6 +1638,7 @@ fn clear_hud_and_simulcast(
         s.codec.clear();
         s.codec_implementation.clear();
         s.bitrate_mbps = None;
+        s.receive_qp = None;
         s.fps = 0.0;
         s.remote_identity = None;
     }
@@ -2055,6 +2129,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         remote_identity: None,
         width: 0,
         height: 0,
+        receive_qp: None,
         codec: String::new(),
         codec_implementation: String::new(),
         bitrate_mbps: None,

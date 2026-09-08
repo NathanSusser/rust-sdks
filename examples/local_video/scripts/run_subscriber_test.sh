@@ -106,6 +106,14 @@ PARTICIPANT="${PARTICIPANT-cam-1}"
 PARTICIPANT_FLAG=()
 [ -n "$PARTICIPANT" ] && PARTICIPANT_FLAG=(--participant "$PARTICIPANT")
 
+# Decoded-frame sampling for offline PSNR/SSIM. Off unless SAMPLE_FRAMES_DIR is set.
+# Sampling is keyed on frame ID, not arrival count, so a dropped frame leaves a hole
+# rather than shifting every later sample -- see subscriber.rs for why that matters.
+SAMPLE_FLAG=()
+if [ -n "${SAMPLE_FRAMES_DIR:-}" ]; then
+  SAMPLE_FLAG=(--sample-frames-dir "$SAMPLE_FRAMES_DIR" --sample-every "${SAMPLE_EVERY:-30}")
+fi
+
 LOWLAT_FLAG=()
 [ "${LOW_LATENCY:-0}" = "1" ] && LOWLAT_FLAG=(--low-latency)
 
@@ -155,7 +163,7 @@ UPLINK_START="$(measure_uplink_mbps)"
 MANIFEST="${OUTDIR}/subscriber.manifest.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAN_ARGV="$(printf '%s\037' "$BIN" --url "$URL" --room-name "$ROOM" --identity viewer-1 \
-  "${PARTICIPANT_FLAG[@]}" "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
+  "${PARTICIPANT_FLAG[@]}" "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" "${SAMPLE_FLAG[@]}" --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" --log-end-frame-id "$END_FRAME")"
 MAN_PATH="$MANIFEST" MAN_ARGV="$MAN_ARGV" MAN_DIR="$SCRIPT_DIR" \
 MAN_START="$START_FRAME" MAN_END="$END_FRAME" MAN_FPS="$FPS" MAN_UPLINK_START="$UPLINK_START" python3 - <<'PYEOF'
@@ -259,7 +267,7 @@ echo "  start the publisher now (or within ~30s)"
   --url "$URL" \
   --room-name "$ROOM" \
   --identity viewer-1 \
-  "${PARTICIPANT_FLAG[@]}" \
+  "${PARTICIPANT_FLAG[@]}" "${SAMPLE_FLAG[@]}" \
   "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" \
   --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" \

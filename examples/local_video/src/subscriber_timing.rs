@@ -126,6 +126,7 @@ impl SubscriberTimingHandle {
         width: u32,
         height: u32,
         bitrate_mbps: Option<f64>,
+        receive_qp: Option<f64>,
         codec: &str,
         decoder_implementation: &str,
     ) {
@@ -134,6 +135,7 @@ impl SubscriberTimingHandle {
                 width,
                 height,
                 bitrate_mbps,
+                receive_qp,
                 codec: csv_text(codec),
                 decoder_implementation: csv_text(decoder_implementation),
             });
@@ -421,7 +423,7 @@ impl SubscriberTimingState {
     }
 }
 
-const SUBSCRIBER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,webrtc_receive_timestamp_us,decoder_upload_timestamp_us,decoder_output_timestamp_us,frame_sink_timestamp_us,frame_selected_timestamp_us,frame_prepare_timestamp_us,frame_draw_encoded_timestamp_us,frame_gpu_complete_timestamp_us,exposure_to_receive_ms,receive_and_assembly_ms,decode_ms,render_ms,receive_to_decode_ms,decode_to_sink_ms,sink_to_select_ms,select_to_prepare_ms,prepare_to_draw_encoded_ms,draw_encoded_to_gpu_complete_ms,receive_to_gpu_complete_ms,e2e_to_gpu_complete_ms,frame_id_gap,gpu_complete_interval_ms,packets_lost,frames_dropped,freeze_count,total_freeze_duration_ms,frame_width,frame_height,receive_bitrate_mbps,codec,decoder_implementation";
+const SUBSCRIBER_CSV_HEADER: &str = "sample,elapsed_ms,frame_id,capture_timestamp_us,webrtc_receive_timestamp_us,decoder_upload_timestamp_us,decoder_output_timestamp_us,frame_sink_timestamp_us,frame_selected_timestamp_us,frame_prepare_timestamp_us,frame_draw_encoded_timestamp_us,frame_gpu_complete_timestamp_us,exposure_to_receive_ms,receive_and_assembly_ms,decode_ms,render_ms,receive_to_decode_ms,decode_to_sink_ms,sink_to_select_ms,select_to_prepare_ms,prepare_to_draw_encoded_ms,draw_encoded_to_gpu_complete_ms,receive_to_gpu_complete_ms,e2e_to_gpu_complete_ms,frame_id_gap,gpu_complete_interval_ms,packets_lost,frames_dropped,freeze_count,total_freeze_duration_ms,frame_width,frame_height,receive_bitrate_mbps,receive_qp,codec,decoder_implementation";
 
 #[derive(Clone, Copy)]
 struct InboundQualitySnapshot {
@@ -440,6 +442,11 @@ struct StreamProfileSnapshot {
     width: u32,
     height: u32,
     bitrate_mbps: Option<f64>,
+    /// Mean quantiser of frames decoded in the last stats interval, from inbound-rtp
+    /// `qp_sum`/`frames_decoded`. The receive-side counterpart to the publisher's
+    /// encoder QP; comparing the two is a sent-versus-received quality measure that
+    /// needs no reference frames and never touches a decoded buffer.
+    receive_qp: Option<f64>,
     codec: String,
     decoder_implementation: String,
 }
@@ -515,7 +522,7 @@ impl SubscriberCsvLogger {
 
         let result = writeln!(
             self.writer,
-            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.sample_count,
             frame_gpu_complete_timestamp_us.saturating_sub(first_gpu_complete_timestamp_us) as f64
                 / 1_000.0,
@@ -580,6 +587,7 @@ impl SubscriberCsvLogger {
             CsvOption(profile.as_ref().map(|profile| profile.width)),
             CsvOption(profile.as_ref().map(|profile| profile.height)),
             CsvFloat(profile.as_ref().and_then(|profile| profile.bitrate_mbps)),
+            CsvFloat(profile.as_ref().and_then(|profile| profile.receive_qp)),
             CsvOption(profile.as_ref().map(|profile| profile.codec.as_str())),
             CsvOption(profile.as_ref().map(|profile| profile.decoder_implementation.as_str())),
         );
@@ -1237,6 +1245,7 @@ mod tests {
             .expect("logger should be creatable");
         // A comma in a stats string would otherwise shift every later column.
         logger.profile = Some(StreamProfileSnapshot {
+            receive_qp: Some(24.5),
             width: 1920,
             height: 1080,
             bitrate_mbps: Some(4.5),
