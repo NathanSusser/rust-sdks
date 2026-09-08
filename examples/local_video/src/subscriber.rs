@@ -511,6 +511,17 @@ struct PendingPaintSample {
     prepare_timestamp_us: u64,
 }
 
+/// How long the subscriber waits for a frame before concluding the publisher is gone.
+///
+/// Its only other exit is reaching `--log-end-frame-id`, which cannot fire if the
+/// publisher stops short of that ID -- and it stops short whenever its own window
+/// ends on a frame that was never delivered. A run at 10 fps ended seven IDs below
+/// the bound and the process then waited indefinitely, holding a connection and a
+/// render window into the next run. Ten seconds is far longer than any stall this
+/// rig has recorded (the worst was 2.4 s) and far shorter than a person will wait
+/// before assuming the run is finished.
+const PUBLISHER_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(10);
+
 const GPU_POLL_TIMEOUT: Duration = Duration::from_millis(5);
 const GPU_POLL_QUEUE_EMPTY_RETRY_DELAY: Duration = Duration::from_micros(100);
 
@@ -1203,6 +1214,10 @@ async fn handle_track_subscribed(
     let repaint_ctx_sink = repaint_ctx.clone();
     let subscriber_timing_sink = subscriber_timing.clone();
     let channel_history_sink = channel_history.clone();
+    // Counts frames handed to the sink. The 1 Hz stats task watches it for silence;
+    // a counter is used rather than a timestamp so the sink stays a single atomic add.
+    let frames_arrived = Arc::new(AtomicU64::new(0));
+    let frames_arrived_sink = frames_arrived.clone();
     // Initialize simulcast state for this publication
     {
         let mut sc = simulcast.lock();
@@ -1274,6 +1289,7 @@ async fn handle_track_subscribed(
             s.height = h;
             video_size_sink.store(w, h);
             frame_slot_sink.store(frame);
+            frames_arrived_sink.fetch_add(1, Ordering::Release);
 
             if let Some(ctx) = repaint_ctx_sink.get() {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -1305,6 +1321,7 @@ async fn handle_track_subscribed(
     });
 
     let ctrl_c_stats = ctrl_c_received.clone();
+    let frames_arrived_stats = frames_arrived.clone();
     let active_sid_stats = active_sid.clone();
     let my_sid_stats = sid.clone();
     let simulcast_stats = simulcast.clone();
@@ -1318,9 +1335,29 @@ async fn handle_track_subscribed(
             Instant::now().checked_sub(Duration::from_secs(5)).unwrap_or_else(Instant::now);
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_frame_count = 0u64;
+        let mut last_progress = Instant::now();
 
         loop {
             if ctrl_c_stats.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Stop if the publisher has gone quiet. Only armed once frames have
+            // actually arrived, so waiting for a publisher that has not started yet
+            // is still unbounded -- that wait is intentional and an operator controls it.
+            let seen = frames_arrived_stats.load(Ordering::Acquire);
+            if seen != last_frame_count {
+                last_frame_count = seen;
+                last_progress = Instant::now();
+            } else if seen > 0 && last_progress.elapsed() >= PUBLISHER_INACTIVITY_TIMEOUT {
+                if !ctrl_c_stats.swap(true, Ordering::AcqRel) {
+                    warn!(
+                        "No frame for {:?} after {seen} frames; publisher appears to have \
+                         stopped short of --log-end-frame-id. Ending the run.",
+                        PUBLISHER_INACTIVITY_TIMEOUT
+                    );
+                }
                 break;
             }
             if active_sid_stats.lock().as_ref() != Some(&my_sid_stats) {
