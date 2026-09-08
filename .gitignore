@@ -13,4 +13,11 @@ __pycache__
 # either side produces conflicts in content that cannot be merged.
 examples/local_video/scripts/results/
 examples/local_video/scripts/results-*/
+
+# The consolidated archive is the same data in buckets, so it is ignored for the
+# same reason. Its two index files are not data and are the committed record of
+# what every run was.
+/results/*
+!/results/MANIFEST.csv
+!/results/README.md
 llvm.sh

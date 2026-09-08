@@ -1,0 +1,27 @@
+run_id,date_utc,bucket,source,codec,geometry,fps,cap_mbps,link,a_pub_rows,a_sub_rows,b_sub_rows,delivered_mbps,delivered_fps,res_steps,validity,note
+round4,2026-09-04T12:27,01-baseline-and-calibration,bars (inferred),h264,unknown,30,unknown,5G,3601,,0,,,,partial,"pre-manifest; no argv record. B's subscriber wrote zero rows, cause never established"
+round5a,2026-09-04T15:08,01-baseline-and-calibration,bars,h264,1280x720,30,3.0,5G,3601,,ok,0.37,30.0,0,valid,early baseline; publisher-only on A
+round5b,2026-09-04T15:28,01-baseline-and-calibration,bars (inferred),h264,1280x720,30,unknown,5G,3601,3544,3544,0.36,30.0,0,valid,"the control run; results/ held a duplicate of this subscriber CSV plus B's PDF, folded in here"
+probe,2026-09-04T15:27,01-baseline-and-calibration,bars,h264,1920x1080,30,8.0,5G,401,,,,,,calibration,"uplink ramp and ceiling probing; p.csv and ramp.csv are the probe series, not a run"
+av1,2026-09-04T14:50,02-encoder-probes,bars,av1,1280x720,30,2.1,5G,301,,,,,,probe,10 s config probe; not a measurement run
+h264nvenc,2026-09-04T14:55,02-encoder-probes,bars,h264,1280x720,30,3.0,5G,301,,,,,,probe,10 s config probe; not a measurement run
+noprev,2026-09-04T15:33,02-encoder-probes,noise,h264,1280x720,30,15.0,5G,857,,,,,,probe,preview-window-off probe
+a1,2026-09-04T16:44,03-resolution-staircase-noise,noise,h264,640x360,30,10.0,5G,3568,3475,ok,3.19,29.0,2,valid,collapsed to 320x180
+a1r1,2026-09-04T17:36,03-resolution-staircase-noise,noise,h264,640x360,30,10.0,5G,3505,,ok,1.46,28.3,2,valid,"repeat of a1; A holds the publisher half (B believed it did not)"
+a2,2026-09-04T16:53,03-resolution-staircase-noise,noise,h264,960x540,30,10.0,5G,3522,3463,ok,3.83,28.9,3,valid,collapsed and oscillated between rungs
+a2off,2026-09-04T17:01,03-resolution-staircase-noise,noise,h264,960x540,30,10.0,5G,3467,3342,ok,4.71,27.9,3,valid,jitter-buffer-off pair of a2
+a3,2026-09-04T17:10,03-resolution-staircase-noise,noise,h264,1920x1080,30,10.0,5G,3493,3446,ok,9.59,28.7,4,valid,"THE staircase run; terminal rung 640x360, 1.39 bpp"
+r4,2026-09-06T14:11,03-resolution-staircase-noise,noise,h264,1920x1080,30,10.0,5G,3414,3413,ok,10.02,28.5,3,valid,"A3 replication on 2.5x the uplink; same rungs, same terminal rung, 1.45 bpp"
+r2,2026-09-06T13:32,04-cheap-content-control-bars,bars,h264,1920x1080,30,10.0,5G,3596,0,0,,,0,recv-void,"publisher half sound; both subscribers wrote zero rows (locked Wayland). Kept as the record of a voided run whose health counters all read normal"
+r2p,2026-09-06T14:04,04-cheap-content-control-bars,bars,h264,1920x1080,30,10.0,5G,3594,3588,ok,0.52,30.0,0,valid,"cross-validation at 100.2% publisher-outbound vs subscriber-inbound; encoder undershoots its grant on cheap content"
+r5av1,2026-09-06T18:09,05-codec-av1,noise,av1,1920x1080,30,10.0,5G,1217,1214,ok,9.90,10.1,0,superseded,"ran with qp_ = -1; r6 repeats it post-fix and the two are indistinguishable"
+r6,2026-09-06T18:20,05-codec-av1,noise,av1,1920x1080,30,10.0,5G,1222,1221,ok,9.91,10.2,0,valid,"post QP-fix; 10 fps on noise is the encoder's throughput limit, not a defect of the fix"
+r7,2026-09-08T10:33,05-codec-av1,bars,av1,1920x1080,30,10.0,5G,3596,3586,ok,0.12,29.9,0,valid,"AV1 healthy at 30 fps on cheap content; uplink fell 12.0 -> 1.9 Mbps during the run and the run survived it"
+livecam-smoke,2026-09-08T13:11,06-live-camera,live camera (RTSP),h264,1600x1300,30,unknown,5G,ok,ok,,,,,smoke,connectivity check for the RTSP source
+livecam-2500k,2026-09-08T13:18,06-live-camera,live camera (RTSP),h264,1600x1300,30,2.5,5G,ok,ok,0,,,0,recv-void,"A's halves are sound; B received nothing and the cause is NOT established"
+livecam-2500k-b,2026-09-08T13:24,06-live-camera,live camera (RTSP),h264,1600x1300,30,2.5,5G,ok,ok,ok,2.51,29.1,0,valid,"HEADLINE: real content at production geometry, zero resolution changes, zero loss, decode p50 2.65 ms, PTP-synced cross-host"
+arm1,2026-09-04T20:11,07-degraded-uplink,noise,h264,1920x1080,30,10.0,5G,3210,3074,ok,1.18,25.7,5,confounded,uplink collapsed during the run; resolution behaviour cannot be separated from link capacity
+arm2b,2026-09-04T20:35,07-degraded-uplink,noise,h264,1920x1080,30,10.0,5G,136,134,ok,3.19,1.1,0,confounded,"killed by hand; its manifest claims exit_reason=completed because that string was hardcoded. 1.1 fps, MaintainFramerateAndResolution"
+r1,2026-09-04T21:41,07-degraded-uplink,noise,h264,1920x1080,30,10.0,5G,15405,5704,ok,0.03,9.9,2,confounded,"uplink was 0.03 Mbps; publisher also overran its window by ~19 min via the reaches_end equality bug (15405 rows against a 3600-frame window)"
+a3r1,2026-09-04T17:39,99-void,noise,h264,1920x1080,30,10.0,5G,3213,,ok,,,,VOID,two publishers were in the room at once; measures nothing
+optimized,unknown,99-void,unknown,unknown,unknown,unknown,unknown,unknown,767,,,,,,VOID,"no manifest, no log, no argv record: the configuration cannot be recovered, so no reading from it can be attributed"
