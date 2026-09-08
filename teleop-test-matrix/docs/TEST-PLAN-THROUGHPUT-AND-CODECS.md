@@ -307,7 +307,41 @@ synthetic content predicting real footage at a real budget.
 
 ---
 
-## 8. Cost and division of labour
+## 8. Where the reports come from
+
+Decided up front rather than when the reports are due, because `--publish-only`
+changed the answer and made it non-obvious.
+
+**Host A writes no `.sub.csv` any more.** With `--publish-only` there is no local
+receiver, so A produces `<prefix>.pub.csv` plus the JSON-lines snapshots and
+nothing else. `generate_frame_report.py` pairs a publisher and a subscriber CSV by
+frame ID, so **every PDF in this plan depends on Host B's half arriving.**
+
+Three consequences:
+
+1. **There is no publisher-only arm.** Every cell in E2, E3 and E4 requires B
+   logging. An arm where only one host logs is an arm with no report, and the
+   "both halves present and non-empty" admission gate already voids it — so a
+   missing subscriber half means the cell is re-run, not analysed.
+2. **Both hosts hold both CSVs and the report for every cell.** B ships its
+   `.sub.csv` to A after each cell and A ships the `.pub.csv` back, per the
+   standing rule that both sides hold both halves. A cell whose halves live on
+   separate machines is one machine's crash away from being unpairable.
+3. **Thirty per-cell PDFs is the wrong deliverable.** Nobody reads thirty frame
+   reports. Instead:
+   - **Per cell**: both CSVs, the snapshots, and the manifest, archived. No PDF.
+   - **Per experiment**: one sweep report — E2, E3, E4 — plotting each metric
+     against the swept axis, which is the artefact that actually answers the
+     question the experiment was asked.
+   - **On demand**: a per-cell frame report for any cell that looks anomalous in
+     its sweep report. That is what the per-frame decomposition is *for* — it
+     answers where a given frame's latency went, which is a drill-down question,
+     not a summary one.
+
+The sweep reports are the deliverable. The per-cell frame reports are the
+instrument.
+
+## 9. Cost and division of labour
 
 About 30 runs at ~3 minutes each including setup: **~90 minutes of link time**,
 plus E1's plumbing work and E5 running in the background for 24 hours
