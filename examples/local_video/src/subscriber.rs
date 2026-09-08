@@ -432,9 +432,39 @@ struct Args {
     /// Shared encryption key for E2EE (enables AES-GCM end-to-end encryption when set; must match publisher's key)
     #[arg(long)]
     e2ee_key: Option<String>,
+
+    /// Directory to write sampled decoded frames into, as raw I420 for offline PSNR/SSIM.
+    ///
+    /// Off unless set. Full I420 at 1600x1300 is 3.12 MB per frame and 94 MB/s at 30 fps,
+    /// which is unaffordable; sampling every Nth frame is what makes it viable.
+    #[arg(long)]
+    sample_frames_dir: Option<PathBuf>,
+
+    /// Sample every Nth frame, keyed on FRAME ID rather than on arrival count.
+    ///
+    /// By arrival count the sampled set shifts on every dropped frame, and the two
+    /// definitions diverge threefold at 10 fps where IDs advance by three -- which is
+    /// exactly the AV1 condition the codec comparison exists to test. By ID a dropped
+    /// frame leaves a hole, the hole is itself data, and alignment to the fixture holds.
+    #[arg(long, default_value_t = 30)]
+    sample_every: u32,
 }
 
-fn record_received_frame_sample(frame: &BoxVideoFrame, subscriber_timing: &SubscriberTimingHandle) {
+/// One sampled decoded frame, handed to the writer task.
+///
+/// Carries an owned I420Buffer rather than a reference: the sink drops the source frame
+/// immediately after, so anything borrowed from it would dangle.
+struct SampledFrame {
+    frame_id: u32,
+    capture_timestamp_us: u64,
+    buffer: livekit::webrtc::video_frame::I420Buffer,
+}
+
+fn record_received_frame_sample(
+    frame: &BoxVideoFrame,
+    subscriber_timing: &SubscriberTimingHandle,
+    sampler: Option<&FrameSampler>,
+) {
     if let Some(metadata) = &frame.frame_metadata {
         if let Some(capture_timestamp_us) = metadata.user_timestamp {
             subscriber_timing.record_frame_received_by_sink(
@@ -442,7 +472,89 @@ fn record_received_frame_sample(frame: &BoxVideoFrame, subscriber_timing: &Subsc
                 metadata.frame_id,
                 current_timestamp_us(),
             );
+            if let Some(sampler) = sampler.or_else(|| FRAME_SAMPLER.get()) {
+                sampler.maybe_sample(metadata.frame_id, capture_timestamp_us, frame);
+            }
         }
+    }
+}
+
+/// Hands sampled frames to a writer task so plane reads and file I/O stay off the sink.
+///
+/// This tap sits between decode output and the render slot, so work done here lands in
+/// `decode_to_sink_ms` and everything after it. `to_i420()` on a frame that is already
+/// I420 should be a refcount bump rather than a 3.12 MB copy -- but "should be" is not a
+/// measurement, so the cost is reported per run by comparing sampled against unsampled
+/// frames, and the written planes are checked for sanity rather than assumed live.
+struct FrameSampler {
+    every: u32,
+    tx: tokio::sync::mpsc::UnboundedSender<SampledFrame>,
+}
+
+/// Process-wide sampler handle. One subscriber per process, and the alternative is
+/// threading an Option through handle_track_subscribed and its call sites for one field.
+static FRAME_SAMPLER: std::sync::OnceLock<FrameSampler> = std::sync::OnceLock::new();
+
+/// Spawns the writer and returns the sampler handle.
+///
+/// Writes each sampled frame as raw I420 named by frame ID, plus an index CSV. Named by
+/// ID rather than by sequence so a hole in the sample set stays visible as a missing file
+/// -- a dropped frame is data, and a directory that silently renumbers hides it.
+fn spawn_frame_sampler(dir: PathBuf, every: u32) -> anyhow::Result<FrameSampler> {
+    std::fs::create_dir_all(&dir)?;
+    let index_path = dir.join("index.csv");
+    let mut index = crate::frame_log::create_csv(
+        &index_path,
+        "frame_id,capture_timestamp_us,width,height,stride_y,stride_u,stride_v,bytes_written",
+    )?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SampledFrame>();
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::current();
+        let mut written = 0_u64;
+        while let Some(sample) = rt.block_on(rx.recv()) {
+            let (w, h) = (sample.buffer.chroma_width() * 2, sample.buffer.chroma_height() * 2);
+            let (sy, su, sv) = sample.buffer.strides();
+            let (dy, du, dv) = sample.buffer.data();
+            let path = dir.join(format!("{:08}.i420", sample.frame_id));
+            let bytes = dy.len() + du.len() + dv.len();
+            let ok = std::fs::File::create(&path).and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(dy)?;
+                f.write_all(du)?;
+                f.write_all(dv)
+            });
+            if let Err(e) = ok {
+                warn!("frame sampler: writing {} failed: {e}", path.display());
+                continue;
+            }
+            use std::io::Write;
+            let _ = writeln!(
+                index,
+                "{},{},{},{},{},{},{},{}",
+                sample.frame_id, sample.capture_timestamp_us, w, h, sy, su, sv, bytes
+            );
+            let _ = index.flush();
+            written += 1;
+        }
+        info!("frame sampler: wrote {written} frames to {}", dir.display());
+    });
+    Ok(FrameSampler { every, tx })
+}
+
+impl FrameSampler {
+    fn maybe_sample(
+        &self,
+        frame_id: Option<u32>,
+        capture_timestamp_us: u64,
+        frame: &BoxVideoFrame,
+    ) {
+        // No ID means no way to align this frame to the fixture, so it is not a sample.
+        let Some(frame_id) = frame_id else { return };
+        if self.every == 0 || !frame_id.is_multiple_of(self.every) {
+            return;
+        }
+        let buffer = frame.buffer.to_i420();
+        let _ = self.tx.send(SampledFrame { frame_id, capture_timestamp_us, buffer });
     }
 }
 
@@ -1268,10 +1380,10 @@ async fn handle_track_subscribed(
                 break;
             }
             let Some(mut frame) = sink.next().await else { break };
-            record_received_frame_sample(&frame, &subscriber_timing_sink);
+            record_received_frame_sample(&frame, &subscriber_timing_sink, None);
             let mut drained_frames = 0_u64;
             while let Some(Some(newer_frame)) = sink.next().now_or_never() {
-                record_received_frame_sample(&newer_frame, &subscriber_timing_sink);
+                record_received_frame_sample(&newer_frame, &subscriber_timing_sink, None);
                 frame = newer_frame;
                 drained_frames += 1;
             }
@@ -1850,6 +1962,20 @@ impl eframe::App for VideoApp {
 async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+
+    if let Some(dir) = args.sample_frames_dir.clone() {
+        match spawn_frame_sampler(dir.clone(), args.sample_every) {
+            Ok(sampler) => {
+                let _ = FRAME_SAMPLER.set(sampler);
+                info!(
+                    "Sampling every {}th frame by ID into {}",
+                    args.sample_every,
+                    dir.display()
+                );
+            }
+            Err(e) => anyhow::bail!("could not start frame sampler at {}: {e}", dir.display()),
+        }
+    }
 
     let ctrl_c_received = Arc::new(AtomicBool::new(false));
     tokio::spawn({
