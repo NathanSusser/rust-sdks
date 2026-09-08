@@ -180,6 +180,49 @@ nothing about runs that bypassed it.** The A-runs were direct binary
 invocations, recorded as such in `EXPERIMENT-PLAN` §0.2, in a document both
 hosts had edited.
 
+### Repetition fixes variance, and only variance
+
+A comparison was proposed for a confirming repeat: AV1 delivered the same 1080p30
+content on 0.137 Mbps where H.264 needed 0.443–0.521, a 3.2× difference that
+looked like a coding gain. One run per codec felt like the weakness, so a second
+of each was suggested to make it quotable.
+
+It would not have. The two encoders were handed the same CBR target, both
+undershot enormously, and each one's rate control then chose its own operating
+point — H.264 settling near 0.24 of its quantiser scale, AV1 near 0.68. A large
+part of that ratio is AV1 spending fewer bits to produce a worse picture.
+
+> **A confound is invariant under repetition.** Repeating an uncontrolled
+> comparison yields a tighter estimate of a quantity that does not mean what it
+> appears to mean — and the tighter number is *more* tempting to quote, not less.
+> Sample size answers "how precisely do we know this"; it never answers "is this
+> the thing we think it is".
+
+What would have made it a real comparison is holding quality constant — fixed QP
+or CRF on both sides, or a quality metric on the decoded output so bits can be
+compared at matched VMAF. That is a different experiment, not more of the same
+one.
+
+The proposal came within minutes of both hosts agreeing the rig cannot measure
+codec efficiency, on the exact question just closed. Worth noting as the
+reinstatement reflex reaching for a *number* rather than a mechanism.
+
+### A binary can be stale without any of its own sources changing
+
+The third form of the staleness trap, after "never rebuilt" and "rebase moved
+the mtimes". A subscriber binary was newer than every file in its own crate, and
+was still stale: the change was three files under `webrtc-sys/src/nvidia`, a
+dependency it links. `git checkout` only bumps mtimes on files it actually
+changes, so a comparison scoped to the crate's own directory passes every time.
+
+> **Check mtimes against the dependency tree, not the crate.** Better, don't
+> check at all — rebuild, and verify the artefact instead: does the binary
+> contain the new symbol, does `--help` list the new flag, does the CSV header
+> carry the new column.
+
+All three forms produce the same outcome — a run that measures code nobody
+believes is running — and none is visible in the run's own output.
+
 ### The reinstatement reflex: a withdrawal is not a prompt for a replacement
 
 Every claim withdrawn this session was immediately followed by reaching for a
