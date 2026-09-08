@@ -90,6 +90,38 @@ Everything else is supporting detail or a failed run.
 - **`r1` overran its logging window by ~19 minutes** — 15405 rows against a
   3600-frame bound — because the window's end test used `==` and the exact frame
   ID had roughly a 1-in-26 chance of surviving the pipeline. Fixed to `>=`.
-- **`results-optimized` is unidentifiable.** No manifest, no log, no argv record.
-  It is in `99-void` because a reading that cannot be attributed to a
-  configuration is not a measurement.
+## When a run is void
+
+The criterion is **not** "does an argv record exist". Fifteen of the 27 runs
+predate the manifest emitter and have no argv record at all — including `a3`,
+which the programme's central finding rests on. A criterion that voided those
+would leave us with nothing.
+
+The criterion is: **can the parameters that bear on the conclusion be recovered
+by any means?** For the a-series they could — the publisher logs name the test
+pattern in plain text on line one, the 10 Mbps cap was established independently,
+and resolution and fps come from surviving run logs. Recovery by other means is
+what rescued them, not a manifest.
+
+So `99-void` holds two different failures, and the column says which:
+
+- **`VOID-corrupted`** (`a3r1`) — the configuration is fully recoverable and the
+  *measurement* is not. Two publishers were in the room at once. Cause known,
+  specific, and instructive.
+- **`VOID-no-evidence`** (`optimized`) — no evidence of any kind survives. No log
+  names its source, no surviving run log covers its window, and Host B holds no
+  counterpart that could pair with its 767 rows. Both hosts checked.
+
+The distinction matters because the next reader will apply whatever criterion
+this file states, and the wrong one points straight at `a3`.
+
+## A practice, not an incident
+
+The SSIM error above was found by **recomputing from the source files rather than
+copying a previous table forward**. Nothing else would have caught it: the number
+was internally consistent everywhere it appeared, and every reader who checked it
+against the last report found agreement.
+
+That is the same shape as the a-series misidentification — a value carried under
+a label nobody re-derived. Recomputation is the practice that catches this class,
+and it is cheap: the entire offline sweep re-measured in about four minutes.

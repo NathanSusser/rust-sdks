@@ -228,6 +228,34 @@ produce the same observable: silence.
 The near-miss is the point: a correct piece of code was one step from being
 "fixed" on the strength of a mistimed test.
 
+#### The rule did not protect the person who wrote it
+
+The same guard was later verified by killing a publisher with `SIGKILL`. It fired
+correctly, and the fix was reported as working. But `SIGKILL` stops frames
+*without unpublishing*, and a harness that ends a run properly does unpublish —
+which breaks the stats loop on its track-sid check before the inactivity branch is
+ever evaluated. The common ending was the one case the guard did not cover. It
+cost 7:51 of a subscriber sitting on an empty room with 2,489 rows and no frames.
+
+> **A timeout verified against a simulated failure has been verified against your
+> model of the failure, not the failure.** Any test where you construct the fault
+> is testing your imagination of it. Prefer the ending the system actually
+> produces; where you cannot reproduce it locally, say the path is unverified
+> rather than treating "my simulation passed" as coverage.
+
+Then, fixing it, the same author armed the replacement test on a 20 s publisher
+window that expired during a ~30 s subscriber pre-flight — so zero rows arrived,
+neither guard armed, and a working fix looked broken. That is the arming-condition
+rule above, hit twice more within the hour by the person whose bug produced it.
+
+Three rules in this document have now been walked into by the person who wrote
+them: `pkill -f` by its author, the arming condition twice by its subject.
+
+> **A rule does not protect its author.** The interval between writing one and
+> breaking it can be under an hour. Rules are worth writing anyway — but a written
+> rule is a thing to check against before acting, not a hazard you are now immune
+> to.
+
 ### `pkill -f` matches the shell that invoked it
 
 Hit independently by both hosts in the same programme, costing two cycles each
