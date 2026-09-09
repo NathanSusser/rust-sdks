@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
 import statistics
 import sys
 from dataclasses import dataclass
@@ -74,6 +75,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subscriber", type=Path, help="Subscriber CSV log")
     parser.add_argument("-o", "--output", type=Path, help="Output PDF path")
     parser.add_argument("--title", default="Video Metrics")
+    parser.add_argument(
+        "--subscriber-log",
+        type=Path,
+        help="Subscriber stdout log. Supplies the SDK's received/decoded counters, which "
+        "the CSV cannot: the CSV holds only frames that reached the GPU, so without this "
+        "the report can show frames lost end-to-end but not WHERE they were lost.",
+    )
     args = parser.parse_args()
     if args.publisher is None and args.subscriber is None:
         parser.error("at least one of --publisher or --subscriber is required")
@@ -82,6 +90,36 @@ def parse_args() -> argparse.Namespace:
         assert source is not None
         args.output = source.with_suffix(".pdf")
     return args
+
+
+DECODE_HEALTH_RE = re.compile(
+    r"received=(\d+), decoded=(\d+), keyframes_decoded=(\d+), rendered=(\d+), dropped=(\d+)"
+)
+
+
+@dataclass(frozen=True)
+class DecodeCounters:
+    received: int
+    decoded: int
+    keyframes: int
+    dropped: int
+
+
+def read_decode_counters(path: Path) -> DecodeCounters | None:
+    """Last decode-health line from the subscriber log.
+
+    These counters are the only way to separate network loss from local loss. The CSV
+    has one row per GPU-rendered frame, so a frame that never arrived and a frame that
+    arrived, decoded and was never drawn are both simply absent from it.
+    """
+    try:
+        matches = DECODE_HEALTH_RE.findall(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    if not matches:
+        return None
+    received, decoded, keyframes, _rendered, dropped = (int(v) for v in matches[-1])
+    return DecodeCounters(received, decoded, keyframes, dropped)
 
 
 def number(value: str | None) -> float | None:
@@ -409,6 +447,60 @@ def draw_header(pdf: canvas.Canvas, title: str, subtitle: str | Sequence[str]) -
     lines = [subtitle] if isinstance(subtitle, str) else list(subtitle)
     for index, line in enumerate(lines[:3]):
         pdf.drawString(39, height - 51 - index * 10, line[:190])
+
+
+def draw_frame_accounting(
+    pdf: canvas.Canvas,
+    x: float,
+    y: float,
+    width: float,
+    emitted: int,
+    counters: DecodeCounters,
+    rendered: int,
+) -> None:
+    """Where frames were lost: network, decoder, or renderer.
+
+    The question this answers is the first one an operator asks about a degraded feed,
+    and no single counter answers it. Frames absent from the CSV may never have arrived,
+    may have failed to decode, or may have arrived and decoded and never been drawn --
+    three different faults with three different owners.
+    """
+    pdf.setFillColor(INK)
+    pdf.setFont("Helvetica-Bold", 10.5)
+    pdf.drawString(x, y + 92, "Where frames were lost")
+
+    stages = (
+        ("Published", emitted, None),
+        ("Arrived", counters.received, "network"),
+        ("Decoded", counters.decoded, "decoder"),
+        ("On screen", rendered, "renderer"),
+    )
+    bar_h, top = 15.0, y + 62
+    label_w, bar_w = 74.0, width - 74.0 - 132.0
+    for index, (label, value, lost_from) in enumerate(stages):
+        row_y = top - index * (bar_h + 6)
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica", 7.4)
+        pdf.drawString(x, row_y + 4, label)
+        share = value / emitted if emitted else 0.0
+        pdf.setFillColor(PANEL)
+        pdf.rect(x + label_w, row_y, bar_w, bar_h, fill=1, stroke=0)
+        pdf.setFillColor(NAVY if index == 0 else BLUE)
+        pdf.rect(x + label_w, row_y, max(bar_w * share, 1.0), bar_h, fill=1, stroke=0)
+        pdf.setFillColor(INK)
+        pdf.setFont("Helvetica-Bold", 7.4)
+        pdf.drawRightString(x + label_w + bar_w + 34, row_y + 4, f"{value:,}")
+        if lost_from is not None:
+            previous = stages[index - 1][1]
+            lost = previous - value
+            pdf.setFillColor(MUTED if lost <= 0 else INK)
+            pdf.setFont("Helvetica", 7.0)
+            share_lost = (100.0 * lost / previous) if previous else 0.0
+            pdf.drawString(
+                x + label_w + bar_w + 42,
+                row_y + 4,
+                f"lost in {lost_from}: {lost:,} ({share_lost:.1f}%)",
+            )
 
 
 def draw_card(pdf: canvas.Canvas, x: float, y: float, width: float, label: str, value: str) -> None:
@@ -764,6 +856,7 @@ def generate_report(
     subscriber: LogData | None,
     output: Path,
     title: str,
+    counters: DecodeCounters | None = None,
 ) -> None:
     logs = [log for log in (publisher, subscriber) if log is not None]
     assert logs
@@ -847,6 +940,22 @@ def generate_report(
     series_height = 175.0 if resolution_card else 205.0
     draw_time_series(pdf, logs, loss_events, freeze_events, 50, 206, 692, series_height)
 
+    # The band under the chart was empty. It now carries the frame accounting, which is
+    # the first thing an operator asks about a degraded feed and which no single counter
+    # answers: a frame missing from the CSV may never have arrived, may have failed to
+    # decode, or may have arrived and decoded and never been drawn.
+    if counters is not None and subscriber is not None:
+        frame_ids = [
+            int(value)
+            for value in (number(row.get("frame_id")) for row in subscriber.rows)
+            if value is not None
+        ]
+        if frame_ids:
+            emitted = max(frame_ids) - min(frame_ids) + 1
+            draw_frame_accounting(
+                pdf, left, 74, usable, emitted, counters, len(subscriber.rows)
+            )
+
     footer_left = left
     footer_right = page_width - right_margin
     freeze_note = (
@@ -892,7 +1001,10 @@ def main() -> int:
     try:
         publisher = read_log(args.publisher, "publisher") if args.publisher else None
         subscriber = read_log(args.subscriber, "subscriber") if args.subscriber else None
-        generate_report(publisher, subscriber, args.output, args.title)
+        counters = (
+            read_decode_counters(args.subscriber_log) if args.subscriber_log else None
+        )
+        generate_report(publisher, subscriber, args.output, args.title, counters)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

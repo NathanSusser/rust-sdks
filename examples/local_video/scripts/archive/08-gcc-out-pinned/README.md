@@ -19,10 +19,37 @@ infinite-GOP encoder, so all 17 were receiver-requested loss recovery. Loss forc
 a PLI, the PLI forces a 1600x1300 keyframe into an already-dropping path, which
 causes more loss.
 
-**Do not quote frame rate or e2e latency from this bucket's subscriber CSV.**
-Host B renders on Intel UHD 730 via the CPU I420 upload path and dropped ~35% of
-decoded frames locally (373 CSV rows against 575 decoded, 0 dropped by the
-decoder). The renderer, not the link. `render_ms` reached 1187 ms and contaminates
-every e2e figure. Trustworthy here: `receive_to_gpu_complete` (p50 10.0 ms),
-`decode_ms` (p50 5.3 ms), `receive_qp`, `packets_lost`, `receive_bitrate_mbps`,
-resolution, and the SDK's own receive-fps log lines.
+**WHERE THE FRAMES WENT — measured, not inferred.**
+
+    published (frame-id span)   2561    88.4 s at 29.0 fps, matching the publisher's 29 fps
+    arrived at the receiver      575    LOST IN NETWORK 1986  (77.5%)
+    decoded                      575    lost in decoder     0
+    reached the screen           373    not drawn         202  (35.1% of arrivals)
+
+An earlier version of this file blamed the renderer for the 202. **That attribution
+was wrong.** Render p50 is 3.5 ms and exactly 1 render in 373 exceeded the 33.3 ms
+frame budget — 0.3%. A renderer that idle does not lose frames by being slow; the
+202 are most likely stale frames superseded when a backlog arrives in a burst, which
+makes them a consequence of the transport problem rather than a second, separate one.
+The counters prove the renderer had capacity; they do not prove why it skipped, so
+treat the burst explanation as inference.
+
+**Transport is 95.8% of end-to-end latency.**
+
+    transport  capture -> receive   p50 472.7 ms   p95 1401.2   max 3002.9
+    local      receive -> screen    p50   9.9 ms   p95   28.4   max 1194.2
+
+89% of arriving frames are over 100 ms late, 46% over 500 ms, 8% over a second, and
+transport p50 climbs 394 -> 557 ms across the run with a 2058 ms spike. `webrtc_receive`
+is stamped from `FirstPacketReceiveUnixTimeMicros`, i.e. the first packet's arrival, so
+this figure is wire time and does not include the jitter buffer.
+
+**Receive-side buffering is one buffer, and the kernel is not queueing.** The WebRTC
+jitter buffer ran delay_avg 38 -> 118 ms, settling ~97 ms, with its target growing
+48 -> 84 ms as network jitter grew. Every other receive stage is sub-millisecond at p50
+(assembly 0.14, decode->sink 0.16, select->prepare 0.03). The kernel shows **zero** UDP
+receive-buffer errors and zero drops, and every qdisc backlog is 0 packets. Note one
+unresolved discrepancy: the SDK reports ~97 ms of jitter-buffer delay while measured
+`receive_and_assembly_ms` is 0.14 ms at p50, which `--low-latency` may explain by
+playing frames out immediately. Do not add the 97 ms to the transport figure until
+that is settled.
