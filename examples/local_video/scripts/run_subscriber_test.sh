@@ -276,6 +276,13 @@ echo "  start the publisher now (or within ~30s)"
 # mid-run, drop this flag first -- on a laptop it has been enough to kill the
 # stream. Set SHOW_TIMING=0 to omit it.
 
+# The subscriber writes to a log, never to the CSV, when it cannot reach the SFU -- and
+# env_logger is quiet by default, so on 8 Sep a run opened its GPU windows, never opened a
+# single network socket, and produced a header-only CSV with NO log line at all. The cell
+# was lost and the cause took an ss(8) session to find. Never launch this binary without a
+# log level: a run that fails loudly costs one line, a run that fails silently costs the cell.
+export RUST_LOG="${RUST_LOG:-info}"
+
 "$BIN" \
   --url "$URL" \
   --room-name "$ROOM" \
@@ -284,7 +291,7 @@ echo "  start the publisher now (or within ~30s)"
   "${TIMING_FLAG[@]}" "${LOWLAT_FLAG[@]}" \
   --log-csv "$OUTDIR/subscriber.csv" \
   --log-start-frame-id "$START_FRAME" \
-  --log-end-frame-id "$END_FRAME" && SUB_STATUS=0 || SUB_STATUS=$?
+  --log-end-frame-id "$END_FRAME" > >(tee "$OUTDIR/subscriber.log") 2>&1 && SUB_STATUS=0 || SUB_STATUS=$?
 
 # The manifest MUST close even when the subscriber exits non-zero. Under set -e a failed or
 # terminated run aborts the script here, leaving outcome: null -- and a run that died
