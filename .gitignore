@@ -21,3 +21,15 @@ examples/local_video/scripts/results-*/
 !/results/MANIFEST.csv
 !/results/README.md
 llvm.sh
+
+# Measurement data stays out of git (operator directive). These trees hold run CSVs,
+# logs, generated PDFs and the embedded-PNG report bundle -- tens of MB that would be
+# committed by a plain `git add -A`. `results/` above is already covered; these three
+# are the archive buckets and the two cross-host exchange directories, which were
+# untracked rather than ignored and so were one careless add away from landing in the
+# history. Bucket README.md files are documentation, not data, and are kept.
+examples/local_video/scripts/archive/**
+!examples/local_video/scripts/archive/**/
+!examples/local_video/scripts/archive/**/README.md
+examples/local_video/scripts/archive-hosta/
+examples/local_video/scripts/incoming/

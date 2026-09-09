@@ -140,7 +140,42 @@ def read_log(path: Path, kind: str) -> LogData:
         rows = [row for row in reader if number(row.get(latency_column)) is not None]
     if not rows:
         raise ValueError(f"{path} contains no completed {kind} frame samples")
+
+    # A frame occasionally reaches the CSV with a zero timestamp -- 17 of 4587 rows in
+    # e2s-500k-r1 have capture_timestamp_us=0. Any stage measured from that column then
+    # differs by the whole Unix epoch, and because those rows are rare they leave the
+    # median untouched while destroying the mean: that run reported a
+    # capture-to-packetize mean of 6,629,942,825 ms against a p50 of 1.1 ms. A number
+    # that wrong is still a number, and it goes in a table a reader will quote.
+    # Percentiles hid it, which is the same trap this programme hit with stall episodes.
+    dropped = [row for row in rows if _has_epoch_artifact(row)]
+    if dropped:
+        rows = [row for row in rows if not _has_epoch_artifact(row)]
+        print(
+            f"warning: {path.name}: dropped {len(dropped)} of {len(dropped) + len(rows)} "
+            f"rows with a zero timestamp (epoch-scale stage durations)",
+            file=sys.stderr,
+        )
+        if not rows:
+            raise ValueError(f"{path} contains no rows with usable timestamps")
     return LogData(kind, path, rows, latency_column, interval_column)
+
+
+def _has_epoch_artifact(row: dict[str, str]) -> bool:
+    """True if any absolute timestamp on this row is missing or zero.
+
+    Test the CAUSE, not the symptom. The first version of this guard also rejected any
+    `_ms` column above 60 s as non-physical, which is true of a stage duration and false
+    of `elapsed_ms` and `total_freeze_duration_ms` -- both cumulative, both legitimately
+    past 60 s. That guard would have silently discarded every row after the first minute
+    of every run longer than a minute, which is most of them.
+    """
+    for column, value in row.items():
+        if column.endswith("_timestamp_us"):
+            parsed = number(value)
+            if parsed is None or parsed <= 0:
+                return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -634,6 +669,10 @@ def pipeline_stage_means(logs: Sequence[LogData]) -> list[tuple[str, float, obje
     ]
 
 
+# Title sits at y+140 and the legend runs below the bar at y+96; 150 pt covers the block.
+TIMELINE_HEIGHT = 150.0
+
+
 def draw_latency_table(
     pdf: canvas.Canvas, logs: Sequence[LogData], x: float, y: float, width: float
 ) -> None:
@@ -773,34 +812,77 @@ def generate_report(
         ("P95 latency", f"{percentile(primary_latencies, 95):.1f} ms"),
         ("Frame losses", f"{losses:,}"),
     )
-    if res_track is not None and res_track.total:
-        cards = cards + (
-            (
-                "Resolution CHANGED" if res_track.changed else "Resolution",
-                res_track.modal or "-",
-            ),
+    # The resolution card sits on its own row beneath the latency cards rather than
+    # extending the top row. As a seventh card in one row it ran off the right edge --
+    # and it is the card added so a reader could not miss a collapse, so it was the one
+    # thing invisible on the page.
+    resolution_card = (
+        (
+            "Resolution CHANGED" if res_track.changed else "Resolution",
+            res_track.modal or "-",
         )
-    card_width = 112
+        if res_track is not None and res_track.total
+        else None
+    )
+    # Cards are sized from their count, not from a constant. A fixed 112 pt card with a
+    # 11 pt gap ran to x=888 once a seventh card was added, and landscape letter is 792 --
+    # so the resolution card, the one added precisely so a reader could not miss a
+    # collapse, was the one printed off the right edge.
+    page_width, page_height = landscape(letter)
+    left, right_margin, gap = 38.0, 38.0, 11.0
+    usable = page_width - left - right_margin
+    card_width = (usable - gap * (len(cards) - 1)) / len(cards)
+    top_row_y = 470.0 if resolution_card else 461.0
     for index, (label, value) in enumerate(cards):
-        draw_card(pdf, 38 + index * (card_width + 11), 461, card_width, label, value)
+        draw_card(pdf, left + index * (card_width + gap), top_row_y, card_width, label, value)
 
-    draw_time_series(pdf, logs, loss_events, freeze_events, 50, 206, 692, 205)
-    draw_latency_table(pdf, logs, 38, 160, 318)
-    draw_pipeline_timeline(pdf, logs, 380, 38, 374)
+    # Second row, aligned under the three latency cards it qualifies: a resolution that
+    # moved makes every latency figure above it a figure about a smaller picture.
+    if resolution_card:
+        first_latency = 2
+        span_x = left + first_latency * (card_width + gap)
+        span_w = 3 * card_width + 2 * gap
+        draw_card(pdf, span_x, top_row_y - 60, span_w, *resolution_card)
 
-    pdf.setStrokeColor(GRID)
-    pdf.line(38, 28, 754, 28)
-    pdf.setFillColor(MUTED)
-    pdf.setFont("Helvetica", 6.8)
+    series_height = 175.0 if resolution_card else 205.0
+    draw_time_series(pdf, logs, loss_events, freeze_events, 50, 206, 692, series_height)
+
+    footer_left = left
+    footer_right = page_width - right_margin
     freeze_note = (
         "Freeze markers use subscriber WebRTC freeze counters."
         if subscriber and values(subscriber.rows, "freeze_count")
         else "Freeze markers are inter-frame gaps over 3x the median interval."
     )
-    pdf.drawString(
-        38,
-        17,
-        "Frame-loss markers reflect frame-ID gaps. " + freeze_note,
+
+    def draw_footer(page_label: str, note: str) -> None:
+        pdf.setStrokeColor(GRID)
+        pdf.line(footer_left, 28, footer_right, 28)
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica", 6.8)
+        pdf.drawString(footer_left, 17, note)
+        pdf.drawRightString(footer_right, 17, page_label)
+
+    draw_footer("Page 1 of 2 - overview", "Frame-loss markers reflect frame-ID gaps. " + freeze_note)
+
+    # Page 2 carries the per-stage detail. It was previously squeezed beside the latency
+    # table on one page, which left the pipeline timeline 374 pt wide for up to twelve
+    # stages; here each gets the full width.
+    pdf.showPage()
+    draw_header(pdf, title, subtitle)
+    # Both blocks were at fixed y, which left a 220 pt band of white under the header on a
+    # subscriber-only report and, worse, collided on a paired one: the table grows downward
+    # at 15 pt a row, so a twelve-stage paired run reached y=85 and drew through the
+    # timeline sitting at y=60. Anchor the table under the header and derive the timeline's
+    # position from the table's actual height instead.
+    table_top = 500.0
+    table_bottom = table_top - 20.0 - 15.0 * len(latency_rows(logs))
+    timeline_y = max(60.0, table_bottom - 45.0 - TIMELINE_HEIGHT)
+    draw_latency_table(pdf, logs, left, table_top, usable)
+    draw_pipeline_timeline(pdf, logs, left, timeline_y, usable)
+    draw_footer(
+        "Page 2 of 2 - stage detail",
+        "Latency percentiles per log, and mean time in each pipeline stage.",
     )
     pdf.save()
 

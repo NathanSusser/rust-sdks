@@ -28,6 +28,19 @@ END_FRAME=$(( START_FRAME + FPS * SECONDS_TO_RUN ))
 : "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}"
 : "${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}"
 
+# The SFU is a T-Mobile edge endpoint on an internal CA, so the default root store
+# rejects it: "invalid peer certificate: UnknownIssuer", process dead in one second with
+# no other symptom. run-video.sh sets this and this script did not, which cost a live join
+# on 8 Sep. Only fill it in if the caller has not chosen a bundle of their own.
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+    CORP_CA="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/.livekit-demo/corp-ca.pem"
+    if [ -r "$CORP_CA" ]; then
+        export SSL_CERT_FILE="$CORP_CA"
+    else
+        echo "warning: $CORP_CA not found; a wss:// join to the T-Mobile SFU will fail" >&2
+    fi
+fi
+
 # A bursty 30fps duty cycle never convinces the powersave governor to ramp, which inflated
 # subscriber decode from 0.65ms to 2.41ms with no symptom other than the number itself. On
 # this host the governor is NOT persisted -- cpufrequtils is not installed -- so a reboot
