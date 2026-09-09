@@ -1147,3 +1147,60 @@ existed and nobody joined them.
 > **Every publisher-side number needs its receive-side pair before it means
 > anything to an operator.** "The encoder held 1600x1300" and "the operator saw
 > 1600x1300" are different claims, and only one of them is about the deliverable.
+
+---
+
+## 15. The link was rate-limited at the subscription the whole time
+
+Two modems, same room, same tower, same night:
+
+| | Host A | Host B |
+|---|---|---|
+| APN | `fast.t-mobile.com` | `fast.t-mobile.com` |
+| operator | 310260 T-Mobile | 310260 T-Mobile |
+| access | 5gnr, connected | 5gnr, connected |
+| RSRP | −89.00 dBm | −88.00 dBm |
+| RSRQ | −11.00 dB | −11.00 dB |
+| SNR | 28.50 dB | 26.50 dB (**worse**) |
+| **uplink** | **1.1 Mbps** | **15.3 / 15.9 / 16.9 Mbps** |
+
+Identical APN, identical registration, Host B on marginally worse SNR, and **15x
+the uplink**. Neither the air interface nor the APN can produce that. It is a
+subscription-level limit on Host A's line.
+
+### It explains every open thread at once
+
+    uplink capped near 1.1 Mbps
+      -> a 1.62 Mbps stream overshoots by ~47%
+      -> ~40% of packets dropped before reaching the SFU
+      -> the SFU NACKs; retransmits add load to the SAME saturated uplink
+      -> repairs arrive outside the 300-packet reorder window, discarded "too old"
+      -> the SFU never completes those frames and cannot forward them
+      -> the receiver sees 78% of missing frames with no sequence gap, 47% frame loss
+
+The 47% overshoot and the 47% frame loss are the same number. Retransmission was
+not merely failing, it was **adding load to a saturated link** — the repair
+mechanism was part of the collapse.
+
+### What this invalidates
+
+- **The cap sweep found double-digit retransmission at every rate including
+  2 Mbps and no clean rate anywhere.** Of course it did: the ceiling was 1.1.
+- **The "7.3x capacity swing" recorded as radio variability** was measured on a
+  throttled line.
+- **The 0.14 Mbps hour on 4 Sep** was read as a radio collapse.
+- **Every conclusion about congestion control, pacing, keyframe storms and the
+  SFU** was drawn from a sender that was over capacity in nearly every run.
+
+> **Establish the subscription's rate limit before characterising anything above
+> it.** We spent a programme measuring an encoder and a congestion controller
+> against a ceiling nobody had checked, and read the ceiling's effects as
+> properties of the encoder, the estimator, the SFU and the radio in turn.
+
+The diagnostic is two commands and neither needs the rig:
+
+    mmcli -m 0 --signal-setup=5 && mmcli -m 0 --signal-get   # RSRP/RSRQ/SNR
+    mmcli -m 0 -b 0 | grep -i apn                            # APN
+
+A second line on the same tower is the control. Without one, good signal and poor
+throughput look like a radio problem and there is nothing to compare against.
