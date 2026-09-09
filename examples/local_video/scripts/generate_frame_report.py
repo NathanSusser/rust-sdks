@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import re
 import statistics
@@ -76,6 +77,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-o", "--output", type=Path, help="Output PDF path")
     parser.add_argument("--title", default="Video Metrics")
     parser.add_argument(
+        "--publisher-stats",
+        type=Path,
+        help="Publisher stats .jsonl. Supplies the SEND side -- frames encoded and sent, "
+        "retransmissions, PLIs -- so the report can state what fraction of what the "
+        "publisher sent actually arrived. Without it a subscriber report can only say "
+        "how many frames it saw, never what it was owed.",
+    )
+    parser.add_argument(
         "--subscriber-log",
         type=Path,
         help="Subscriber stdout log. Supplies the SDK's received/decoded counters, which "
@@ -90,6 +99,64 @@ def parse_args() -> argparse.Namespace:
         assert source is not None
         args.output = source.with_suffix(".pdf")
     return args
+
+
+@dataclass(frozen=True)
+class PublisherStats:
+    """Send-side totals over the window the subscriber actually observed.
+
+    Read as deltas between the first and last poll inside that window, not as the file's
+    final values: the publisher's run and the subscriber's rarely coincide, and taking
+    end-of-file totals silently credits the subscriber with frames sent before it joined.
+    """
+
+    frames_encoded: int
+    frames_sent: int
+    packets_sent: int
+    retransmitted: int
+    key_frames: int
+    pli_count: int
+    mean_qp: float
+    target_bitrate_mbps: float
+    sent_mbps: float
+    quality_limitation: str
+
+
+def read_publisher_stats(
+    path: Path, window_us: tuple[int, int] | None
+) -> PublisherStats | None:
+    try:
+        records = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError):
+        return None
+    polls = [r for r in records if r.get("video_out") and r.get("t_unix_us")]
+    if window_us is not None:
+        start, end = window_us
+        # 2 s of slack before the first capture and 12 s after the last, so the window
+        # covers the subscriber's join and the publisher's trailing poll.
+        polls = [r for r in polls if start - 2_000_000 <= r["t_unix_us"] <= end + 12_000_000]
+    if len(polls) < 2:
+        return None
+    first, last = polls[0]["video_out"], polls[-1]["video_out"]
+    span_s = (polls[-1]["t_unix_us"] - polls[0]["t_unix_us"]) / 1e6
+    delta = lambda key: int(last.get(key, 0)) - int(first.get(key, 0))
+    encoded = delta("frames_encoded")
+    return PublisherStats(
+        frames_encoded=encoded,
+        frames_sent=delta("frames_sent"),
+        packets_sent=delta("packets_sent"),
+        retransmitted=delta("retransmitted_packets_sent"),
+        key_frames=delta("key_frames_encoded"),
+        pli_count=delta("pli_count"),
+        mean_qp=delta("qp_sum") / encoded if encoded else 0.0,
+        target_bitrate_mbps=float(last.get("target_bitrate_bps", 0.0)) / 1e6,
+        sent_mbps=delta("bytes_sent") * 8 / 1e6 / span_s if span_s > 0 else 0.0,
+        quality_limitation=str(last.get("quality_limitation_reason", "-")),
+    )
 
 
 DECODE_HEALTH_RE = re.compile(
@@ -457,6 +524,7 @@ def draw_frame_accounting(
     emitted: int,
     counters: DecodeCounters,
     rendered: int,
+    publisher: PublisherStats | None = None,
 ) -> None:
     """Where frames were lost: network, decoder, or renderer.
 
@@ -469,12 +537,26 @@ def draw_frame_accounting(
     pdf.setFont("Helvetica-Bold", 10.5)
     pdf.drawString(x, y + 92, "Where frames were lost")
 
-    stages = (
-        ("Published", emitted, None),
-        ("Arrived", counters.received, "network"),
-        ("Decoded", counters.decoded, "decoder"),
-        ("On screen", rendered, "renderer"),
-    )
+    # With publisher stats the funnel spans both hosts and the top figure is what the
+    # ENCODER produced, measured on the far side. Without them the top is the frame-ID
+    # span the subscriber observed, which cannot see frames lost before the first arrival
+    # and so understates what was owed.
+    if publisher is not None and publisher.frames_sent > 0:
+        stages = (
+            ("Encoded", publisher.frames_encoded, None),
+            ("Sent", publisher.frames_sent, "encoder"),
+            ("Arrived", counters.received, "network"),
+            ("Decoded", counters.decoded, "decoder"),
+            ("On screen", rendered, "renderer"),
+        )
+        emitted = publisher.frames_encoded
+    else:
+        stages = (
+            ("Published", emitted, None),
+            ("Arrived", counters.received, "network"),
+            ("Decoded", counters.decoded, "decoder"),
+            ("On screen", rendered, "renderer"),
+        )
     bar_h, top = 15.0, y + 62
     label_w, bar_w = 74.0, width - 74.0 - 132.0
     for index, (label, value, lost_from) in enumerate(stages):
@@ -501,6 +583,20 @@ def draw_frame_accounting(
                 row_y + 4,
                 f"lost in {lost_from}: {lost:,} ({share_lost:.1f}%)",
             )
+
+    if publisher is not None and publisher.frames_sent > 0:
+        delivered = 100.0 * counters.received / publisher.frames_sent
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica", 7.0)
+        pdf.drawString(
+            x,
+            top - len(stages) * (bar_h + 6) - 4,
+            f"publisher: {publisher.sent_mbps:.2f} Mbps sent, target {publisher.target_bitrate_mbps:.2f}, "
+            f"QP {publisher.mean_qp:.1f}, quality_limitation {publisher.quality_limitation}, "
+            f"{publisher.retransmitted:,} retransmitted packets "
+            f"({100.0 * publisher.retransmitted / max(publisher.packets_sent, 1):.1f}% of sent), "
+            f"{publisher.pli_count} PLIs   |   {delivered:.1f}% of sent frames arrived",
+        )
 
 
 def draw_card(pdf: canvas.Canvas, x: float, y: float, width: float, label: str, value: str) -> None:
@@ -857,6 +953,7 @@ def generate_report(
     output: Path,
     title: str,
     counters: DecodeCounters | None = None,
+    publisher_stats_path: Path | None = None,
 ) -> None:
     logs = [log for log in (publisher, subscriber) if log is not None]
     assert logs
@@ -952,8 +1049,30 @@ def generate_report(
         ]
         if frame_ids:
             emitted = max(frame_ids) - min(frame_ids) + 1
+            captures = [
+                int(value)
+                for value in (
+                    number(row.get("capture_timestamp_us")) for row in subscriber.rows
+                )
+                if value is not None and value > 0
+            ]
+            pub_stats = (
+                read_publisher_stats(
+                    publisher_stats_path,
+                    (min(captures), max(captures)) if captures else None,
+                )
+                if publisher_stats_path is not None
+                else None
+            )
             draw_frame_accounting(
-                pdf, left, 74, usable, emitted, counters, len(subscriber.rows)
+                pdf,
+                left,
+                92 if pub_stats is not None else 74,
+                usable,
+                emitted,
+                counters,
+                len(subscriber.rows),
+                pub_stats,
             )
 
     footer_left = left
@@ -1004,7 +1123,9 @@ def main() -> int:
         counters = (
             read_decode_counters(args.subscriber_log) if args.subscriber_log else None
         )
-        generate_report(publisher, subscriber, args.output, args.title, counters)
+        generate_report(
+            publisher, subscriber, args.output, args.title, counters, args.publisher_stats
+        )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
