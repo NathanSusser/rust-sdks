@@ -31,6 +31,32 @@ import sys
 PIX_PER_S = 1600 * 1300 * 30
 
 
+def matched_qp(pub, sub):
+    """Sent against received QP, compared only within the same encoded resolution.
+
+    QP is not comparable across resolutions -- in one 0.5 Mbps cell it runs 25.3 at
+    600x480 and 37.4 at 400x324. A cell that steps between rungs therefore has an
+    aggregate QP that depends on the resolution MIX in each side's intervals, and the
+    two sides bucket frames slightly differently. Pooling produced apparent deltas of
+    +1.6 to +3.5 QP on the three 0.5 Mbps cells, all in the same direction, which read
+    as the transport degrading quality. Matched by resolution every one collapses to
+    within +/-1.7, most within +/-0.7.
+
+    Returns [(resolution, n_intervals, sent_p50, recv_p50)], largest sample first.
+    """
+    out = {}
+    for sec, (q, pres) in (pub.get("qp_by_sec") or {}).items():
+        if sec not in (sub.get("qp_by_sec") or {}):
+            continue
+        if sub.get("res_by_sec", {}).get(sec) != pres:
+            continue          # resolutions disagree this second: not comparable
+        out.setdefault(pres, ([], []))
+        out[pres][0].append(q)
+        out[pres][1].append(sub["qp_by_sec"][sec])
+    rows = [(res, len(a), pct(a, 50), pct(b, 50)) for res, (a, b) in out.items() if len(a) >= 5]
+    return sorted(rows, key=lambda r: -r[1])
+
+
 def pct(vals, p):
     if not vals:
         return float("nan")
@@ -51,11 +77,14 @@ def publisher_side(jsonl):
     if len(rows) < 3:
         return None
     qp, sent, grants = [], [], []
+    qp_by_sec = {}
     for (t1, a), (t2, b) in zip(rows, rows[1:]):
         dfr = b["frames_encoded"] - a["frames_encoded"]
         dqp = b["qp_sum"] - a["qp_sum"]
         if dfr > 0:
             qp.append(dqp / dfr)
+            qp_by_sec[int(t2)] = (dqp / dfr,
+                                  (b.get("frame_width"), b.get("frame_height")))
         dby = b["bytes_sent"] - a["bytes_sent"]
         if dby > 0 and t2 > t1:
             sent.append(dby * 8 / (t2 - t1))
@@ -73,7 +102,7 @@ def publisher_side(jsonl):
     full = sum(1 for _, vo in rows
                if (vo.get("frame_width"), vo.get("frame_height")) == (1600, 1300))
     return {
-        "qp": qp, "sent": sent, "grants": grants, "ladder": ladder,
+        "qp": qp, "qp_by_sec": qp_by_sec, "sent": sent, "grants": grants, "ladder": ladder,
         "polls": len(rows), "full_frac": full / len(rows),
         "encoder": last.get("encoder_implementation", ""),
         "nack": last.get("nack_count", 0),
@@ -108,8 +137,39 @@ def subscriber_side(path):
         except (KeyError, ValueError, TypeError):
             continue
         res[k] = res.get(k, 0) + 1
-    qp = col("receive_qp")
+    # Resampled to 1 s to match the publisher's 1 Hz polls. Host B's column repeats
+    # an interval value across that interval's frames, so the raw per-frame series
+    # weights each interval by its frame count. Compared against a per-interval
+    # series that measures the weighting as much as the quantiser: on e2r-500k-r1 the
+    # naive comparison read +3.4 QP and the matched one +1.6.
+    tcol = next((c for c in rows[0] if "capture_timestamp_us" in c), None)
+    buckets = {}
+    if tcol:
+        for r in rows:
+            v = r.get("receive_qp")
+            if v in (None, "", "nan"):
+                continue
+            try:
+                sec = int(float(r[tcol])) // 1_000_000
+                buckets.setdefault(sec, []).append(float(v))
+            except (ValueError, TypeError):
+                continue
+    res_by_sec = {}
+    if tcol:
+        acc = {}
+        for r in rows:
+            try:
+                sec = int(float(r[tcol])) // 1_000_000
+                key = (int(float(r["frame_width"])), int(float(r["frame_height"])))
+            except (ValueError, TypeError, KeyError):
+                continue
+            acc.setdefault(sec, {})
+            acc[sec][key] = acc[sec].get(key, 0) + 1
+        res_by_sec = {sec: max(c.items(), key=lambda kv: kv[1])[0] for sec, c in acc.items()}
+    qp_by_sec = {sec: statistics.mean(v) for sec, v in buckets.items()}
+    qp = [statistics.mean(v) for _, v in sorted(buckets.items())] if buckets else col("receive_qp")
     return {
+        "qp_by_sec": qp_by_sec, "res_by_sec": res_by_sec,
         "rows": len(rows), "qp": qp, "decode_ms": col("decode_ms"),
         "recv_mbps": col("receive_bitrate_mbps"),
         "res": sorted(res.items(), key=lambda kv: -kv[1]),
@@ -232,7 +292,11 @@ def main():
                      '<th class="num">Recv Mbps</th><th class="num">Full size</th>'
                      '<th>Verdict</th></tr></thead><tbody>')
         for room, cap, pub, sub in paired:
-            qs, qr = pct(pub["qp"], 50), pct(sub["qp"], 50)
+            m = matched_qp(pub, sub)
+            if m:
+                _res, _n, qs, qr = m[0]
+            else:
+                qs, qr = pct(pub["qp"], 50), pct(sub["qp"], 50)
             delta = qr - qs
             v = ('<span class="pill p-good">bitstream intact</span>' if abs(delta) <= 1.5
                  else '<span class="pill p-bad">diverges</span>')
@@ -252,7 +316,13 @@ def main():
                      "1 Hz on both hosts so the two averages describe the same window. "
                      "Agreement within about 1.5 QP means the bitstream the decoder read is "
                      "the bitstream the encoder wrote — which this programme had never "
-                     "verified. A larger gap means something altered it in transit.</p></div>")
+                     "verified. A larger gap means something altered it in transit.</p>"
+                     "<p><strong>The delta shown is matched by resolution.</strong> QP is not "
+                     "comparable across resolutions: in one 0.5 Mbps cell it runs 25.3 at "
+                     "600&times;480 and 37.4 at 400&times;324. Pooling the two sides' figures "
+                     "measures their resolution mix as much as their quantiser, and produced "
+                     "apparent deltas of +1.6 to +3.5 on three cells that vanish once "
+                     "matched.</p></div>")
 
     parts.append("<h2>Every cell</h2>")
     for room, cap, pub, sub in cells:
@@ -269,14 +339,20 @@ def main():
                      f'<div class="qpspread">p5 {fmt(pct(pub["qp"],5))} &middot; '
                      f'p95 {fmt(pct(pub["qp"],95))}</div></div>')
         if sub and sub["qp"]:
+            m = matched_qp(pub, sub)
             qr = pct(sub["qp"], 50)
             parts.append('<div class="qpbox"><div class="qplabel">QP received (decoder)</div>'
                          f'<div class="qpval s-recv">{fmt(qr)}</div>'
                          f'<div class="qpspread">p5 {fmt(pct(sub["qp"],5))} &middot; '
                          f'p95 {fmt(pct(sub["qp"],95))}</div></div>')
-            parts.append('<div class="qpbox"><div class="qplabel">Difference</div>'
-                         f'<div class="qpval">{qr-qs:+.1f}</div>'
-                         '<div class="qpspread">received minus sent</div></div>')
+            if m:
+                _r, _n, mqs, mqr = m[0]
+                parts.append('<div class="qpbox"><div class="qplabel">Difference, matched</div>'
+                             f'<div class="qpval">{mqr-mqs:+.1f}</div>'
+                             '<div class="qpspread">same resolution only</div></div>')
+            parts.append('<div class="qpbox"><div class="qplabel">Difference, pooled</div>'
+                         f'<div class="qpval" style="color:var(--ink-3)">{qr-qs:+.1f}</div>'
+                         '<div class="qpspread">not comparable &mdash; mixes resolutions</div></div>')
         else:
             parts.append('<div class="qpbox"><div class="qplabel">QP received</div>'
                          '<div class="qpval" style="color:var(--ink-3)">—</div>'
@@ -300,6 +376,13 @@ def main():
                      f'{pub["bw_s"]:.1f} s &middot; NACK {pub["nack"]} &middot; '
                      f'{pub["fps"]:.0f} fps</td></tr>')
         if sub:
+            m = matched_qp(pub, sub)
+            if m:
+                cells_txt = " &middot; ".join(
+                    f"{r[0]}&times;{r[1]} n={n} sent {a:.1f} recv {b:.1f} ({b-a:+.1f})"
+                    for (r, n, a, b) in m)
+                parts.append('<tr><td class="k">QP by resolution</td>'
+                             f'<td class="ladder">{cells_txt}</td></tr>')
             parts.append(f'<tr><td class="k">Host B decode</td><td class="num">'
                          f'p50 {fmt(pct(sub["decode_ms"],50),2)} ms &middot; '
                          f'p95 {fmt(pct(sub["decode_ms"],95),2)} ms &middot; '
