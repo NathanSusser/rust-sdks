@@ -1082,3 +1082,68 @@ comparison run twenty minutes earlier, GCC intact, was at 300x240 and 0.03 Mbps.
 The measurement cost is also real: with the pin engaged, a cap above what the link
 carries produces a drowned stream rather than an adapted one, so the retransmission
 gate in section 10 is mandatory alongside this, not optional.
+
+---
+
+## 13. The paired-run protocol, and why each clause exists
+
+Every clause below was bought by a specific failure earlier the same night.
+
+1. **Agree a wall-clock start epoch at least 30 s in the future**, named as a Unix
+   integer in the message that proposes it. Both hosts arm against that number,
+   never against message arrival or a verbal "go". Cost of not doing this: a
+   publisher moved rooms while the subscriber was mid-join, and four runs died to
+   empty-room deletion because the two sides arrived at different times.
+2. **Each host's pre-flight runs INSIDE the lead, not after the epoch.** Host B
+   starts its runbook at T-45 s so its uplink probe and manifest complete before T
+   and the join lands on the epoch. A host that starts *at* T joins at T plus its
+   own setup time, which is arming on the epoch plus an unmeasured constant.
+3. **Each host runs its side in a subagent.** Main sessions coordinate; subagents
+   execute and cannot be distracted mid-cell.
+4. **Confirm epoch AND duration as explicit values before either side arms.**
+   Tonight the epoch travelled as a number and the duration travelled in prose, so
+   a 300 s publisher was paired against an 1800 s subscriber. The inactivity guard
+   absorbed it — the subscriber exited 3 at publisher stop plus 10 s, with the full
+   300 s captured — but a 30-minute publisher against a 300 s subscriber would have
+   cost the whole cell. **Synchronising the start is not synchronising the run.**
+5. **A change to either value after arming is an abort and re-agree**, never a
+   mid-flight adjustment. Relaunching to change one argument misses the epoch,
+   which is the thing the protocol exists to protect.
+6. **Both hosts exchange CSVs when the run ends**, and reports are generated from
+   the pair. A publisher-side figure without its receive-side counterpart is not a
+   measurement of what the operator sees — see §14.
+
+### An artefact this creates, and how to read it
+
+A duration mismatch leaves the shorter side's `--log-end-frame-id` unreachable, so
+its CSV stops short of the frame ID the script aimed at. **That gap is bookkeeping,
+not loss.** The arrived-against-emitted panel takes `published` from the frame-ID
+span actually observed and is unaffected, but a reader comparing the last frame ID
+to the script's target would see a fabricated shortfall of tens of thousands of
+frames.
+
+## 14. Send-side health is not delivery, and the rig never measured the difference
+
+The publisher reported 147.2 MB sent, 1600x1300 throughout, 29 fps, no resolution
+changes. All true. The receiver got this:
+
+| stage | frames | lost above |
+|---|---|---|
+| published | 2561 | — |
+| **arrived** | **575** | **1986 — 77.5%, in the network** |
+| decoded | 575 | 0 |
+| drawn | 373 | 202 |
+
+**77.5% of frames never arrived.** Transport was 95.8% of end-to-end latency, p50
+472 ms rising to 2058 ms — a queue filling as well as overflowing, which is what a
+pinned sender does to a bottleneck that cannot signal back-pressure.
+
+This is not a reporting error from one night. **No publisher-side figure in this
+programme has ever had a receive-side counterpart**, from the first run: one host
+reported bitrate as though it were delivery, the other held the received/decoded
+counters and never differenced them against the publisher's frame IDs. Both halves
+existed and nobody joined them.
+
+> **Every publisher-side number needs its receive-side pair before it means
+> anything to an operator.** "The encoder held 1600x1300" and "the operator saw
+> 1600x1300" are different claims, and only one of them is about the deliverable.
