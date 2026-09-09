@@ -1091,7 +1091,17 @@ def generate_report(
         pdf.drawString(footer_left, 17, note)
         pdf.drawRightString(footer_right, 17, page_label)
 
-    draw_footer("Page 1 of 2 - overview", "Frame-loss markers reflect frame-ID gaps. " + freeze_note)
+    draw_footer(
+        "Page 1 of 2 - overview",
+        (
+            "Red marks a publisher frame absent from the subscriber's rendered rows: "
+            "network loss AND frames that arrived but were never drawn. See the funnel "
+            "for the split. "
+            if publisher is not None and subscriber is not None
+            else "Frame-loss markers reflect frame-ID gaps. "
+        )
+        + freeze_note,
+    )
 
     # Page 2 carries the per-stage detail. It was previously squeezed beside the latency
     # table on one page, which left the pipeline timeline 374 pt wide for up to twelve
