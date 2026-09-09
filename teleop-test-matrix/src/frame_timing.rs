@@ -194,6 +194,9 @@ pub struct PublisherFrameLog {
     sample: u64,
     previous_frame_id: Option<u32>,
     last_packetize_us: Option<u64>,
+    /// SDK timing events that carried no usable capture stamp and were discarded.
+    /// Reported at close so a silent drop cannot masquerade as a clean run.
+    dropped_unjoinable_events: u64,
 }
 
 impl PublisherFrameLog {
@@ -207,6 +210,7 @@ impl PublisherFrameLog {
             sample: 0,
             previous_frame_id: None,
             last_packetize_us: None,
+            dropped_unjoinable_events: 0,
         })
     }
 
@@ -223,8 +227,29 @@ impl PublisherFrameLog {
         entry.frame_buffer_timestamp_us = Some(capture_timestamp_us);
     }
 
+    /// How many SDK events were discarded for having no joinable capture stamp.
+    pub fn dropped_unjoinable_events(&self) -> u64 {
+        self.dropped_unjoinable_events
+    }
+
     /// Records one SDK publish-timing event, writing a row when the frame completes.
+    ///
+    /// An event whose `capture_timestamp_us` is zero is DROPPED rather than recorded.
+    /// Zero is not a capture time; it is the SDK reporting a frame it could not join to
+    /// one the harness stamped. Keying a row at zero makes every stage duration measured
+    /// from it a difference against the Unix epoch, so the row carries values near
+    /// 6.6e12 ms -- 210 years.
+    ///
+    /// The reason this survived so long is the shape of the damage: 17 such rows in 4587
+    /// left the MEDIAN untouched and destroyed the MEAN, and a report printed a
+    /// capture-to-packetize mean of 6,629,942,825 ms beside a p50 of 1.1 ms. Percentiles
+    /// hid it completely. Host B caught it downstream and patched their ingestion; this
+    /// is the producer-side fix, so the bad rows are never written.
     pub fn record_event(&mut self, event: PublishTimingEvent) -> io::Result<()> {
+        if event.capture_timestamp_us == 0 {
+            self.dropped_unjoinable_events += 1;
+            return Ok(());
+        }
         let key = event.capture_timestamp_us;
         let entry = self.entry(key);
         entry.capture_timestamp_us = key;

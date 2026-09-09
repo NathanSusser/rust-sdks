@@ -33,3 +33,13 @@ examples/local_video/scripts/archive/**
 !examples/local_video/scripts/archive/**/README.md
 examples/local_video/scripts/archive-hosta/
 examples/local_video/scripts/incoming/
+# Measurement data mirrored between hosts. Same reason as results/: both hosts hold
+# overlapping-but-different subsets, and committing from either side produces
+# unmergeable conflicts. These three were UNTRACKED rather than ignored, so a plain
+# `git add -A` from either host would have put 155 MB of run data into the history.
+/results-hostb/
+/results-shared/*
+!/results-shared/README.md
+!/results-shared/**/README.md
+/teleop-test-matrix/e1-gate-2-samples/
+/teleop-test-matrix/incoming/
