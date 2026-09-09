@@ -952,3 +952,68 @@ logged one line and waited indefinitely, and both of its liveness guards arm onl
 once frames have arrived, so neither could fire on a session that never delivered
 one. That is the fourth guard in this programme to assume the session was still
 alive — after end-of-window, silence, and clean unpublish.
+
+## 10. A pin that removes a confound can remove the measurement with it
+
+`LK_PIN_BITRATE_TO_MAX` was added so a bitrate sweep's cells measure their cap
+rather than whatever congestion control granted. It does that by setting
+`x-google-min-bitrate` to the cap, which stops the estimator lowering the
+allocation.
+
+On a link with headroom that is correct. On a degraded link it is destructive: the
+sender pushes the cap into a path that cannot carry it, a third of the packets
+become retransmissions that also fail, the SFU asks for keyframe after keyframe,
+and nothing coherent arrives. Measured on a 0.63-1.28 Mbps uplink:
+
+| cap | retransmitted | keyframes | outcome |
+|---|---|---|---|
+| 0.5 Mbps | 0.1% | 6 | 3712 frames received |
+| 5 Mbps | 31.7% | 22 | one keyframe, then silence |
+| 10 Mbps | 38.4% | 44 | one keyframe, then silence |
+
+Unpinned, those cells would have stepped down and produced a resolution ladder,
+which is data about what the link delivers. Pinned, they produce nothing.
+
+> **A control that forces the independent variable also forces the system past the
+> point where it can respond.** Whatever the system would have done instead is the
+> measurement you lose.
+
+**And a drowned cell passes the admission gate perfectly.** The gate checked that
+the grant held at the cap. It did — the pin held it there. What the gate could not
+see was whether any of it arrived. A third test is therefore required: reject any
+cell whose retransmission rate exceeds 5%. Tonight's data separates without a
+judgement call, 0.1% against 31-38%.
+
+The cheaper fix is upstream of all of it: **probe the uplink immediately before
+each cell and skip any cell whose cap exceeds it.** That is a gate rather than an
+analysis, it costs seconds, and it would have skipped ten of fourteen cells before
+an hour was spent on them.
+
+## 11. Matching the sampling window changed a divergence into an agreement
+
+The first cross-host quantiser comparison this programme has produced, on
+`e2r-500k-r1`:
+
+| | n | p5 | p50 | p95 |
+|---|---|---|---|---|
+| encoder QP, Host A, 1 Hz polls | 163 | 14.1 | 26.6 | 42.6 |
+| decoder QP, Host B, per frame | 3659 | 14.7 | **30.0** | 42.4 |
+| decoder QP, resampled to 1 Hz | 131 | 17.2 | **28.2** | 41.8 |
+
+Compared naively the medians differ by **+3.4 QP**, which reads as the received
+bitstream being materially worse than the sent one. Resampled to the same 1 Hz
+window the difference is **+1.6**.
+
+Host B's column is an interval mean repeated across the frames of that interval —
+3659 rows carry only 124 distinct values — so the per-frame series weights each
+interval by its frame count. Comparing it against a per-interval series compares
+the weighting as much as the quantiser.
+
+This is the third instance in one day of the same error: a sampled PSNR against a
+full-clip PSNR, a windowed p50 against a full-run mean, and now a per-frame series
+against a per-interval one. Every one pointed somewhere interesting and every one
+dissolved on matching the populations.
+
+> **Before explaining a discrepancy between two statistics, check that they
+> describe the same population.** It is the cheapest hypothesis and it has been
+> right three times out of three.
