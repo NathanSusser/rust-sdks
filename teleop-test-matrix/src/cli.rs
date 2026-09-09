@@ -99,6 +99,36 @@ impl From<Codec> for VideoCodec {
     }
 }
 
+/// How the encoder is permitted to degrade when it cannot meet its target.
+///
+/// The SDK's default for a camera source is `MaintainFramerate`, which holds frame rate
+/// and sacrifices RESOLUTION -- that is what produced the resolution staircase in every
+/// sweep, and it was never a choice anyone made. `Locked` forbids both, so geometry and
+/// frame rate are exactly what was asked for and the encoder absorbs pressure in the
+/// quantiser alone.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Degradation {
+    /// SDK default for the source type. Camera means MaintainFramerate.
+    Default,
+    /// Hold frame rate, drop resolution.
+    MaintainFramerate,
+    /// Hold resolution, drop frames.
+    MaintainResolution,
+    /// Hold BOTH. Quality is the only axis left to give.
+    Locked,
+}
+
+impl Degradation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::MaintainFramerate => "maintain_framerate",
+            Self::MaintainResolution => "maintain_resolution",
+            Self::Locked => "locked",
+        }
+    }
+}
+
 /// Encoder backend request. The matrix always passes `auto`; the others exist so a
 /// forced-backend run can be done by hand without patching the harness.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -288,6 +318,11 @@ pub struct Args {
 
     #[arg(long, value_enum, default_value_t = Encoder::Auto)]
     pub encoder: Encoder,
+
+    /// Which axes the encoder may sacrifice under pressure. `locked` holds resolution
+    /// and frame rate both.
+    #[arg(long, value_enum, default_value = "default")]
+    pub degradation: Degradation,
 
     #[arg(long, default_value_t = 1920)]
     pub width: u32,

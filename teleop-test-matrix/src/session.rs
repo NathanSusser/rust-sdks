@@ -245,6 +245,18 @@ pub async fn publish_video(
             max_bitrate: args.max_bitrate,
             max_framerate: args.fps as f64,
         }),
+        degradation_preference: match args.degradation {
+            crate::cli::Degradation::Default => None,
+            crate::cli::Degradation::MaintainFramerate => {
+                Some(livekit::options::DegradationPreference::MaintainFramerate)
+            }
+            crate::cli::Degradation::MaintainResolution => {
+                Some(livekit::options::DegradationPreference::MaintainResolution)
+            }
+            crate::cli::Degradation::Locked => {
+                Some(livekit::options::DegradationPreference::MaintainFramerateAndResolution)
+            }
+        },
         ..Default::default()
     };
 

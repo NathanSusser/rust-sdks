@@ -1017,3 +1017,68 @@ dissolved on matching the populations.
 > **Before explaining a discrepancy between two statistics, check that they
 > describe the same population.** It is the cheapest hypothesis and it has been
 > right three times out of three.
+
+---
+
+## 12. GCC is removed from this rig, permanently, by operator decision
+
+Google Congestion Control's bandwidth estimate was the binding constraint on almost
+every run in this programme, and it was not tracking the link. Operator ruling
+after seeing the evidence below: **GCC is not good at BWE here; keep it removed.**
+
+### The evidence
+
+On a 10 Mbps cap with a link that measured 9.7 Mbps immediately beforehand, the
+grant did this:
+
+| t | grant | resolution | limitation |
+|---|---|---|---|
+| 0 s | 1.816 Mbps | 1600x1300 | none |
+| 48 s | 5.151 | 1600x1300 | none |
+| 81 s | 3.421 | 1600x1300 | none |
+| **84 s** | **0.070** | 1600x1300 | none |
+| 163 s | 1.694 | 800x648 | bandwidth |
+
+**A 50x drop in a single one-second poll**, then recovery at roughly 20 kbps/s —
+seven minutes to return to 9 Mbps, in a 165 s run. GCC's delay-based estimator
+decreases multiplicatively at ~0.85 per interval; this is not that mechanism
+behaving normally. The resolution staircase followed the grant collapse. It did not
+cause it.
+
+Across the unpinned adaptive sweep the delivered rate had no relationship to the
+cap at all — 5 Mbps sent 0.27 while 2 Mbps sent 0.36 and 10 Mbps sent 1.92, all at
+zero retransmission. A link ceiling makes every cap above it converge; these
+scatter.
+
+### The three overrides, and what each was doing
+
+1. **A hardcoded start ceiling.** `MAX_START_BITRATE_KBPS = 1000` in
+   `peer_transport.rs`: ask for 10 Mbps, start at 1, earn the rest by probing. Now
+   `LK_MAX_START_BITRATE_KBPS`; unset, behaviour is unchanged.
+2. **The estimator's floor.** `x-google-min-bitrate` pinned at the cap via
+   `LK_PIN_BITRATE_TO_MAX`, so the allocation cannot be lowered.
+3. **The degradation policy, which nobody chose.** The SDK defaults a *camera*
+   source to `MaintainFramerate` — hold frame rate, **sacrifice resolution**. That
+   is the resolution staircase, and it sits above any scaler:
+   `scaling_settings = kOff` on all eight hardware paths never disabled it, because
+   it was never the scaler. `--degradation locked` sets
+   `MaintainFramerateAndResolution`; quality is then the only axis left, and it
+   shows up in QP where it can be read.
+
+### The result
+
+10 Mbps offered, all three overrides applied: **147.2 MB over 152 s at 6.8-9.4
+Mbps, 1600x1300 throughout, 29 fps, QP 15-31, zero resolution changes.** The
+comparison run twenty minutes earlier, GCC intact, was at 300x240 and 0.03 Mbps.
+
+### What we now own
+
+> **Congestion control exists to stop a sender congesting a path it shares.**
+> Removing it moves that responsibility to us. This is defensible on a dedicated
+> link whose capacity is known out of band, and it is what the operator has
+> decided. It is not a general default, and a future reader should not carry this
+> configuration onto a shared link without knowing what it disables.
+
+The measurement cost is also real: with the pin engaged, a cap above what the link
+carries produces a drowned stream rather than an adapted one, so the retransmission
+gate in section 10 is mandatory alongside this, not optional.

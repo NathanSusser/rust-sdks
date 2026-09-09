@@ -215,8 +215,22 @@ impl PeerTransport {
     }
 
     /// Maximum x-google-start-bitrate (kbps).
-    /// 1 Mbps is a reasonable ceiling that prevents BWE from starting too aggressively.
-    const MAX_START_BITRATE_KBPS: u32 = 1000;
+    ///
+    /// 1 Mbps is a reasonable ceiling for a browser sharing a home connection: it stops
+    /// the estimator opening aggressively on a link it knows nothing about. On a
+    /// dedicated link whose capacity is known out of band it is the wrong default, and
+    /// it is expensive -- asking for 10 Mbps still starts at 1 and every megabit above
+    /// that has to be earned by probing, which takes tens of seconds we do not have in
+    /// a 165 s cell.
+    ///
+    /// `LK_MAX_START_BITRATE_KBPS` raises it. Unset, behaviour is unchanged.
+    fn max_start_bitrate_kbps() -> u32 {
+        std::env::var("LK_MAX_START_BITRATE_KBPS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1000)
+    }
 
     /// Compute the x-google-start-bitrate value for SDP munging.
     ///
@@ -232,7 +246,7 @@ impl PeerTransport {
 
         // Use 90% of target bitrate as start bitrate, capped at 1 Mbps
         let start_kbps = (target_kbps as f64 * 0.9).round() as u32;
-        Some(start_kbps.min(target_kbps).min(Self::MAX_START_BITRATE_KBPS))
+        Some(start_kbps.min(target_kbps).min(Self::max_start_bitrate_kbps()))
     }
 
     /// Munge SDP to change a=inactive to a=recvonly for RTP media m-lines in single PC mode.
