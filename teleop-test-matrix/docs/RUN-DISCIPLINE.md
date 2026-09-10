@@ -1323,3 +1323,42 @@ author before it reached a permanent document.
 
 > **An unset environment variable produces a capability that is silently absent, and
 > the absence looks like a clean run.**
+
+---
+
+## 20. One error, four times in one night: a statistic quoted over the wrong population
+
+Every one of these was plausible, pointed somewhere interesting, and dissolved the
+moment the two quantities were computed over the same population.
+
+| what was compared | apparent result | after matching |
+|---|---|---|
+| sampled PSNR vs full-clip PSNR | gate at 42.44 dB | **43.70 dB** — the 1-in-30 sample weights an I-frame 30x |
+| windowed p50 vs full-run mean bitrate | 70% delivered, "something is shedding" | **94%** |
+| per-frame QP vs per-interval QP | +3.4 QP, "the transport degrades quality" | **+1.6** |
+| pooled QP vs QP matched by resolution | +1.6 to +3.5 on three cells | **+0.2 to +0.5** — QP is not comparable across resolutions |
+| instantaneous fps vs windowed fps | 29 fps, "parser artefact?" | **29.04 — real**, and the sample was right by accident |
+
+Three of the five would have been reported as findings about the network or the
+codec. The last one is the instructive case: the single-sample figure **agreed** with
+the correct whole-window figure, so it was right for the wrong reason and neither
+host would have known without recomputing.
+
+> **Name the population before quoting the statistic, and name it in the table.**
+> Every figure states the window it was computed over. Two independent measurements
+> agreeing is corroboration only if both were computed over the right population —
+> otherwise it is two instruments sharing one artefact.
+
+### The frame-rate shortfall this exposed
+
+Recomputed as `delta(frames_encoded) / delta(t)` over the whole scored window:
+
+    ov1-1500k-h264   29.05 fps      ov1-1500k-av1   29.04 fps
+    ov1-2000k-h264   29.03 fps      ov1-2000k-av1   29.07 fps
+
+Against a 30/1 source, that is a **~3% capture shortfall, identical across both
+codecs**, so it is the publisher's capture loop and not encode-side back-pressure —
+`video.rs` has an explicit overrun-and-skip branch, and 3% is roughly one skipped
+capture every 34 frames. It does not threaten a codec comparison, since both arms run
+at the same rate, but **it must be reported rather than rounded to 30**: a 3% frame
+deficit is real, and the deliverable is a teleoperation feed.
