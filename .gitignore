@@ -43,3 +43,12 @@ examples/local_video/scripts/incoming/
 !/results-shared/**/README.md
 /teleop-test-matrix/e1-gate-2-samples/
 /teleop-test-matrix/incoming/
+
+# The overnight joint-report tree: CSVs, logs, 2.4 GB of raw I420 reference frames, and
+# generated reports. Same reason as the rules above -- measurement data stays out of git.
+# It was untracked but NOT ignored, which is one careless `git add -A` from the problem
+# those rules exist to prevent. Bucket/report README files remain documentation.
+overnight-2026-09-10/**
+!overnight-2026-09-10/**/
+!overnight-2026-09-10/README.md
+!overnight-2026-09-10/clock-sync-hostb.txt
