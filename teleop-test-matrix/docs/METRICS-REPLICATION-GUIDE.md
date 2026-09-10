@@ -6,6 +6,17 @@ numbers that mean the same thing. It documents the instrumentation, not the resu
 Reference implementation: `examples/local_video/src/{publisher,subscriber}.rs`,
 `examples/local_video/src/subscriber_timing.rs`, `webrtc-sys/src/packet_trailer.cpp`.
 
+**Scope, against its siblings in this directory.** This document is for an *external*
+team reproducing the measurements on a different client: what to instrument and where.
+It is deliberately about method, not results, and carries no numbers except as worked
+examples of a trap.
+
+- `MEASUREMENT-DESIGN.md` — requirements traceability: which PRD clause each metric
+  settles, and the metric→SDK-API mapping. Read that for *why a metric exists*.
+- `RUN-DISCIPLINE.md` — the withdrawal ledger and run rules for this rig.
+- `PTP-RUNBOOK-HOST-{A,B}.md` — how the clock in §1 is actually set up and verified.
+- `SDK-FINDINGS.md` — defects and behaviours found in the SDK itself.
+
 ---
 
 ## 1. The problem that shapes everything: two clocks
