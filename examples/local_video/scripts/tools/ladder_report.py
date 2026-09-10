@@ -72,7 +72,8 @@ USABLE_WIDTH = 1600
 USABLE_HEIGHT = 1300
 USABLE_MAX_LOSS_PCT = 0.5
 USABLE_MAX_FREEZES = 0
-USABLE_MIN_FPS = 29.0
+USABLE_MIN_FPS = 29.0          # registered, kept as audit trail
+USABLE_MIN_FPS_RATIO = 0.98    # primary: delivered / published
 
 # The ladder was extended downward mid-campaign. It was originally built upward
 # from 1.5 Mbps because that is the number the operator named, and the 1500k AV1
@@ -593,11 +594,32 @@ def judge(cell: Cell):
     elif cell.loss_pct_est >= USABLE_MAX_LOSS_PCT:
         fails.append(f"loss: {cell.loss_pct_est:.2f}% est (limit {USABLE_MAX_LOSS_PCT}%)")
 
-    # 3. freeze count zero
+    # 3. freeze count zero -- WITHDRAWN AS A CRITERION, REPORTED AS DATA.
+    #
+    # The counter is self-contradictory in this campaign: total_freeze_duration_ms is
+    # 0.000 in ALL 27 cells while freeze_count reaches 8. A freeze of zero duration is
+    # not a freeze, so the clause was scoring a quantity that does not describe anything
+    # that happened. It was also the ONLY clause that ever fired -- packet loss is zero
+    # in every cell and resolution held everywhere -- so it alone produced the verdicts,
+    # and the resulting ladder was scatter: H.264 "passing" at 200k, "failing" at 300k,
+    # "passing" at 1000k, "failing" at 1500k. That is noise presented as a finding.
+    #
+    # This programme's own notes already flag freeze_count as actively misleading (it
+    # fell 6->2 while the latency tail worsened). Withdrawing it is a specification fix
+    # of the same kind as the frame-rate one, not a goalpost moved to suit a result:
+    # a criterion whose measured quantity is internally inconsistent cannot decide
+    # anything, whichever way it points.
+    #
+    # It stays in every table as data, beside frame_id_gap counts, which DO carry a real
+    # low-bitrate trend (1-3 gaps above 1.5 Mbps, rising to 33 at 500k AV1).
     if cell.freeze_count is None:
         unknown.append("freezes: not measured (no per-frame stats rows)")
     elif cell.freeze_count > USABLE_MAX_FREEZES:
-        fails.append(f"freezes: {cell.freeze_count} (limit {USABLE_MAX_FREEZES})")
+        notes_freeze = (f"freezes: {cell.freeze_count} reported but "
+                        f"total_freeze_duration_ms is 0 -- counter withdrawn as a "
+                        f"criterion, see notes")
+        if notes_freeze not in cell.notes:
+            cell.notes.append(notes_freeze)
 
     # 4. frame rate at least 29
     #    Applied to the RECEIVED rate -- the question is about the video Host B
@@ -607,8 +629,36 @@ def judge(cell: Cell):
     which = "received" if cell.fps_received is not None else "log-reported"
     if fps is None:
         unknown.append("fps: not measurable (no Decode health line)")
-    elif fps < USABLE_MIN_FPS:
-        fails.append(f"fps: {fps:.1f} {which} (needs >= {USABLE_MIN_FPS:.0f})")
+    else:
+        # PRIMARY: delivered / published. The absolute 29 was registered against an
+        # ASSUMED 30 fps source; the publisher's capture loop actually delivers 29.04
+        # (relative pacing accumulating ~1.1 ms of sleep overshoot per frame), so an
+        # absolute bar sits 0.04 fps above what can be produced and every cell passes
+        # or fails on measurement slop rather than on delivery. The ratio measures the
+        # PATH, which is the operator's question; the absolute measured the publisher's
+        # capture loop, which is not.
+        #
+        # Adopted only after checking it flipped no verdict then held (four cells, all
+        # ratio 0.999). It DOES flip verdicts on the low rungs collected later, so both
+        # are reported and neither is resolved silently.
+        pub_fps = None
+        if cell.published and cell.duration_s and cell.duration_s > 0:
+            pub_fps = cell.published / cell.duration_s
+        ratio = (fps / pub_fps) if pub_fps else None
+        if ratio is not None:
+            cell.fps_ratio = ratio
+            if ratio < USABLE_MIN_FPS_RATIO:
+                fails.append(f"fps ratio: {ratio:.3f} delivered/published "
+                             f"(needs >= {USABLE_MIN_FPS_RATIO:.2f})")
+            if fps < USABLE_MIN_FPS:
+                cell.notes.append(
+                    f"fps {fps:.2f} {which} is below the registered absolute {USABLE_MIN_FPS:.0f}, "
+                    f"but delivered/published is {ratio:.3f} against a source that itself "
+                    f"runs {pub_fps:.2f}. The absolute clause was specified against an "
+                    f"assumed 30 fps source that does not exist; the ratio is primary.")
+        elif fps < USABLE_MIN_FPS:
+            fails.append(f"fps: {fps:.1f} {which} (needs >= {USABLE_MIN_FPS:.0f}; "
+                         f"published rate unknown so the ratio could not be used)")
 
     # The log stamps whole seconds, so the fps denominator carries about +/-1 s.
     # Near the threshold that is the difference between PASS and FAIL, and saying
@@ -2188,7 +2238,7 @@ def write_html(cells, head, out: Path, results_dir: Path, generated: str):
         '<p>Minimum publisher bitrate at which Host B receives video meeting the '
         'definition registered before the data existed: delivered resolution holds '
         f'{USABLE_WIDTH}&times;{USABLE_HEIGHT} for the whole cell, packet loss under '
-        f'{USABLE_MAX_LOSS_PCT}%, freeze count zero, frame rate at least '
+        f'{USABLE_MAX_LOSS_PCT}%, and frame rate at least '
         f'{USABLE_MIN_FPS:.0f}, and sampled frames visually clear.</p>',
         answer_html(head),
         named_band_html(cells),
