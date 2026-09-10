@@ -1283,31 +1283,43 @@ most misleading thing that campaign could have produced.
 Metrics on the newer box were traded away for hardware encoding without hesitation:
 the metrics were convenience, the encoder is the deliverable.
 
-## 19. A detached driver must carry the whole display environment
+## 19. An uncomposited Wayland surface decodes perfectly and records nothing
 
-A subscriber launched from a detached driver received **664 frames, decoded 664,
-dropped 0**, with dav1d working — and wrote **zero CSV rows**. It logs one row per
-GPU-*rendered* frame, and without a display there is no rendering and no metrics.
-Perfect reception, empty file, every health counter normal.
+A subscriber received **1684 frames, decoded 1684, dropped 0**, with the window
+created and both wgpu adapters enumerated — and wrote **zero CSV rows**.
 
-> **Export `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and `XAUTHORITY` inside
-> the driver script rather than inheriting them.**
+The subscriber logs one row per GPU-*completed* frame. **A native Wayland surface
+that is not composited receives no frame callbacks, so the render loop never runs.**
+Decode is unaffected and every health counter reads perfect, so the failure is
+invisible from inside: full reception, empty file.
 
-This is the third instance of one shape, in three different variables and three
-different subsystems:
+> **Force Xwayland for any unattended run: `unset WAYLAND_DISPLAY`.** Xwayland is not
+> throttled that way. A detached driver must also carry `DISPLAY`,
+> `XDG_RUNTIME_DIR` and `XAUTHORITY`.
+
+This is the locked-session trap of §7 reached from a different direction — there the
+session was locked, here the window simply is not on screen — and it has the same
+remedy, which is why it was not recognised for three cells.
+
+### Three hypotheses, one symptom, and what finally separated them
+
+| hypothesis | why it fit | how it died |
+|---|---|---|
+| `setsid nohup` lost `DISPLAY` | detached driver, no display | a later cell had DISPLAY and still wrote nothing |
+| the display variables were incomplete | `XAUTHORITY` was genuinely missing | cell 1 had the full set and still wrote nothing |
+| the surface is not composited | explains decode-without-render exactly | holds; Xwayland is the remedy |
+
+**What distinguished them was a cell that had the proposed fix and failed anyway** —
+ruling the environment out rather than confirming the next guess. Each wrong
+hypothesis fit the evidence available when it was made, and each was corrected by its
+author before it reached a permanent document.
+
+### The environment-variable shape, which is separate and still true
 
 | variable | what went silently missing | how it looked |
 |---|---|---|
 | `CUDA_HOME` | NVENC compiled out of the build | runs fine on the software encoder |
 | `SSL_CERT_FILE` | the corporate CA | connect fails in one second |
-| the display set | the render path | decodes perfectly, writes nothing |
 
 > **An unset environment variable produces a capability that is silently absent, and
 > the absence looks like a clean run.**
-
-*Recorded with a correction from Host B: the original diagnosis blamed `setsid nohup`
-detaching the session, and a later cell disproved that mechanism — the operator had
-killed that subscriber themselves while restarting the driver. The variable list is
-the durable lesson; the mechanism was misattributed. Distinguishing "my hypothesis is
-wrong" from "there is a second bug" is where this programme has spent most of its
-time.*
