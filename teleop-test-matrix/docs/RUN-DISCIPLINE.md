@@ -1362,3 +1362,60 @@ codecs**, so it is the publisher's capture loop and not encode-side back-pressur
 capture every 34 frames. It does not threaten a codec comparison, since both arms run
 at the same rate, but **it must be reported rather than rounded to 30**: a 3% frame
 deficit is real, and the deliverable is a teleoperation feed.
+
+---
+
+## 21. Our definition of "usable" did not contain usability
+
+The pass criteria were registered in advance, before any data, which was right. They
+were still wrong, and the flaw is structural rather than careless.
+
+    resolution holds 1600x1300 for the whole cell     delivery
+    packet loss under 0.5%                            delivery
+    freeze count zero                                 delivery
+    delivered/published frame rate >= 0.98            delivery
+    sampled frames visually clear against the source  QUALITY
+
+**Four of five measure whether the bytes arrived. One measures whether the picture is
+any good — and it is the only one left to human judgement.**
+
+The design makes the gap worse rather than incidental. `--degradation locked` forbids
+the encoder from shedding resolution or frame rate, so the entire shortfall at a low
+cap lands in the quantiser. **A 200 kbps stream can therefore arrive intact at full
+geometry and full frame rate, satisfy every measurable clause, and look terrible.**
+
+> **Registering criteria in advance protects against choosing them to fit the result.
+> It does not protect against choosing the wrong ones.** Check that a criterion set
+> contains at least one clause measuring the thing actually asked about, and notice
+> when every automated clause measures something adjacent to it.
+
+## 22. Some post-hoc changes cannot be legitimised, and that is decidable in advance
+
+Two specification changes came up on the same night. One was adopted, one was
+pre-emptively forbidden, and the difference is not how reasonable each sounded.
+
+**The frame-rate criterion was changed after seeing data and it was legitimate**,
+because it could be tested: recompute every verdict already held under the new
+definition and show none of them flips. Four cells, identical verdicts, so the change
+fixed a defect rather than moving a goalpost. The original was wrong when written — it
+assumed a 30 fps source that does not exist.
+
+**A PSNR threshold invented at the end of the campaign could not have been tested that
+way**, because there would be no prior verdicts to check it against. The check that
+legitimised the first change is *structurally unavailable* for the second.
+
+> **A definition changed after seeing data is suspect unless you can demonstrate it
+> flips no verdict you already hold. Where that demonstration is impossible in
+> principle, the change must be decided BEFORE the data exists or not at all.**
+
+So PSNR is reported as a measured axis per rung and never converted into a pass/fail
+threshold. Any figure chosen at the end would be our judgement wearing the operator's
+question, and "usable for teleoperation" is a judgement about driving a robot rather
+than about decibels.
+
+### Reading order is an argument
+
+The report puts the frame strip and the PSNR ladder **before** the table carrying the
+PASS column. A reader who meets a green PASS at 200 kbps before seeing what 200 kbps
+looks like has been misled by the document's structure, however carefully the caveats
+are worded.
