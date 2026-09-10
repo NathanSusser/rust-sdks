@@ -1253,3 +1253,61 @@ this and nearly re-armed against a stale schedule.
 Three occurrences across two hosts, all after the rule was written down. The rule was
 right and too weak to act on, which is its own lesson: **a rule that names the failure
 without naming the tempting workaround will be re-learned.**
+
+---
+
+## 18. A server capability difference silently downgraded the encoder
+
+Same binary, same flags, two SFU deployments, minutes apart:
+
+| server | `encoder_implementation` |
+|---|---|
+| `livekit-figure-ai…` (newer) | **OpenH264** — software |
+| `…-h265…` (older) | **NVIDIA H264 Encoder**, 30 fps |
+
+The newer deployment negotiates an H.264 configuration our NVENC path cannot
+satisfy, so libwebrtc falls back to the software encoder. **Nothing in the run
+reveals it**: the resolution holds, the frame rate holds, `quality_limitation_reason`
+reads `none`, and every number is simply measured on the wrong hardware.
+
+It would have been worse than mislabelled for AV1. Software AV1 cannot hold 30 fps
+at 2 Mpx, so those cells would have shown a throughput collapse reading as
+*"AV1 needs more bitrate"* when the truth is *"AV1 ran on the wrong encoder"* — the
+most misleading thing that campaign could have produced.
+
+> **Read `encoder_implementation` out of the first cell's own stats at the start of
+> every campaign, and treat a change of SFU as a change of encoder until proven
+> otherwise.** Nobody would think to re-check the encoder after changing only the
+> server, which is exactly why it has to be a standing check rather than a reaction.
+
+Metrics on the newer box were traded away for hardware encoding without hesitation:
+the metrics were convenience, the encoder is the deliverable.
+
+## 19. A detached driver must carry the whole display environment
+
+A subscriber launched from a detached driver received **664 frames, decoded 664,
+dropped 0**, with dav1d working — and wrote **zero CSV rows**. It logs one row per
+GPU-*rendered* frame, and without a display there is no rendering and no metrics.
+Perfect reception, empty file, every health counter normal.
+
+> **Export `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and `XAUTHORITY` inside
+> the driver script rather than inheriting them.**
+
+This is the third instance of one shape, in three different variables and three
+different subsystems:
+
+| variable | what went silently missing | how it looked |
+|---|---|---|
+| `CUDA_HOME` | NVENC compiled out of the build | runs fine on the software encoder |
+| `SSL_CERT_FILE` | the corporate CA | connect fails in one second |
+| the display set | the render path | decodes perfectly, writes nothing |
+
+> **An unset environment variable produces a capability that is silently absent, and
+> the absence looks like a clean run.**
+
+*Recorded with a correction from Host B: the original diagnosis blamed `setsid nohup`
+detaching the session, and a later cell disproved that mechanism — the operator had
+killed that subscriber themselves while restarting the driver. The variable list is
+the durable lesson; the mechanism was misattributed. Distinguishing "my hypothesis is
+wrong" from "there is a second bug" is where this programme has spent most of its
+time.*
