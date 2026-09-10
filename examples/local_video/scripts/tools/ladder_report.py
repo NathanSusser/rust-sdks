@@ -2151,8 +2151,24 @@ def write_html(cells, head, out: Path, results_dir: Path, generated: str):
         '<b>drawn</b> is the CSV row count. <b>Net gap</b> (published &minus; received) '
         'is the network. <b>Render skip</b> (decoded &minus; drawn) is Host B. They are '
         'reported in separate columns and are never added.</div>',
+        '<h2 id="strip">The ladder, as pictures</h2>',
+        '<p>One sampled frame from the middle of each cell, decoded from the raw I420 '
+        'the subscriber wrote. <b>This is the evidence for the only criterion that '
+        'measures the operator&rsquo;s actual question.</b> The other four clauses are '
+        'delivery properties &mdash; resolution, loss, freezes, frame rate &mdash; and '
+        'with <span class="mono">--degradation locked</span> the encoder cannot shed '
+        'resolution or frame rate, so it absorbs the whole shortfall in quantiser. A '
+        'stream can therefore arrive perfectly intact and satisfy every measurable '
+        'clause while looking bad. Look before reading the verdicts.</p>',
+        strip_html(cells),
         '<h2>Charts</h2>',
         '<div class="charts">' + "".join(charts) + '</div>',
+        '<div class="callout"><b>PSNR is a measured axis, not a pass criterion.</b> '
+        'We hold reference PSNR and deliberately did not turn it into a threshold: '
+        'any figure we picked tonight would be our judgement wearing the '
+        'operator&rsquo;s question. &ldquo;Usable for teleoperation&rdquo; is a '
+        'judgement about driving a robot, not about decibels. The ladder shows quality '
+        'against bitrate; where the threshold sits is the operator&rsquo;s call.</div>',
         '<h2>Per-cell table</h2>',
         '<div class="callout">* <b>QP is not comparable across codecs.</b> H.264 '
         'quantiser indices run 0&ndash;51 and AV1&rsquo;s run 0&ndash;255, so an AV1 '
@@ -2178,10 +2194,6 @@ def write_html(cells, head, out: Path, results_dir: Path, generated: str):
         doc.append('</ul></div>')
 
     doc += [
-        '<h2 id="strip">The ladder, as pictures</h2>',
-        '<p>One sampled frame from the middle of each cell, decoded from the raw I420 '
-        'the subscriber wrote. This is what &ldquo;visually clear&rdquo; is judged on.</p>',
-        strip_html(cells),
         '<footer>Latency is two figures and is never summed. Frame loss is network and '
         'render skip and is never summed. Loss percentage is estimated: the subscriber '
         f'records packets_lost but not packets_received, so the denominator assumes '
