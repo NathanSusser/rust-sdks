@@ -88,6 +88,13 @@ impl Args {
     fn source(&self) -> ExportSource {
         match VideoSourceSelector::resolve(&self.camera_source) {
             None => ExportSource::Synthetic,
+            // A file source is exported through the same ffmpeg path as RTSP; the
+            // selector just carries a path instead of a URL.
+            Some(VideoSourceSelector::File(path)) => ExportSource::Rtsp(
+                teleop_test_matrix::rtsp::RtspSelector::new(&path),
+                self.rtsp_transport,
+                std::time::Duration::from_secs(self.rtsp_stall_timeout_s.max(1)),
+            ),
             Some(VideoSourceSelector::Rtsp(selector)) => ExportSource::Rtsp(
                 selector,
                 self.rtsp_transport,

@@ -403,6 +403,28 @@ impl RtspFrameSource {
         )
     }
 
+    /// Reads frames from a local media file, looping it forever.
+    ///
+    /// Exists so a fixed clip can be the source without an RTSP hop. Serving a file to
+    /// ourselves over loopback RTSP put a whole media server and a TCP session in front of
+    /// the encoder: under load it produced 535 `error while decoding` events on a 153 Mbps
+    /// intermediate, so the encoder was fed damaged frames and an unknown share of the
+    /// measured degradation started on this host rather than on the network. A file has
+    /// none of that.
+    ///
+    /// `-re` paces at wall-clock rate so the harness sees the clip at its real frame rate
+    /// rather than as fast as the disk can supply it, and `-stream_loop -1` runs a short
+    /// clip for the length of any cell.
+    pub fn open_file(path: &str, options: &RtspOptions) -> Result<Self, RtspError> {
+        let selector = RtspSelector::new(path);
+        Self::open_input(
+            &selector,
+            options,
+            &["-re".to_string(), "-stream_loop".to_string(), "-1".to_string()],
+            path,
+        )
+    }
+
     /// Spawns ffmpeg against an arbitrary input, which [`open`](Self::open) specialises to
     /// an RTSP URL.
     ///

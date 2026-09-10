@@ -204,6 +204,7 @@ async fn open_frame_source(args: &Args) -> Result<FrameSource, RunError> {
     let source = match selector {
         VideoSourceSelector::Device(selector) => open_local_camera(args, selector).await?,
         VideoSourceSelector::Rtsp(selector) => open_rtsp_stream(args, selector).await?,
+        VideoSourceSelector::File(path) => open_media_file(args, &path).await?,
     };
 
     if source.width() != args.width || source.height() != args.height {
@@ -251,6 +252,33 @@ async fn open_local_camera(
 /// password or a wrong stream path all surface on the first frame read instead, carrying
 /// ffmpeg's own diagnosis. That is deliberate — waiting here for a first frame would put a
 /// second, separate timeout in front of the one the capture loop already applies.
+
+/// Opens a local media file as the frame source, looped.
+///
+/// Same subprocess machinery as the RTSP path, without a media server and a loopback TCP
+/// session between the clip and the encoder.
+async fn open_media_file(args: &Args, path: &str) -> Result<FrameSource, RunError> {
+    let options = crate::rtsp::RtspOptions {
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        transport: args.rtsp_transport,
+        stall_timeout: args.rtsp_stall_timeout(),
+    };
+    let path = path.to_string();
+    let opened = tokio::task::spawn_blocking(move || {
+        crate::rtsp::RtspFrameSource::open_file(&path, &options)
+    })
+    .await;
+
+    match opened {
+        Ok(result) => Ok(FrameSource::Rtsp(Box::new(result?))),
+        Err(e) => Err(RunError::Rtsp(crate::rtsp::RtspError::Pipe(format!(
+            "file source task did not complete: {e}"
+        )))),
+    }
+}
+
 async fn open_rtsp_stream(
     args: &Args,
     selector: crate::rtsp::RtspSelector,

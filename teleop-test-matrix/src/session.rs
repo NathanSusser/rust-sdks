@@ -136,6 +136,35 @@ pub async fn reset_room(credentials: &Credentials, room_name: &str) {
         &credentials.api_key,
         &credentials.api_secret,
     );
+    // NEVER delete a room that has participants in it.
+    //
+    // This pre-flight exists to clear participants a failed predecessor left behind. On a
+    // paired run it did the opposite: Host B joined at 03:51:07, was active, and this call
+    // deleted the room at 03:51:21 -- four seconds before the agreed epoch. The publisher
+    // then created a NEW room with the same name and a different SID, so B was attached to
+    // a room that no longer existed and wrote zero rows. It is almost certainly the real
+    // mechanism behind the earlier zero-row runs we blamed on idle-room deletion.
+    //
+    // A stale participant from a crashed predecessor and a live partner waiting on an
+    // epoch are indistinguishable by name, so the safe rule is: if anyone is in there,
+    // leave it alone and say so loudly.
+    match client.list_participants(room_name).await {
+        Ok(participants) if !participants.is_empty() => {
+            let names: Vec<_> = participants.iter().map(|p| p.identity.as_str()).collect();
+            log::warn!(
+                "room {room_name} already has {} participant(s) {names:?}; NOT deleting it.                  If these are stale, remove them by hand -- deleting the room here would                  evict a partner who has already armed against this room name.",
+                participants.len()
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            // Cannot prove the room is empty, so do not delete it.
+            log::warn!("list_participants({room_name}) failed ({e}); skipping the pre-run \
+                        delete rather than risk evicting a live subscriber");
+            return;
+        }
+    }
     if let Err(e) = client.delete_room(room_name).await {
         log::debug!("delete_room({room_name}) before the run: {e}");
     }

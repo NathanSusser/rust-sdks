@@ -28,6 +28,9 @@ pub enum VideoSourceSelector {
     Device(CameraSelector),
     /// An IP camera reached over RTSP.
     Rtsp(RtspSelector),
+    /// A local media file, looped. No RTSP hop, no media server, nothing between the
+    /// clip and the encoder.
+    File(String),
 }
 
 impl VideoSourceSelector {
@@ -58,6 +61,12 @@ impl VideoSourceSelector {
         }
         if crate::rtsp::is_rtsp_url(value) {
             return Some(Self::Rtsp(RtspSelector::new(value)));
+        }
+        // An existing file is a file. Checked before the device fallback because a path
+        // is otherwise parsed as a camera NAME and fails at enumeration with a message
+        // about no matching device, which says nothing about the real mistake.
+        if std::path::Path::new(value).is_file() {
+            return Some(Self::File(value.to_string()));
         }
         Some(Self::Device(CameraSelector::parse(value)))
     }
