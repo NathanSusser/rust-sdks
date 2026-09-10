@@ -1204,3 +1204,52 @@ The diagnostic is two commands and neither needs the rig:
 
 A second line on the same tower is the control. Without one, good signal and poor
 throughput look like a radio problem and there is nothing to compare against.
+
+---
+
+## 16. An older LiveKit rejects data TRACKS, and the symptom names nothing
+
+Pointing this harness at an older LiveKit deployment fails like this:
+
+    signal connection failed on v1 path: Handshake { status: 404 }
+    v1 path not found (404), falling back to v0 path
+    run failed: track publish failed: control data track: Publish data track timed-out
+
+The harness publishes a **control data track** by default
+(`--control-transport data_track_buf1`). A server with no v1 signal path does not
+support data tracks, the publish times out, and **the publish dies before any video
+leaves the host — so the room is never created at all.**
+
+From the subscriber's side that is invisible in the worst way: it queries the server,
+finds no room with the expected name, and has no reason to suspect a *data track* is
+the cause. The first attempt at the overnight sweep lost its first cell to this and
+would have lost all sixteen.
+
+> **`--control-transport dc_reliable` is the fix.** The legacy data channel works on
+> deployments that predate data tracks. Check it first whenever a publish times out on
+> a server that answers 404 on the v1 signal path.
+
+**And a run whose publish fails must stop the campaign, not continue.** Sixteen cells
+into a server that rejects every publish produces sixteen empty results and one
+morning wasted. A cell refused for being *late* is different and the sweep should
+carry on past it.
+
+## 17. `pkill -f` is worse than recorded, and the usual workaround does not fix it
+
+§7 already says a pattern-matching kill sees its own invocation. That is not sharp
+enough, and both hosts have now been caught after reading it.
+
+The bracket trick — `grep '[o]vernight.sh'` — stops **grep** matching itself. It does
+**not** stop the pattern matching **the parent shell**, whose command line contains
+the pattern because the pattern is written in the command being run. So
+`ps | grep | xargs kill` kills the shell doing the killing: exit 144, no output, and
+whatever edit was queued behind it never runs. Host B lost an epoch update to exactly
+this and nearly re-armed against a stale schedule.
+
+> **Record the PID at launch and kill that PID.** Never derive a kill list from `ps`
+> or `pkill` pattern matching inside a shell whose own command line contains the
+> pattern.
+
+Three occurrences across two hosts, all after the rule was written down. The rule was
+right and too weak to act on, which is its own lesson: **a rule that names the failure
+without naming the tempting workaround will be re-learned.**
