@@ -914,12 +914,28 @@ def psnr_ladder(cells):
             by_codec.setdefault(c.codec, []).append(c)
 
     for codec, group in by_codec.items():
-        top = next((c for c in group if c.rate_kbps == max(EXPECTED_RATES)), None)
-        if top is None:
-            top = max(group, key=lambda c: c.rate_kbps)
-            note = f"vs {top.rate_kbps}k {codec} (8000k rung unavailable)"
-        else:
+        # The reference must be a COMPLETE rung. Picking the highest rate outright
+        # selects, during a running sweep, the cell that started most recently and
+        # therefore holds the fewest frames -- a reference that covers a fraction of
+        # the clip, against which every other rung fails to fit a stride and is
+        # reported UNALIGNED. That is a true statement about a badly chosen
+        # reference, not about the cells. So: only rungs whose frame count is within
+        # reach of the fullest rung are eligible to be the reference.
+        fullest = max(c.n_frames_sampled for c in group)
+        eligible = [c for c in group if c.n_frames_sampled >= 0.8 * fullest]
+        top = next((c for c in eligible if c.rate_kbps == max(EXPECTED_RATES)), None)
+        if top is not None:
             note = f"vs {top.rate_kbps}k {codec}"
+        else:
+            top = max(eligible, key=lambda c: c.rate_kbps)
+            note = f"vs {top.rate_kbps}k {codec} (highest COMPLETE rung so far)"
+        # rungs still filling up are scored, but never used as the yardstick
+        for c in group:
+            if c.n_frames_sampled < 0.8 * fullest and c is not top:
+                c.notes.append(
+                    f"only {c.n_frames_sampled} frames sampled against the fullest "
+                    f"rung's {fullest}; if this cell is still running its PSNR is "
+                    f"provisional")
         ref_dir = top.path / "frames"
         # The reference rung is read at the geometry it actually delivered; if it
         # downscaled, saying so is more use than a number scored against a resize.
@@ -1974,6 +1990,46 @@ def strip_html(cells):
     return "".join(o)
 
 
+
+# The operator named a specific band -- 1.5, 2, 2.5, 3, 4 Mbps -- and asked which of them
+# works. A bracket answers "where is the floor"; it does not answer the question as put.
+# If every named rate passes and quality barely moves across them, that IS the answer and
+# it is more useful than a single number: the whole band is above the knee, so the choice
+# among those rates is not a quality choice and the difference can be spent elsewhere.
+OPERATOR_BAND_KBPS = (1500, 2000, 2500, 3000, 4000)
+
+
+def named_band_html(cells):
+    inband = [c for c in cells
+              if getattr(c, "rate_kbps", None) in OPERATOR_BAND_KBPS
+              and getattr(c, "verdict", None) is not None]
+    if not inband:
+        return ""
+    psnrs = [getattr(c, "psnr", None) for c in inband]
+    psnrs = [x for x in psnrs if isinstance(x, (int, float))]
+    passed = [c for c in inband if str(getattr(c, "verdict", "")).upper().startswith("PASS")]
+    spread = (max(psnrs) - min(psnrs)) if len(psnrs) > 1 else None
+    bits = [f'<b>{len(passed)} of {len(inband)}</b> cells at the rates you named '
+            f'(1.5, 2, 2.5, 3, 4 Mbps) meet every measurable criterion']
+    if spread is not None:
+        bits.append(f'and luma PSNR moves <b>{spread:.2f} dB</b> across that whole band')
+    # The "above the knee" conclusion rests on the PSNR spread. Without a spread figure
+    # the sentence would assert it from the pass count alone, which does not support it.
+    if spread is not None and spread < 1.0:
+        tail = ('A spread that small means the named band sits <b>entirely above the '
+                'knee</b>: the choice between 1.5 and 4 Mbps is not a quality choice on '
+                'this content. That is why the ladder was extended downward &mdash; the '
+                'interesting rungs are below the range originally asked about.')
+    elif spread is not None:
+        tail = ('Quality does vary across the named band, so the choice between these '
+                'rates <b>is</b> a quality choice &mdash; read the ladder, not the pass '
+                'column.')
+    else:
+        tail = ('PSNR was not scored in this run, so whether the band is above the knee '
+                'is not established here &mdash; only that these rates deliver.')
+    return ('<div class="callout"><b>Answering the question as asked.</b> '
+            + ", ".join(bits) + '. ' + tail + '</div>')
+
 def answer_html(head):
     o = ['<div class="answer">']
     for codec, name in (("h264", "H.264"), ("av1", "AV1")):
@@ -2135,6 +2191,7 @@ def write_html(cells, head, out: Path, results_dir: Path, generated: str):
         f'{USABLE_MAX_LOSS_PCT}%, freeze count zero, frame rate at least '
         f'{USABLE_MIN_FPS:.0f}, and sampled frames visually clear.</p>',
         answer_html(head),
+        named_band_html(cells),
         '<div class="callout"><b>Two latency figures, never one.</b> '
         '<span class="mono">exposure_to_receive_ms</span> is <b>transport</b> &mdash; '
         'capture to arrival, the network path. '
