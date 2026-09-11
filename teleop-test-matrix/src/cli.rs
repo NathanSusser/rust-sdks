@@ -74,12 +74,21 @@ impl VideoSourceSelector {
 
 /// Video codec requested at publish time.
 ///
-/// H.265 is deliberately absent: it is the one codec with an automatic publish-time
-/// fallback to H.264, which would turn an H.265 cell into an H.264 cell without the run
-/// record showing it.
+/// H.265 was deliberately absent until the negotiated-codec guard existed: it is the one
+/// codec with an automatic publish-time fallback to H.264, which would turn an H.265 cell
+/// into an H.264 cell without the run record showing it. That is the same silent-downgrade
+/// class that put three runs on OpenH264 when `CUDA_HOME` was unset and again when a newer
+/// server negotiated a configuration NVENC could not satisfy -- in both cases the cells
+/// were analysed before anyone noticed the encoder had changed underneath them.
+///
+/// It is admitted now because [`crate::run::RunError::CodecFallback`] makes the fallback
+/// fatal: the negotiated codec is compared against the requested one before a run is
+/// accepted, so an H.265 cell that silently became an H.264 cell fails instead of being
+/// recorded. The guard covers every codec on this axis, not just H.265.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Codec {
     H264,
+    H265,
     Vp8,
     Vp9,
     Av1,
@@ -87,9 +96,13 @@ pub enum Codec {
 
 impl Codec {
     /// Lowercase name as it appears in `matrix.yaml` and the run record.
+    ///
+    /// These must match [`crate::encoder::codec_from_mime_type`]'s normalised names, since
+    /// the codec guard compares the two directly.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::H264 => "h264",
+            Self::H265 => "h265",
             Self::Vp8 => "vp8",
             Self::Vp9 => "vp9",
             Self::Av1 => "av1",
@@ -101,6 +114,7 @@ impl From<Codec> for VideoCodec {
     fn from(codec: Codec) -> Self {
         match codec {
             Codec::H264 => VideoCodec::H264,
+            Codec::H265 => VideoCodec::H265,
             Codec::Vp8 => VideoCodec::VP8,
             Codec::Vp9 => VideoCodec::VP9,
             Codec::Av1 => VideoCodec::AV1,

@@ -74,6 +74,18 @@ pub enum RunError {
     /// the two fail for entirely unrelated reasons — device enumeration versus a network
     /// path, credentials and an external decoder.
     Rtsp(crate::rtsp::RtspError),
+    /// The codec that was negotiated is not the codec that was requested.
+    ///
+    /// Fatal, because a downgraded cell is worse than a missing one: it is pooled with
+    /// cells that really did run the requested codec, and nothing in the record marks it.
+    /// H.265 falls back to H.264 at publish time, and the same silent substitution has
+    /// happened twice on the encoder axis — `CUDA_HOME` unset compiled NVENC out, and a
+    /// newer server negotiated a configuration NVENC could not satisfy. Both times the
+    /// runs were analysed before anyone noticed.
+    ///
+    /// `negotiated` is `None` when no outbound codec was ever reported, which is a
+    /// different failure from a substitution and is named as such in the message.
+    CodecFallback { requested: &'static str, negotiated: Option<String> },
 }
 
 impl std::fmt::Display for RunError {
@@ -90,6 +102,16 @@ impl std::fmt::Display for RunError {
             Self::SessionLost(reason) => write!(f, "session lost mid-run: {reason}"),
             Self::Camera(e) => write!(f, "{e}"),
             Self::Rtsp(e) => write!(f, "{e}"),
+            Self::CodecFallback { requested, negotiated: Some(negotiated) } => write!(
+                f,
+                "requested codec {requested} but negotiated {negotiated}: the cell did not \
+                 run the codec it is labelled with"
+            ),
+            Self::CodecFallback { requested, negotiated: None } => write!(
+                f,
+                "requested codec {requested} but no outbound codec was ever reported: \
+                 cannot confirm the cell ran the codec it is labelled with"
+            ),
         }
     }
 }
@@ -558,6 +580,21 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
         }
     } else if !sampler_result.saw_subscription {
         return Err(RunError::NoSubscription);
+    }
+
+    // The codec on the wire must be the codec on the label. H.265 falls back to H.264 at
+    // publish time and says nothing about it; the encoder axis has silently substituted
+    // twice. A cell that is wrong about which codec it ran is worse than a cell that is
+    // missing, because it is pooled with the cells that were right.
+    {
+        let requested = args.codec.as_str();
+        let negotiated = sampler_result
+            .negotiated_codec_mime
+            .as_deref()
+            .and_then(crate::encoder::codec_from_mime_type);
+        if negotiated.as_deref() != Some(requested) {
+            return Err(RunError::CodecFallback { requested, negotiated });
+        }
     }
 
     let distinct_seq_received = shared.control.lock().distinct_received();

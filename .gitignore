@@ -43,3 +43,8 @@ examples/local_video/scripts/incoming/
 !/results-shared/**/README.md
 /teleop-test-matrix/e1-gate-2-samples/
 /teleop-test-matrix/incoming/
+# Dated campaign trees holding the joint two-host capture: publisher jsonl/CSV, Host B's
+# subscriber CSVs and its stored raw I420 frames. The 2026-09-10 tree alone is >7 GB of
+# frames. These were UNTRACKED rather than ignored, which is the state that put 155 MB
+# into reach of a plain `git add -A` twice before.
+/overnight-20??-??-??/
