@@ -52,3 +52,9 @@ overnight-2026-09-10/**
 !overnight-2026-09-10/**/
 !overnight-2026-09-10/README.md
 !overnight-2026-09-10/clock-sync-hostb.txt
+# Operator asked for the generated reports in git so they can be pulled. These carry
+# embedded measurement imagery, which the rule above otherwise excludes -- exception is
+# deliberate and scoped to these two files, not to the data trees behind them.
+!overnight-2026-09-10/reports/
+!overnight-2026-09-10/reports/per-run-reports.html
+!overnight-2026-09-10/reports/overnight-ladder.html
