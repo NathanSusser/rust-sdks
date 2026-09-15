@@ -343,10 +343,12 @@ recorded here as they are localized.
 
 **Busy-hour answer: the 10–11 Sep collapse did not recur.** The loop ran 53 cycles (36 H.264 to
 Host B, 17 H.265 Host A-only) from 04:42Z; the driver exited cleanly at 16:23:41Z. With GCC pinned
-and no bulk uplink probe during cells, collapse seconds were 0 in all 53 cycles, Host A's target
-minimum was ≥ 1.955 Mbps in 52 cycles (one brief dip to 1.698 Mbps in c002 at 04:56Z with p50 2.0,
-0 packets lost, qdisc peak 3), and Host A's qdisc held more than 10 packets for at most 1 s per
-cycle.
+and no bulk uplink probe during cells, collapse seconds were 0 in all 53 cycles, and the pinned
+target stayed ≥ 1.955 Mbps in every second of every cycle except one: c002 at 04:57:55Z (epoch+67 s)
+dipped to 1.698 Mbps (sent 1.847) for one second after a burst of modem-driver pushback (qdisc
+requeues 167/s the second before, against 2–25 normally) and was back to 2.0 the next second, with
+29/29 frames sent and received and 0 lost. Host A's qdisc held more than 10 packets for at most 1 s
+per cycle.
 
 - **Both hosts' uplink capacity stepped down together from ~13:30Z.** Host A's gap probe: 41–71
   Mbps parallel / 32–45 single before 13:30Z; 38.5–53.0 / 25.1–38.4 after. Host B's: 45–67 before;
