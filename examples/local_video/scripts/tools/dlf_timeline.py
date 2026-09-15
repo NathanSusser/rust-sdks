@@ -44,25 +44,50 @@ TICK_S = 0.00125               # Qualcomm timestamp: upper 48 bits count 1.25 ms
 NR_RANGE = (0xB800, 0xB9FF)
 
 
+def iter_dlf(path, chunk=64 << 20, stats=None):
+    """Yield (code, modem_seconds) for every record, streaming, resyncing past zero-filled gaps.
+
+    DLFs from the fast reader run ~8 MB/s (a 7-minute cell is ~3.5 GB), so the file is read
+    in chunks with the partial record carried over, never loaded whole. `stats`, if given,
+    is a dict that receives the zero-gap count.
+    """
+    gaps = 0
+    buf = b""
+    with open(path, "rb") as f:
+        while True:
+            more = f.read(chunk)
+            buf += more
+            i, n = 0, len(buf)
+            while i + 12 <= n:
+                length, code = struct.unpack_from("<HH", buf, i)
+                if length < 12:
+                    # QCSuper can write a run of zero bytes mid-file after dismissing a
+                    # malformed log; a naive walk stops here and calls the file truncated.
+                    j = i
+                    while j < n and buf[j] == 0:
+                        j += 1
+                    if j == n and more:
+                        break                      # the zero run may continue in the next chunk
+                    i = j if j > i else i + 1
+                    gaps += 1
+                    continue
+                if i + length > n and more:
+                    break                          # record straddles the chunk boundary
+                ts = struct.unpack_from("<Q", buf, i + 4)[0]
+                yield code, (ts >> 16) * TICK_S + (ts & 0xFFFF) / 32768 * TICK_S + GPS_EPOCH
+                i += length
+            buf = buf[i:]
+            if not more:
+                break
+    if stats is not None:
+        stats["gaps"] = gaps
+
+
 def parse_dlf(path):
-    """(code, modem_seconds) for every record, resyncing past zero-filled gaps."""
-    data = Path(path).read_bytes()
-    out, i, gaps = [], 0, 0
-    while i + 12 <= len(data):
-        length, code = struct.unpack_from("<HH", data, i)
-        if length < 12:
-            # QCSuper can write a run of zero bytes mid-file after dismissing a
-            # malformed log; a naive walk stops here and calls the file truncated.
-            j = i
-            while j < len(data) and data[j] == 0:
-                j += 1
-            i = j if j > i else i + 1
-            gaps += 1
-            continue
-        ts = struct.unpack_from("<Q", data, i + 4)[0]
-        out.append((code, (ts >> 16) * TICK_S + (ts & 0xFFFF) / 32768 * TICK_S + GPS_EPOCH))
-        i += length
-    return out, gaps
+    """(code, modem_seconds) for every record, as a list; small captures only (see iter_dlf)."""
+    stats = {}
+    out = list(iter_dlf(path, stats=stats))
+    return out, stats.get("gaps", 0)
 
 
 def window_rate(series, lo, hi, a, b):
