@@ -341,6 +341,22 @@ The loop (`overnight-2026-09-15`, Host A driver) runs 600 s pinned 2 Mbps H.264 
 H.264 cycle 14:30Z–END, to concentrate modem logs in the morning busy hour. Anomalies are
 recorded here as they are localized.
 
+**Busy-hour result, Host B side (Host A's per-cycle capacity to be added from its summary).**
+36 H.264 cycles on Host B, 04:42–16:11Z (per-cycle table:
+`examples/local_video/scripts/results/overnight-cycles/hostb-night-summary-2026-09-15.txt`, not in git):
+
+- **Video was unaffected all night.** Every cycle received 2.00–2.01 Mbps (p50) with 0 packets lost,
+  except cycle 1's 27 in anomaly #1. Transport p50 27.8–35.3 ms.
+- **No sub-2 Mbps period recurred.** Host B's uplink gap probe measured 45–67 Mbps (parallel) from
+  05:36Z to 12:52Z and 38–45 Mbps from 13:31Z to 16:11Z, a mild morning dip (single-stream 21–29
+  Mbps in c041, c052, c053). Host B → SFU p95 rose to 24–29 ms in the last cycles against 20–23 ms
+  midday.
+- **The latency tail is Host B's read-hold mode, not the hour.** Transport p99 is bimodal and tracks
+  decoder hand-off > 10 ms exactly: bad-mode runs (hand-off > 10 ms in 320–390 frames: c001, c002,
+  c007, c017, c019, c020, c022, c031, c034, c037, c044, c047, c049, c050, c053) had p99 70.3–79.2 ms
+  and 41–234 stalls; good-mode runs (≤ 71 such frames) had p99 39.6–52.9 ms and 0–31 stalls. Bad runs
+  occur off-peak and in the busy hour alike.
+
 **#1 — cycle 1, 04:51:46Z: a Host B-only ~0.8 s radio-link hold (not the uplink question).**
 Host A's video at Host B stalled to 770 ms and 27 packets were lost at 04:51:47Z, while Host A's
 path to the SFU stayed 16–19 ms with no queue and Host A's modem log was flat. On Host B, pings
