@@ -367,7 +367,15 @@ sampled `/sys/class/net/wwan0/statistics/rx_packets` at 5 ms on CLOCK_REALTIME
 render impact within the c044–c047 spread) and ran `stall_locator.py`.
 
 Stalled frames (e2r ≥ 2.5× the 31.6 ms baseline, next frame ≤ 25 ms later): 64 of 17,388.
-- Whole-frame assembly 0.23 ms p50 (max 0.39), so not a late last packet.
+- *Correction (Host A, 15:40Z):* an earlier version of this entry used `receive_and_assembly_ms`
+  (0.23 ms p50) to rule out a late last packet. That column is WebRTC receive → decoder upload
+  (`subscriber_timing.rs:650`), not first-to-last packet, and the receive stamp is likely the
+  frame's last packet (`frame_object.h:85`), so it cannot rule that out. The alternative, one
+  packet recovered by NACK/RTX ~50 ms later, was tested instead: under a retransmission frame N
+  would complete before the late N−1; under a read hold N lands just after. All night, 1,521 late
+  N−1 → N pairs: N before N−1 in 2, N after in 1,519 (Δ p10/p50/p90 = 0.1/0.3/2.0 ms), with N
+  itself late (e2r p50 38–60 ms). The two frames were read in one batch; retransmission is
+  rejected.
 - At each stalled frame's expected on-time arrival (capture + 31.6 ms, window −10…+15 ms) the
   interface counted p50 23 packets (p10 17; 0% zero), against p50 12 (p10 8; 0.1% zero) for
   ordinary frames. At the actual WebRTC receive it counted ~11 (one frame, N).
