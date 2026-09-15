@@ -101,8 +101,10 @@ def main():
     # Decisive test (2026-09-15, cycle 49): look where each frame SHOULD have reached the host
     # if on time (capture + baseline transport), not just before its late WebRTC receive.
     # A lookback window can catch neighbouring frames' packets; the expected-arrival window
-    # cannot, and a whole-frame assembly time well under a millisecond rules out "first packets
-    # on time, last packet late".
+    # cannot. NOTE: receive_and_assembly_ms is WebRTC receive -> decoder upload, NOT first-to-last
+    # packet, so it cannot rule out a late last packet (NACK/RTX). The ordering test below does:
+    # under a retransmission the next frame completes BEFORE the late one; under a read hold it
+    # arrives just after, in the same batch.
     by_id = {}
     for r in csv.DictReader(open(os.path.join(args.outdir, "subscriber.csv"))):
         try:
@@ -136,9 +138,16 @@ def main():
     s_exp = sorted(v for _, v in host_like + upstream_like)
     print(f"\nEXPECTED-ARRIVAL TEST (capture + {base:.1f} ms, window -10..+15 ms):")
     print(f"  ordinary frames: packets p10/p50/p90 {p10}/{ord_exp[len(ord_exp)//2]}/{ord_exp[int(len(ord_exp)*.9)]}")
-    if asm:
-        asm.sort()
-        print(f"  stalled frames whole-frame assembly ms p50 {asm[len(asm)//2]:.2f} max {asm[-1]:.2f}")
+    # Ordering test: receive time of frame id+1 minus the stalled frame's. A NACK/RTX-recovered
+    # packet delays only the stalled frame, so id+1 completes first (negative). A read hold
+    # releases both in one batch, so id+1 lands just after (small positive).
+    recv_by_id = {f[1]: f[0] for f in frames}
+    deltas = sorted((recv_by_id[fid + 1] - recv) / 1000 for recv, fid, *_ in stalled if fid + 1 in recv_by_id)
+    if deltas:
+        neg = sum(1 for d in deltas if d < 0)
+        print(f"  ordering test, receive(id+1) - receive(id) ms: n={len(deltas)} negative={neg} "
+              f"p10/p50/p90 {deltas[len(deltas)//10]:.1f}/{deltas[len(deltas)//2]:.1f}/{deltas[int(len(deltas)*.9)]:.1f}  "
+              f"-> {'read hold (not NACK/RTX)' if neg <= 0.05 * len(deltas) else 'retransmission possible'}")
     print(f"  stalled frames with packets on time at the interface (>= ordinary p10): {len(host_like)} of {len(stalled)}  -> inside Host B (after NAPI, before WebRTC receive)")
     print(f"  stalled frames with <= 2 packets at the expected instant: {len(upstream_like)} -> upstream of NAPI: {[f for f, _ in upstream_like]}")
 
