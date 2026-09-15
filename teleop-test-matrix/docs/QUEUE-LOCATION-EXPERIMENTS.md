@@ -196,8 +196,14 @@ points at the shared cell's scheduler (network side) rather than a modem fault.
 
 - **Same cell: confirmed.** Host A (QMI, 03:57Z): NR-ARFCN 521310 (n41), PCI 85, cell ID
   7622566199. Host B (SCAT decode of 0xB97F in a slice of its S2 DLF): layer 0 NR-ARFCN
-  521310, PCI 85, SSB 0; plus a second layer NR-ARFCN 393130, PCI 85, which Host A's QMI
-  readout did not list.
+  521310, PCI 85, SSB 0; plus a second layer NR-ARFCN 393130, PCI 85. Host A's own DLF
+  (SCAT, mid-S2 slice) shows the same two layers (521310 and 393130, PCI 85, SSB 0; QMI
+  lists only n41/521310 as the active band), so there is no carrier asymmetry between the
+  hosts to explain the 9 Sep 1.1 vs 16 Mbps gap.
+- **Host A's NR_L2_UL_BSR record rate rose +62% for exactly the upload** (16 → 26/s over
+  +0…+10 s, back to 15 within 2 s): the UE reporting buffered uplink data more often.
+  Fixed-cadence MAC items (0xB881, 0xB888 at 200/s; 0xB883 ~229/s) did not move, so grant
+  sizes need payload decoding.
 - **Traffic-volume explanation (d9): does not account for it.** Host B is the subscriber of
   Host A's stream, so its codes could fall if less media arrived. Over the upload seconds
   Host B still received 26–33 frames/s, 1.69–2.12 Mbps (WebRTC) and 2.1–2.8 Mbps on wwan0
