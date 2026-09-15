@@ -239,7 +239,13 @@ def main():
     for label, path in (("A", args.a_dlf), ("B", args.b_dlf)):
         if not (path and p0):
             continue
-        per = dlf_rates(path, p0 - 30, p1 + 30, args.host_minus_utc)
+        if path.endswith(".csv"):
+            # dlf_rates.py summary (second_rel_probe,code,count), written on the host that holds the DLF.
+            per = collections.defaultdict(collections.Counter)
+            for r in csv.DictReader(line for line in open(path) if not line.startswith("#")):
+                per[int(r["code"], 16)][p0 + int(r["second_rel_probe"])] += int(r["count"])
+        else:
+            per = dlf_rates(path, p0 - 30, p1 + 30, args.host_minus_utc)
         totals = collections.Counter({c: sum(v.values()) for c, v in per.items()})
         top = [c for c, _ in totals.most_common(12)]
         cols = range(p0 - 10, p1 + 12)
