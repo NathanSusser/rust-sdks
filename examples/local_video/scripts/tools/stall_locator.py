@@ -98,6 +98,50 @@ def main():
         verdict = "interface quiet -> upstream" if (ordinary and run >= 1.5 * sorted(o[1] for o in ordinary)[int(len(ordinary)*.9)]) else "interface active -> inside host?"
         print(f"  frame {fid}: e2r {e2r:.0f} ms, next +{ng:.0f} ms, packets in window {pk}, longest quiet {run:.0f} ms  => {verdict}")
 
+    # Decisive test (2026-09-15, cycle 49): look where each frame SHOULD have reached the host
+    # if on time (capture + baseline transport), not just before its late WebRTC receive.
+    # A lookback window can catch neighbouring frames' packets; the expected-arrival window
+    # cannot, and a whole-frame assembly time well under a millisecond rules out "first packets
+    # on time, last packet late".
+    by_id = {}
+    for r in csv.DictReader(open(os.path.join(args.outdir, "subscriber.csv"))):
+        try:
+            by_id[int(r["frame_id"])] = (int(r["capture_timestamp_us"]), float(r["receive_and_assembly_ms"] or "nan"))
+        except (ValueError, KeyError, TypeError):
+            continue
+    exp_off = int(base * 1000)
+
+    def at_expected(fid):
+        cap = by_id.get(fid, (None,))[0]
+        if cap is None:
+            return None
+        i = bisect.bisect_right(t, cap + exp_off - 10_000) - 1
+        j = bisect.bisect_right(t, cap + exp_off + 15_000) - 1
+        return p[j] - p[i] if i >= 0 and j >= 0 else None
+
+    ord_exp = sorted(v for v in (at_expected(f[1]) for f in frames[1:-1] if f[2] <= 1.3 * base) if v is not None)
+    if not ord_exp:
+        return
+    p10 = ord_exp[len(ord_exp) // 10]
+    host_like, upstream_like = [], []
+    asm = []
+    for recv, fid, e2r, ng, pk, run in stalled:
+        v = at_expected(fid)
+        a = by_id.get(fid, (None, float("nan")))[1]
+        if a == a:
+            asm.append(a)
+        if v is None:
+            continue
+        (upstream_like if v <= 2 else host_like if v >= p10 else []).append((fid, v))
+    s_exp = sorted(v for _, v in host_like + upstream_like)
+    print(f"\nEXPECTED-ARRIVAL TEST (capture + {base:.1f} ms, window -10..+15 ms):")
+    print(f"  ordinary frames: packets p10/p50/p90 {p10}/{ord_exp[len(ord_exp)//2]}/{ord_exp[int(len(ord_exp)*.9)]}")
+    if asm:
+        asm.sort()
+        print(f"  stalled frames whole-frame assembly ms p50 {asm[len(asm)//2]:.2f} max {asm[-1]:.2f}")
+    print(f"  stalled frames with packets on time at the interface (>= ordinary p10): {len(host_like)} of {len(stalled)}  -> inside Host B (after NAPI, before WebRTC receive)")
+    print(f"  stalled frames with <= 2 packets at the expected instant: {len(upstream_like)} -> upstream of NAPI: {[f for f, _ in upstream_like]}")
+
 
 if __name__ == "__main__":
     main()
