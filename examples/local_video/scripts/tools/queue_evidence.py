@@ -38,6 +38,15 @@ def ping_series(path):
     return {s: statistics.median(v) for s, v in per.items()}, len(seen)
 
 
+def hop_ttl_series(path, ttl):
+    """{second: median rtt ms} for one TTL from Host A's hop-ttl.csv; unanswered rows skipped."""
+    per = collections.defaultdict(list)
+    for r in csv.DictReader(open(path)):
+        if r.get("ttl") == str(ttl) and r.get("rtt_ms"):
+            per[math.floor(float(r["send_unix_ms"]) / 1000)].append(float(r["rtt_ms"]))
+    return {s: statistics.median(v) for s, v in per.items()}
+
+
 def per_second(pairs):
     per = collections.defaultdict(list)
     for t, v in pairs:
@@ -123,6 +132,12 @@ def main():
     for spec in args.a_ping:
         label, _, path = spec.partition("=")
         S[f"a_{label}_rtt_ms"], _ = ping_series(path)
+    if args.a_hop_ttl:
+        # Host A's TTL-limited UDP probe: ICMP time-exceeded from each hop (echo is not answered).
+        for ttl in (2, 3):
+            series = hop_ttl_series(args.a_hop_ttl, ttl)
+            if series:
+                S[f"a_hop{ttl}_rtt_ms"] = series
     if args.a_jsonl:
         S.update(load_a_jsonl(args.a_jsonl))
     if args.a_hops:

@@ -78,3 +78,68 @@ when total offered uplink load exceeds uplink capacity. The SFU is not congested
 ---
 
 ## Results
+
+### S1 — 2026-09-15 02:56:00Z, epoch 1789440960
+
+Ran as registered. Unpinned (log line 1: `LK_PIN_BITRATE_TO_MAX=0`). Same SFU proven
+from both hosts: RoomService at epoch+2 (B) and epoch+60 (A) both list room
+`RM_VjR5FRe9TCHm` with `host-b-s1-probe-h264-2000k` and `s1-probe-h264-2000k-pub-56662`
+ACTIVE. Host-minus-UTC −4.546 s (A) / −4.550 s (B) after the cell.
+
+**Dose was small.** The probe took 4.1 s (46 Mbps parallel aggregate, 31.5 single),
+against 14–20 s at ~10 Mbps on 10 Sep. t = probe start (1789441080.009).
+
+| # | Observed | Verdict |
+|---|---|---|
+| P1 | B per-frame transport ~30 ms → 77 (+0.41 s) → 130 (+0.91) → 178–191 (+1.65–2.18) → 42 (+3.13, as the parallel phase ended at +3.11). Only seconds in the whole cell with p50 >2× baseline: t+120–122 | **holds** |
+| P2 | A → hop 3 UDP TTL RTT 18 → 112 (+1.06) → 122 (+2.06) → 44 (+3.06) → 32 → 26 → ~20 | **holds** |
+| P3 | A qdisc backlog max 2 pkts; QMI TX dropped 0. A's pcap: media left wwan0 continuously, ~1.8–2.0 Mbps at +0.5–1.25 s while B's delay was already 77–130 ms | **holds** |
+| P4 | B → SFU media node ICMP 14–35 ms through the probe (cell p50 17.3) | **holds** |
+| P5 | 0 packets lost, 0 retransmits, 0 NACKs; A target 2000 → 1392 (+1.0) → 975 (+2.0) kbps | **holds** |
+| P6 | DLF record rates flat on both hosts across the probe | **not supported / inconclusive**: Host B's QCSuper was pegged at 99.8% CPU with ~35% CRC loss, and a record rate is not a grant size |
+
+**Unpredicted:** A's ICMP echo to the SFU media node did **not** queue (14–21 ms, one
+49 ms sample) during the same seconds that A's UDP (media and TTL probes) queued ~100 ms.
+Something before hop 3 serves ICMP ahead of UDP. Consequence: ICMP ping cannot measure
+this queue, and every "the link is clean" conclusion that rested on ping needs re-reading.
+
+**Conclusion.** The latency spike is a lossless ~100–190 ms queue located after Host A's
+network interface and before hop 3 (10.198.3.237): Host A's modem uplink data path, the
+radio uplink, or the first transport hop. Not Host A's host, not the SFU, not Host B.
+
+## H2 — the queue is where uplink data waits for grants, and it is class-aware
+
+Offered uplink load above granted capacity for a few seconds fills the UE uplink data
+path; ICMP is prioritised over UDP there (H2), or in a class-based queue in the RAN /
+first transport hop (H2′). Distinguishing them is the modem-vs-network question.
+
+### S2 — agreed 03:20Z: epoch 1789443900 (03:45:00Z), room `s2-class-h264-2000k`
+
+Host A's probes, all 5 Hz to the SFU media node 10.1.20.16 from epoch−60 to +340:
+ICMP DSCP 0, ICMP DSCP EF (`-Q 0xb8`), UDP TTL=3 DSCP 0, UDP TTL=3 EF, and TCP SYN to
+closed port 3478 (RST round trip; opens no connection). Kernel queue at 10 Hz. Publisher
+pinned. Upload probe N=12 at 03:47:00Z. Both hosts run d9's lower-CPU modem-log build
+with the opcode-158 half written into the DLF, if it verifies in time.
+
+Registered readout:
+
+- **R1** EF-marked ICMP and UDP queue exactly like DSCP 0 → no DSCP-aware classifier
+  acted on our mark. (Marks may be bleached before a classifier, so this is not proof
+  that none exists.)
+- **R2** TCP RST round trip queues like UDP → the classifier separates ICMP from
+  everything else.
+- **R3** TCP stays flat like ICMP → it separates UDP specifically.
+- **R4** Pinned: Host B's delay grows through the whole ~10 s probe with no target cut;
+  loss appears only if a buffer overflows.
+- **R5** 10 Hz requeues burst during the probe, as in S1.
+
+Original proposal:
+
+- 300 s, H.264 2 Mbps **pinned**; probe N=12 at t+120 for a ~10 s episode.
+- Paired 5 Hz, 84-byte probes from A to the SFU media node for the whole cell: ICMP DSCP 0,
+  ICMP DSCP EF, UDP TTL=3 DSCP 0, UDP TTL=3 DSCP EF, TCP SYN if a port answers.
+- Reduced modem log mask (NR MAC UL: BSR, grants, PHR, UL TB) on both hosts, so the reader
+  keeps up; decoded if possible.
+- Readout: EF escapes the queue → DSCP-aware classifier; only ICMP escapes regardless of
+  DSCP → protocol classifier (typical of UE-side uplink prioritisation); BSR high with small
+  grants → network not granting; grants large but data waiting → modem.
