@@ -30,7 +30,14 @@ when total offered uplink load exceeds uplink capacity. The SFU is not congested
 ### S1 — reproduce one spike with every hop instrumented
 
 - 300 s, H.264 2 Mbps, **unpinned** (as on 10 Sep), room `s1-probe-h264-2000k`,
-  epoch 1789440600 (02:50:00Z, 15 Sep).
+  epoch 1789440960 (02:56:00Z, 15 Sep; moved from 02:50 so Host A could verify
+  its side live before arming). Probe at 02:58:00Z.
+- **Amended before the cell (02:46Z):** hop 2 and hop 3 do not answer ICMP echo, so
+  Host A measures them with a 5 Hz TTL-limited UDP probe toward the SFU media node.
+  Pre-test: TTL=2 (hop 2) answered 0/15, TTL=3 (hop 3, 10.198.3.237) answered 8/15.
+  **P2 therefore uses hop 3.** A queue before hop 3 covers the UE uplink buffer, the
+  RAN and the first transport hops. The SFU media node is 10.1.20.16 (from A's pcap);
+  10.1.20.21 is ingress/signalling only.
 - At epoch+120 Host A runs the **identical** 10 Sep probe, start and end logged in ms.
 - Host A: publisher stats, 5 Hz ping to hop 2 (10.169.180.252, first carrier router
   answering), hop 3 (10.198.3.237), SFU (10.1.20.21); qdisc backlog, QMI TX dropped,
@@ -43,7 +50,7 @@ when total offered uplink load exceeds uplink capacity. The SFU is not congested
 | # | Prediction | Falsified if |
 |---|---|---|
 | P1 | Host B transport delay rises ≥3× baseline within 0–6 s of probe start | no rise: dose too small for today's capacity |
-| P2 | Host A → hop 2 RTT rises with it (≥ +100 ms, same onset ±1 s) | hop 2 flat while media delay rises: queue is beyond the RAN |
+| P2 | Host A → hop 3 RTT rises with it (≥ +100 ms, same onset ±1 s) | hop 3 flat while media delay rises: queue is beyond hop 3 |
 | P3 | Host A qdisc backlog ≈ 0, QMI TX dropped unchanged | backlog grows: host-side queue |
 | P4 | Host B → SFU RTT flat (≤ +20 ms) | rises with A's probe: SFU node / shared core congested |
 | P5 | 0 packets lost at B; A's target cut within 3 s | loss: a drop, not only a queue |
