@@ -480,6 +480,71 @@ def subscriber_freeze_events(log: LogData) -> list[Event]:
     return events
 
 
+@dataclass(frozen=True)
+class PairedAccounting:
+    """Frame accounting from the frame-ID join of the two CSVs, over the stretch both cover.
+
+    The funnel used to take "Arrived" and "Decoded" from the subscriber log's decode
+    counters. Those are sampled once a second over a different window than the CSV's
+    rendered rows, so on 2026-09-15 a run with 0 packets lost showed "lost in network: 30"
+    and "lost in renderer: -10". Joining on frame ID and clipping to [first, last] ID the
+    subscriber drew makes every stage count the same frames.
+    """
+
+    low: int
+    high: int
+    sent: int             # publisher frame IDs inside [low, high]
+    shown: int            # of those, IDs the subscriber drew
+    before: int           # publisher IDs before low: sent before the subscriber was drawing
+    after: int            # publisher IDs after high: the publisher ran past the recording
+    packets_lost: int     # WebRTC cumulative counter at the subscriber's last row
+    frames_dropped: int   # WebRTC cumulative frames dropped before decode
+
+    @property
+    def missing(self) -> int:
+        return self.sent - self.shown
+
+    @property
+    def network(self) -> int:
+        # Packets are not frames: one lost packet can cost a frame, a burst can cost one
+        # frame or several. With 0 lost the network share is exactly 0; otherwise this is
+        # an upper bound and is labelled as one.
+        return min(self.missing, self.packets_lost)
+
+    @property
+    def decoder(self) -> int:
+        return min(self.missing - self.network, self.frames_dropped)
+
+    @property
+    def renderer(self) -> int:
+        return self.missing - self.network - self.decoder
+
+
+def _last_counter(rows: Sequence[dict[str, str]], column: str) -> int:
+    counts = values(rows, column)
+    return round(max(counts)) if counts else 0
+
+
+def paired_frame_accounting(publisher: LogData, subscriber: LogData) -> PairedAccounting | None:
+    publisher_ids = {round(value) for value in values(publisher.rows, "frame_id")}
+    subscriber_ids = {round(value) for value in values(subscriber.rows, "frame_id")}
+    if not publisher_ids or not subscriber_ids:
+        return None
+    low = max(min(publisher_ids), min(subscriber_ids))
+    high = min(max(publisher_ids), max(subscriber_ids))
+    inside = {frame_id for frame_id in publisher_ids if low <= frame_id <= high}
+    return PairedAccounting(
+        low=low,
+        high=high,
+        sent=len(inside),
+        shown=len(inside & subscriber_ids),
+        before=sum(1 for frame_id in publisher_ids if frame_id < low),
+        after=sum(1 for frame_id in publisher_ids if frame_id > high),
+        packets_lost=_last_counter(subscriber.rows, "packets_lost"),
+        frames_dropped=_last_counter(subscriber.rows, "frames_dropped"),
+    )
+
+
 def paired_loss_events(publisher: LogData, subscriber: LogData) -> list[Event]:
     publisher_ids = {round(value) for value in values(publisher.rows, "frame_id")}
     subscriber_ids = {round(value) for value in values(subscriber.rows, "frame_id")}
@@ -597,6 +662,73 @@ def draw_frame_accounting(
             f"({100.0 * publisher.retransmitted / max(publisher.packets_sent, 1):.1f}% of sent), "
             f"{publisher.pli_count} PLIs   |   {delivered:.1f}% of sent frames arrived",
         )
+
+
+def draw_paired_accounting(
+    pdf: canvas.Canvas,
+    x: float,
+    y: float,
+    width: float,
+    accounting: PairedAccounting,
+    publisher: PublisherStats | None = None,
+) -> None:
+    """Where frames were lost, from the frame-ID join rather than the decode counters.
+
+    Every stage counts the same frames: publisher IDs inside the ID range the subscriber
+    drew. Network loss comes from WebRTC's packets_lost (exactly 0 when 0 were lost, an
+    upper bound otherwise), frames dropped before decode from frames_dropped, and the
+    rest arrived but were never drawn.
+    """
+    pdf.setFillColor(INK)
+    pdf.setFont("Helvetica-Bold", 10.5)
+    pdf.drawString(x, y + 92, "Where frames were lost")
+
+    a = accounting
+    upper = "at most " if a.packets_lost > 0 else ""
+    stages = (
+        ("Sent", a.sent, None),
+        ("Arrived", a.sent - a.network, f"lost in network: {upper}{a.network:,}"),
+        ("Decoded", a.sent - a.network - a.decoder, f"dropped before decode: {a.decoder:,}"),
+        ("On screen", a.shown, f"arrived but never drawn: {a.renderer:,}"),
+    )
+    bar_h, top = 15.0, y + 62
+    label_w, bar_w = 74.0, width - 74.0 - 172.0
+    for index, (label, value, note) in enumerate(stages):
+        row_y = top - index * (bar_h + 6)
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica", 7.4)
+        pdf.drawString(x, row_y + 4, label)
+        share = value / a.sent if a.sent else 0.0
+        pdf.setFillColor(PANEL)
+        pdf.rect(x + label_w, row_y, bar_w, bar_h, fill=1, stroke=0)
+        pdf.setFillColor(NAVY if index == 0 else BLUE)
+        pdf.rect(x + label_w, row_y, max(bar_w * share, 1.0), bar_h, fill=1, stroke=0)
+        pdf.setFillColor(INK)
+        pdf.setFont("Helvetica-Bold", 7.4)
+        pdf.drawRightString(x + label_w + bar_w + 34, row_y + 4, f"{value:,}")
+        if note is not None:
+            lost = stages[index - 1][1] - value
+            pdf.setFillColor(MUTED if lost <= 0 else INK)
+            pdf.setFont("Helvetica", 7.0)
+            pdf.drawString(x + label_w + bar_w + 42, row_y + 4, note)
+
+    lines = [
+        f"frame IDs {a.low:,}-{a.high:,}, the stretch both logs cover; excluded: {a.before:,} sent before "
+        f"and {a.after:,} after the subscriber's recording   |   subscriber counters: "
+        f"{a.packets_lost:,} packets lost, {a.frames_dropped:,} frames dropped"
+    ]
+    if publisher is not None and publisher.frames_sent > 0:
+        lines.append(
+            f"publisher: {publisher.sent_mbps:.2f} Mbps sent, target {publisher.target_bitrate_mbps:.2f}, "
+            f"QP {publisher.mean_qp:.1f}, quality_limitation {publisher.quality_limitation}, "
+            f"{publisher.retransmitted:,} retransmitted packets "
+            f"({100.0 * publisher.retransmitted / max(publisher.packets_sent, 1):.1f}% of sent), "
+            f"{publisher.pli_count} PLIs"
+        )
+    pdf.setFillColor(MUTED)
+    pdf.setFont("Helvetica", 7.0)
+    for index, line in enumerate(lines):
+        pdf.drawString(x, top - len(stages) * (bar_h + 6) - 4 - index * 10, line)
 
 
 def draw_card(pdf: canvas.Canvas, x: float, y: float, width: float, label: str, value: str) -> None:
@@ -966,8 +1098,10 @@ def generate_report(
     assert event_log is not None
     loss_events = gap_events(event_log)
     freeze_events = subscriber_freeze_events(event_log)
+    accounting = None
     if publisher is not None and subscriber is not None:
         loss_events = paired_loss_events(publisher, subscriber)
+        accounting = paired_frame_accounting(publisher, subscriber)
     losses = sum(event.count for event in loss_events)
 
     sources = " + ".join(f"{log.label}: {log.path.name}" for log in logs)
@@ -1000,7 +1134,7 @@ def generate_report(
         ("Mean latency", f"{statistics.fmean(primary_latencies):.1f} ms"),
         ("P50 latency", f"{percentile(primary_latencies, 50):.1f} ms"),
         ("P95 latency", f"{percentile(primary_latencies, 95):.1f} ms"),
-        ("Frame losses", f"{losses:,}"),
+        ("Frames not shown" if accounting is not None else "Frame losses", f"{losses:,}"),
     )
     # The resolution card sits on its own row beneath the latency cards rather than
     # extending the top row. As a seventh card in one row it ran off the right edge --
@@ -1041,7 +1175,21 @@ def generate_report(
     # the first thing an operator asks about a degraded feed and which no single counter
     # answers: a frame missing from the CSV may never have arrived, may have failed to
     # decode, or may have arrived and decoded and never been drawn.
-    if counters is not None and subscriber is not None:
+    if accounting is not None:
+        captures = [
+            int(value)
+            for value in (number(row.get("capture_timestamp_us")) for row in subscriber.rows)
+            if value is not None and value > 0
+        ]
+        pub_stats = (
+            read_publisher_stats(
+                publisher_stats_path, (min(captures), max(captures)) if captures else None
+            )
+            if publisher_stats_path is not None
+            else None
+        )
+        draw_paired_accounting(pdf, left, 92, usable, accounting, pub_stats)
+    elif counters is not None and subscriber is not None:
         frame_ids = [
             int(value)
             for value in (number(row.get("frame_id")) for row in subscriber.rows)
@@ -1094,9 +1242,8 @@ def generate_report(
     draw_footer(
         "Page 1 of 2 - overview",
         (
-            "Red marks a publisher frame absent from the subscriber's rendered rows: "
-            "network loss AND frames that arrived but were never drawn. See the funnel "
-            "for the split. "
+            "Red marks a frame the publisher sent that never reached the subscriber's screen "
+            "(any cause; the funnel splits network, decode and render). "
             if publisher is not None and subscriber is not None
             else "Frame-loss markers reflect frame-ID gaps. "
         )
