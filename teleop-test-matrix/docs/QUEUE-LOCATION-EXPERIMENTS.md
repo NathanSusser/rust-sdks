@@ -401,9 +401,17 @@ Properties of the hold, from both hosts:
   mechanical (a late frame plus a burst forces a render gap); Host B had 1,059 render gaps vs 64
   stalls, so render judder is broader.
 
+- **Not the Rust SDK's fixed waits.** Its only 50 ms waits are setup-time polling loops:
+  `rtc_session.rs:2268` (waiting for the peer connections to connect), `rtc_session.rs:2438`
+  (waiting for the publisher connection and data channel) and `remote_participant.rs:131`
+  (waiting for a track publication when subscribing). None runs per packet; RTP is read and
+  receive-stamped by libwebrtc's C++ network thread, and the webrtc-sys wrapper has no 50 ms wait.
+
 Reading: packets wait in Host B's kernel for a fixed ~50 ms at irregular moments, which fits a
-missed wakeup in the receive path falling back to a fixed wait or timer. Code and system changes
-are left to the operator.
+missed wakeup in libwebrtc's receive path (prebuilt, not in this repo) or the OS socket/wakeup
+path falling back to a fixed wait or timer. Next tests are the operator's to authorize: timing of
+the network thread's `epoll_wait`/`recvmsg` with strace or perf during a cycle, or a build with
+receive-path tracing. No code or system changes were made.
 
 ### S3 arm c — result (Q3)
 
