@@ -204,6 +204,22 @@ points at the shared cell's scheduler (network side) rather than a modem fault.
   (baseline ~2.3–2.7), rx packets −20%, while the codes halved. S3 arm (a) removes the video
   entirely as the clean control.
 
+- **Code names (d9, from MobileInsight `dm_collector_c/consts.h` and SCAT `diagcmd.py`):**
+  0xB872 NR_L2_UL_TB, 0xB873 NR_L2_UL_BSR, 0xB881 NR_MAC_UL_TB_Stats, 0xB883
+  NR_MAC_UL_Physical_Channel_Schedule_Report, 0xB888 NR_MAC_PDSCH_Stats, 0xB97F
+  NR_ML1_Searcher_Measurement_Database_Update_Ext. 0xB882, 0xB8A6, 0xB8A8, 0xB958, 0xB870,
+  0xB87C, 0xB983 and the opcode-158 codes are unnamed in both sources.
+- **Named-code rates, baseline → upload.** UL TB and BSR records: Host A 16 → 25/s, Host B
+  13 → 5/s. UL schedule report: Host A 229 → 232, Host B 195 → 175. UL TB stats and PDSCH
+  stats: 200/s on both, periodic, unchanged.
+- **This weakens the coupling reading for the named codes.** Host B's own uplink (mostly RTCP
+  feedback) fell from ~110 to ~70 packets/s during the upload, so fewer UL TB/BSR records on
+  Host B can follow from Host B sending less. Record rates track scheduling events, not
+  granted bytes; fewer, larger allocations would also halve per-allocation codes. Cross-UE
+  coupling is therefore **not established**. Same cell is. S3 (upload with no video) decides,
+  and decoding BSR values and grant sizes (MobileInsight, being tried) would settle modem
+  vs network directly.
+
 ## H3 — Host A's uplink capacity is set by a cell scheduler shared with other UEs
 
 Other load on the same cell reduces what Host A is granted; that is the candidate mechanism
