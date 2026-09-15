@@ -3,8 +3,8 @@
 # subscriber that receives Host A's cell, so both modem logs and both media logs
 # cover the same wall-clock window and can be joined afterwards.
 #
-# Pairs with Host A's diag-capture/capture-around-cell.sh, which captures Host A's
-# modem and publishes the cell via publish-cell.sh. Both take the same <epoch>.
+# Pairs with Host A's diag-capture/capture-around-cell.sh / long-run.sh, which capture
+# Host A's modem and publish the cell via publish-cell.sh. Both take the same <epoch>.
 #
 # WHY A WRAPPER. capture.sh runs in the foreground for a fixed duration. Starting it
 # and a subscriber by hand in two terminals around a timed cell means the capture
@@ -15,6 +15,8 @@
 # WHY NOT run_subscriber_test.sh. Its pre-flight network probe puts its own traffic
 # through Host B's modem inside the capture window, which would appear in the DIAG
 # log as scheduler activity the cell did not cause. The bare subscriber adds none.
+# The same goes for any bulk upload: on 2026-09-10 Host A's own uplink speed test
+# caused every "grant collapse". This script warns if curl/rsync/scp are running.
 #
 # SERVER. Must match publish-cell.sh, which hardcodes the -h265 deployment. The URL
 # in .livekit-demo/.env is the newer server; joining it puts us in a different room
@@ -39,8 +41,25 @@
 # offset is logged before the capture window opens and one after it closes -- ~100 ms
 # of traffic each, outside the DIAG window -- because the offset drifts.
 #
+# UNATTENDED. Host A's driver can launch this over the cable, one call per cycle:
+#   ssh -n nsusser@192.168.99.2 "cd ~/code/rust-sdks; DURATION=600 DIAG=1 setsid nohup \
+#     examples/local_video/scripts/tools/receive-around-cell.sh <label> <epoch> <room> <outdir> \
+#     >/dev/null 2>&1 </dev/null &"
+# `;` not `&&` before the background job: the `&&` form keeps ssh open until the run ends.
+# Over ssh there is no DISPLAY/XAUTHORITY; this finds the console's Xwayland auth file.
+# <outdir>/DONE is written when every child has stopped; pull only after it exists.
+#
+# Knobs (environment):
+#   DURATION=150  seconds the publisher streams after its 5 s warmup
+#   DIAG=1        modem DLF via capture.sh (0: skip; lets cycles alternate the DIAG load)
+#   HOPS=1        1 Hz host counters: wwan0 rx/tx, qdisc, UDP socket-buffer drops, signal
+#   PING=1        5 Hz ICMP to the SFU (RTT and loss on the path, independent of media)
+#   SHOW_TIMING=1 frame timing in the subscriber's diagnostics window
+#
 # Usage: receive-around-cell.sh <label> <epoch> <room> [outdir]
 set -uo pipefail
+# A non-login ssh or systemd environment may omit sbin, where tc lives.
+export PATH="$PATH:/usr/sbin:/sbin"
 
 [ $# -ge 3 ] || { echo "usage: $0 <label> <epoch> <room> [outdir]" >&2; exit 2; }
 label=$1 epoch=$2 room=$3
@@ -48,13 +67,16 @@ label=$1 epoch=$2 room=$3
 REPO=$(cd "$(dirname "$0")/../../../.." && pwd)
 outdir=${4:-$REPO/examples/local_video/scripts/results/diag-$room}
 URL="wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com"
+SFU_IP=10.1.20.21
 CAPTURE="$HOME/diag-capture/capture.sh"
 SUB="$REPO/target/release/subscriber"
+IF=wwan0
+DIAG=${DIAG:-1} HOPS=${HOPS:-1} PING=${PING:-1}
 
-# Host A's cell: 5 s warmup + 150 s run from the epoch, then ~3 s of flush.
+# Host A's cell: 5 s warmup + DURATION s run from the epoch, then ~3 s of flush.
 CAP_BEFORE=60      # capture starts this long before the epoch (idle baseline)
 CAP_AFTER=35       # and runs this long past the cell's end
-CELL_S=155
+CELL_S=$(( ${DURATION:-150} + 5 ))
 SUB_BEFORE=20      # subscriber joins this long before the epoch
 # Show frame timing (latency) in the subscriber's diagnostics window. Costs a little
 # local render work on Host B's integrated GPU, which can nudge local latency; it has
@@ -93,48 +115,119 @@ else:
 NTP
 }
 
+# 1 Hz host-side counters. On Host B the media is DOWNLINK, so the drops that matter
+# are receive-side: the driver (rx_dropped/rx_missed) and the UDP socket buffer
+# (RcvbufErrors) -- a packet the modem delivered but this host discarded. The qdisc is
+# egress only; it is logged because RTCP and ping leave through it.
+hops_sampler() {
+  local csv=$1 dur=$2 s=/sys/class/net/$IF/statistics end=$(( $(date +%s) + $2 ))
+  mmcli -m 0 --signal-setup=5 >/dev/null 2>&1
+  echo "unix_ms,rx_packets,rx_bytes,rx_dropped,rx_errors,rx_missed,tx_packets,tx_dropped,qdisc_dropped,qdisc_backlog_pkts,qdisc_requeues,udp_in_errors,udp_rcvbuf_errors,nr_rsrp_dbm,nr_snr_db,access_tech" > "$csv"
+  local n=0 sig=",," t q
+  while [ "$(date +%s)" -lt "$end" ]; do
+    t=$(ms)
+    q=$(tc -s qdisc show dev "$IF" 2>/dev/null)
+    local qd qb qr
+    qd=$(sed -n 's/.*(dropped \([0-9]*\),.*/\1/p' <<<"$q" | head -1)
+    qb=$(sed -n 's/.*backlog [0-9]*b \([0-9]*\)p.*/\1/p' <<<"$q" | head -1)
+    qr=$(sed -n 's/.*requeues \([0-9]*\)).*/\1/p' <<<"$q" | head -1)
+    # /proc/net/snmp "Udp:" value line: InErrors is field 4, RcvbufErrors field 6.
+    local udp; udp=$(awk '/^Udp: [0-9]/{print $4","$6; exit}' /proc/net/snmp)
+    if [ $((n % 5)) = 0 ]; then
+      local g; g=$(mmcli -m 0 --signal-get 2>/dev/null; mmcli -m 0 2>/dev/null | grep -m1 'access tech')
+      sig="$(sed -n '/5G/,$ s/.*rsrp: *\(-*[0-9.]*\).*/\1/p' <<<"$g" | head -1),$(sed -n '/5G/,$ s/.*s\/n: *\(-*[0-9.]*\).*/\1/p' <<<"$g" | head -1),$(sed -n 's/.*access tech: *\(.*\)$/\1/p' <<<"$g" | head -1 | tr -d ' \033' | sed 's/\[[0-9;]*m//g')"
+    fi
+    echo "$t,$(cat $s/rx_packets),$(cat $s/rx_bytes),$(cat $s/rx_dropped),$(cat $s/rx_errors),$(cat $s/rx_missed_errors),$(cat $s/tx_packets),$(cat $s/tx_dropped),${qd},${qb},${qr},${udp},${sig}" >> "$csv"
+    n=$((n + 1))
+    sleep "$(awk -v t="$t" -v now="$(ms)" 'BEGIN{d=1-(now-t)/1000; print (d>0?d:0)}')"
+  done
+}
+
+cpid="" spid="" hpid="" ppid_="" dlf="" src="" crc=""
+finish() {
+  local rc=$?
+  # Children with their own timers stop by themselves; these two are only ours to stop.
+  [ -n "$hpid" ] && kill "$hpid" 2>/dev/null
+  [ -n "$ppid_" ] && kill "$ppid_" 2>/dev/null
+  # Never kill capture.sh (see PORT); wait for it so DONE means the modem is quiet.
+  [ -n "$cpid" ] && wait "$cpid" 2>/dev/null
+  [ -d "$outdir" ] && printf 'rc=%s subscriber_rc=%s capture_rc=%s dlf=%s finished_ms=%s\n' \
+    "$rc" "${src:-}" "${crc:-}" "${dlf:-none}" "$(ms)" > "$outdir/DONE"
+}
+
 # ---- pre-flight: fail BEFORE the epoch, not after it --------------------------
 now=$(date +%s)
 [ "$epoch" -gt $((now + CAP_BEFORE + 15)) ] || {
   echo "epoch $epoch is too soon: need > $((CAP_BEFORE + 15)) s of lead for the capture to go live first" >&2; exit 1; }
-[ -x "$CAPTURE" ] || { echo "capture script missing: $CAPTURE" >&2; exit 1; }
 [ -x "$SUB" ]     || { echo "subscriber binary missing: $SUB" >&2; exit 1; }
-[ -c /dev/ttyUSB0 ] || { echo "DIAG port /dev/ttyUSB0 absent" >&2; exit 1; }
-# Match the interpreter, not the word. `pgrep -f qcsuper` also matches any shell whose
-# command text merely contains "qcsuper" -- including Claude tool shells and monitors
-# on this host -- and would refuse, losing the run. capture.sh uses the same pattern.
-QC_PROC='^[^ ]*python[0-9.]* [^ ]*qcsuper'
-if pgrep -f "$QC_PROC" >/dev/null; then
-  echo "a qcsuper process already holds a DIAG port; not starting:" >&2; pgrep -af "$QC_PROC" >&2; exit 1
+if [ "$DIAG" = 1 ]; then
+  [ -x "$CAPTURE" ] || { echo "capture script missing: $CAPTURE" >&2; exit 1; }
+  [ -c /dev/ttyUSB0 ] || { echo "DIAG port /dev/ttyUSB0 absent" >&2; exit 1; }
+  # Match the interpreter, not the word. `pgrep -f qcsuper` also matches any shell whose
+  # command text merely contains "qcsuper" -- including Claude tool shells and monitors
+  # on this host -- and would refuse, losing the run. capture.sh uses the same pattern.
+  QC_PROC='^[^ ]*python[0-9.]* [^ ]*qcsuper'
+  if pgrep -f "$QC_PROC" >/dev/null; then
+    echo "a qcsuper process already holds a DIAG port; not starting:" >&2; pgrep -af "$QC_PROC" >&2; exit 1
+  fi
 fi
-[ -n "${DISPLAY:-}" ] || { echo "DISPLAY unset: run this at Host B's console, not over plain ssh" >&2; exit 1; }
+# Over ssh: render on the console's display. GNOME's Xwayland writes a per-login auth
+# file; without it the subscriber cannot open a window and logs no CSV rows.
+export DISPLAY=${DISPLAY:-:0}
+if ! xdpyinfo >/dev/null 2>&1; then
+  XAUTHORITY=$(ls -t /run/user/"$(id -u)"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+  export XAUTHORITY
+  xdpyinfo >/dev/null 2>&1 || { echo "cannot open display $DISPLAY (nobody logged in at Host B's console?)" >&2; exit 1; }
+fi
 cd "$REPO" || exit 1
 set -a && . .livekit-demo/.env && set +a
 : "${LIVEKIT_API_KEY:?not set after sourcing .livekit-demo/.env}"
 : "${LIVEKIT_API_SECRET:?not set after sourcing .livekit-demo/.env}"
 export SSL_CERT_FILE="${SSL_CERT_FILE:-$REPO/.livekit-demo/corp-ca.pem}"
 mkdir -p "$outdir" "$HOME/diag-logs"
+rm -f "$outdir/DONE"
 : > "$outdir/timeline.txt"
-say "label=$label epoch=$epoch room=$room capture=${cap_dur}s server=-h265"
+trap finish EXIT
+trap 'exit 130' INT TERM
+say "label=$label epoch=$epoch room=$room duration=$((CELL_S - 5))s window=${cap_dur}s diag=$DIAG hops=$HOPS ping=$PING server=-h265"
+sid=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$(id -un)" '$3==u && /seat/ {print $1; exit}')
+say "console session ${sid:-none}: $(loginctl show-session "${sid:-0}" -p Type -p LockedHint 2>/dev/null | paste -sd' ')"
+[ "$(loginctl show-session "${sid:-0}" -p LockedHint --value 2>/dev/null)" = yes ] && \
+  say "WARNING: console is LOCKED; rendering may stall and the CSV may be empty"
+busy=$(pgrep -a -x 'curl|rsync|scp' 2>/dev/null)
+[ -n "$busy" ] && say "WARNING: bulk-transfer processes running (contaminates the modem path): $(tr '\n' ';' <<<"$busy")"
 say "clock pre-run:  $(sntp_offset)"
 
-# ---- 1. modem capture, live before the cell -----------------------------------
+# ---- 1. modem capture and path recorders, live before the cell ---------------
 python3 -c "import time;d=$epoch-$CAP_BEFORE-time.time()
 if d>0: time.sleep(d)"
-before=$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)
-"$CAPTURE" "$cap_dur" "$label" > "$outdir/capture.out" 2>&1 &
-cpid=$!
-dlf=""
-for _ in $(seq 1 200); do
-  kill -0 "$cpid" 2>/dev/null || { say "CAPTURE DID NOT START:"; cat "$outdir/capture.out" >&2; exit 1; }
-  if [ "$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)" -gt "$before" ]; then
-    dlf=$(ls -1t "$HOME"/diag-logs/"$label"-*.dlf | head -1)
-    [ -s "$dlf" ] && break
-  fi
-  sleep 0.1
-done
-[ -n "$dlf" ] && [ -s "$dlf" ] || { say "CAPTURE ALIVE BUT WROTE NOTHING in 20 s (letting it finish so diag-log-off runs)"; wait "$cpid"; exit 1; }
-say "capture LIVE -> $dlf  (wall ms $(ms))"
+if [ "$HOPS" = 1 ]; then
+  hops_sampler "$outdir/hops.csv" "$cap_dur" 2>"$outdir/hops.err" &
+  hpid=$!
+  say "hops sampler LIVE -> $outdir/hops.csv (1 Hz)"
+fi
+if [ "$PING" = 1 ]; then
+  ping -D -n -i 0.2 -W 1 -w "$cap_dur" "$SFU_IP" > "$outdir/ping-sfu.txt" 2>&1 &
+  ppid_=$!
+  say "ping LIVE -> $outdir/ping-sfu.txt ($SFU_IP, 5 Hz)"
+fi
+if [ "$DIAG" = 1 ]; then
+  before=$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)
+  "$CAPTURE" "$cap_dur" "$label" > "$outdir/capture.out" 2>&1 &
+  cpid=$!
+  for _ in $(seq 1 200); do
+    kill -0 "$cpid" 2>/dev/null || { say "CAPTURE DID NOT START:"; cat "$outdir/capture.out" >&2; cpid=""; exit 1; }
+    if [ "$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)" -gt "$before" ]; then
+      dlf=$(ls -1t "$HOME"/diag-logs/"$label"-*.dlf | head -1)
+      [ -s "$dlf" ] && break
+    fi
+    sleep 0.1
+  done
+  [ -n "$dlf" ] && [ -s "$dlf" ] || { say "CAPTURE ALIVE BUT WROTE NOTHING in 20 s (letting it finish so diag-log-off runs)"; exit 1; }
+  say "capture LIVE -> $dlf  (wall ms $(ms))"
+else
+  say "DIAG off for this cycle (no modem capture)"
+fi
 
 # ---- 2. subscriber, in the room before the publisher --------------------------
 python3 -c "import time;d=$epoch-$SUB_BEFORE-time.time()
@@ -151,7 +244,7 @@ done
 if grep -q 'Connected:' "$outdir/subscriber.log"; then
   say "subscriber CONNECTED to $room"
 else
-  say "SUBSCRIBER FAILED TO CONNECT (capture continues; log below)"; tail -8 "$outdir/subscriber.log" >&2
+  say "SUBSCRIBER FAILED TO CONNECT (recorders continue; log below)"; tail -8 "$outdir/subscriber.log" >&2
 fi
 
 # ---- 3. did media actually arrive? The one fact the DIAG capture needs --------
@@ -164,24 +257,31 @@ done
 if [ "$arrived" = 1 ]; then
   say "MEDIA ARRIVED  (poll saw decode by wall ms $(ms); precise onset from CSV at the end)"
 else
-  say "NO MEDIA by epoch+40 s -- the downlink was idle; this DIAG window does not cover a loaded link"
+  say "NO MEDIA by epoch+40 s -- the downlink was idle; this window does not cover a loaded link"
 fi
 
-# ---- 4. hold for the cell, then let the capture end on its own ----------------
+# ---- 4. hold for the cell, then let the recorders end on their own ------------
 wait "$spid"; src=$?
 say "subscriber exited rc=$src  (4 = publisher unpublished cleanly, 124 = timeout)"
-say "waiting for capture to finish and turn modem logging off..."
-wait "$cpid"; crc=$?
-say "capture exited rc=$crc"
+if [ -n "$cpid" ]; then
+  say "waiting for capture to finish and turn modem logging off..."
+  wait "$cpid"; crc=$?; cpid=""
+  say "capture exited rc=$crc"
+fi
+[ -n "$hpid" ] && { wait "$hpid"; hpid=""; }
+[ -n "$ppid_" ] && { wait "$ppid_"; ppid_=""; }
 say "clock post-run: $(sntp_offset)"
 
 # ---- 5. what landed ----------------------------------------------------------
 echo
-cat "$outdir/capture.out"
-echo
+[ -f "$outdir/capture.out" ] && cat "$outdir/capture.out" && echo
 grep -E 'Decode health' "$outdir/subscriber.log" | tail -1
+[ -f "$outdir/ping-sfu.txt" ] && tail -2 "$outdir/ping-sfu.txt" | tee -a "$outdir/timeline.txt"
 python3 - "$outdir/subscriber.csv" "$epoch" "$outdir/timeline.txt" <<'PY'
-import csv, sys
+import csv, os, sys
+if not os.path.exists(sys.argv[1]):
+    print("subscriber.csv: not written")
+    raise SystemExit
 rows = list(csv.DictReader(open(sys.argv[1])))
 if not rows:
     print("subscriber.csv: no rows (nothing rendered -- check Decode health above for arrival)")
@@ -211,12 +311,12 @@ for r in rows:
         b = float(r["receive_bitrate_mbps"])
     except (ValueError, KeyError):
         continue
-    bins.setdefault(int(t // 10) * 10, []).append(b)
+    bins.setdefault(int(t // 60) * 60, []).append(b)
 print(f"subscriber.csv: {len(rows)} rows, packets_lost {rows[-1].get('packets_lost')}, "
       f"resolution {rows[-1].get('frame_width')}x{rows[-1].get('frame_height')}")
-print("receive bitrate by 10 s window, seconds from epoch (a grant collapse shows here):")
+print("receive bitrate by 60 s window, seconds from epoch (a grant collapse shows here):")
 for k in sorted(bins):
     v = sorted(bins[k])
     print(f"  t+{k:>4}s  p50 {v[len(v)//2]:5.2f} Mbps   n={len(v)}")
 PY
-say "done. outdir=$outdir dlf=$dlf"
+say "done. outdir=$outdir dlf=${dlf:-none}"
