@@ -450,6 +450,16 @@ Properties of the hold, from both hosts:
   cannot pick. Test for the operator: decode each host's RRCReconfiguration (0xB821 NR RRC OTA) for
   rlc-Config t-Reassembly and pdcp-Config t-Reordering, then match the holds to QCAT-decoded NR
   MAC/RLC DL records at millisecond resolution on Host B.
+- **Cycle 53 (16:11:29Z), bad mode again.** Receive → decoder > 10 ms in 324 frames (p99 15.1 ms);
+  render gaps > 50 ms 9.77%, the night's highest. 0 lost, 0 dropped; freeze_count 1 with
+  total_freeze_duration_ms 0.000 (the known-unreliable counter; a 53 ms render interval at frame
+  1660). Of 47 stalled frames, 29 on time at the interface, 11 upstream-like, ordering test 0 of
+  47 negative. Frames 10197–10200 form one longer path-side hold (e2r 183 → 101 ms, all received
+  within 21 ms), ~150 ms rather than ~50.
+- **Thread placement does not mark the mode (10 s snapshots).** network_thread on the same core as
+  the decoder / local-video-gpu / WSI swapchain / main thread: c052 (good, 63 snapshots) 8/11/32/8%;
+  c053 (bad, 63) 5/10/27/16%; c050 (bad, partial, 16) 19/25/44/12%. No consistent excess in bad
+  runs; unsupported rather than refuted, since 10 s snapshots cannot catch 50 ms contention.
 - **Thread placement (Host A, from Host B's 10 s snapshots):** network_thread shared a core with
   WSI swapchain / local-video-gpu / VideoDecoderQue in 7/4/3 of 16 snapshots in c050 (bad) and
   20/7/5 of 63 in c052 (good). Slightly higher in the bad run, but not evidence at this cadence.
