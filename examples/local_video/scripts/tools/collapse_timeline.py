@@ -108,7 +108,7 @@ def load_probes(path):
     return [(int(r["unix_s"]), float(r["mbps_parallel"]), float(r["mbps_single"])) for r in csv.DictReader(open(path))]
 
 
-def scan(hosta_dir, results_dir, probes_path=None):
+def scan(hosta_dir, results_dir, probes_path=None, probe_payload_mb=4.0, probe_streams=4):
     import datetime
     import glob
     import os
@@ -140,10 +140,15 @@ def scan(hosta_dir, results_dir, probes_path=None):
             if probes:
                 start = t0 / 1e6 + e["start"]
                 end, par, single = min(probes, key=lambda p: abs(p[0] - start))
-                # Probes last up to ~50 s and log only their end, so an episode caused by
-                # one starts before that end.
-                near = -5 <= end - start <= 60
-                tag = f" probe-end{end - start:+.0f}s@{par:.0f}Mbps{'' if near else '(far)'}"
+                # Probes log only their end. uplink-probe.sh runs N parallel uploads of the
+                # payload then one single upload, so its length follows from its own speeds:
+                # N streams sharing `par` each take payload/(par/N); the single takes
+                # payload/single. Overlapped = onset inside [est. start - 5 s, end + 5 s].
+                mbits = probe_payload_mb * 8
+                est = min(25, mbits * probe_streams / max(par, 0.1)) + min(25, mbits / max(single, 0.1))
+                near = -5 <= end - start <= est + 5
+                tag = (f" probe-end{end - start:+.0f}s(len~{est:.0f}s)@{par:.0f}Mbps"
+                       f" {'PROBE-OVERLAPPED' if near else 'NOT-PROBE'}")
             parts.append(f"[t+{e['start']} {e['dur']}s {e['peak_ms']:.0f}ms x{e['target_ratio']:.2f} {e['leg']}"
                          f" r{e['retx']} l{e['lost']} m{e['missing_ids']}{tag}]")
         print(f"{when}   {name:26s} {base:6.1f}   {'  '.join(parts) or 'none'}")
