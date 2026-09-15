@@ -381,6 +381,30 @@ receive-thread read on Host B (thread scheduling or a blocked socket read), the 
 Host B's known render judder. Caveat: the counter marks NAPI handoff, so modem/USB batching would
 count as upstream. Being repeated on cycles 50, 52 and 53.
 
+Host A's independent classifier (different window: recv−(e2r−base) … recv−3 ms, longest quiet
+stretch against a 1,549-frame control, synthetic-tested 7/7) agrees: of 63 stalls, 55 Host B,
+3 upstream, 5 unclear. Upstream agreed on 4458 and 6768 (Host A adds 7041; calls 17228 Host B).
+
+Properties of the hold, from both hosts:
+- **Near-constant length.** c049: e2r − baseline p10 47.6, p50 50.4, p90 55.8 ms (2 ms bins
+  46:10, 48:20, 50:15, 52:11). All night (Host A): 1,385 of 1,605 in 40–54 ms, independent of busy
+  hour or DIAG. A network queue would give variable durations.
+- **Aperiodic onsets.** No phase-locking at 1 s (Rayleigh R = 0.02, p ≈ 0.97), 2 s, 5 s, 10 s,
+  0.1 s or 0.05 s; 0.5 s R = 0.25 (p ≈ 0.02, not significant across 7 periods). Inter-stall gaps
+  p10 0.83 s, p50 4.7 s, p90 18.6 s. The subscriber's 1 Hz `get_stats` poll is therefore not the
+  trigger.
+- **Not CPU power state or tick.** Host B: i5-14400T, 16 threads; intel_pstate, governor
+  powersave, EPP balance_performance; C1/C2/C3 enabled (C3 exit 1,048 µs); CONFIG_HZ=1000,
+  NO_HZ_FULL; no CPU isolation or thread affinity. None produces a fixed ~50 ms hold. At one
+  snapshot network_thread ran on CPU 4 and the decoder on CPU 13.
+- Every stall coincides with a render gap > 50 ms (vs 45% by chance within ±150 ms), but that is
+  mechanical (a late frame plus a burst forces a render gap); Host B had 1,059 render gaps vs 64
+  stalls, so render judder is broader.
+
+Reading: packets wait in Host B's kernel for a fixed ~50 ms at irregular moments, which fits a
+missed wakeup in the receive path falling back to a fixed wait or timer. Code and system changes
+are left to the operator.
+
 ### S3 arm c — result (Q3)
 
 **Q3, modem side: yes, and the coupling is symmetric.** Host A's DLF (Host A's parser with the
