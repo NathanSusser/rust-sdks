@@ -423,6 +423,22 @@ Properties of the hold, from both hosts:
   downlink. Pings (5 Hz) and per-second DLF rates (±2 s) cannot resolve a 50 ms hold and separate
   nothing. Next tests (operator): millisecond-resolution QCAT-decoded PDCP/RLC timing on Host B,
   and SFU-side packet timestamps.
+- **Cycle 52 (15:59:32Z), a good-mode run.** Receive → decoder hand-off > 10 ms in 19 frames
+  (p99 0.55 ms) against 341 (p99 15.9 ms) in c050. Stalled frames fell to 13 (Host B definition)
+  / 24 (Host A's, late ≥ 75 ms). With the read hold mostly absent, the rest lean path-side: Host
+  A's classifier 21 upstream, 3 Host B; Host B's 4 upstream-like (6339, 12037, 15046, 17290, all
+  in Host A's list), 3 on time, 6 partial; ordering test 0 of 13 negative. The path-side holds
+  are also near-constant (45–55 ms) and cluster (17272–17294 all at 16:07:42Z), which points to a
+  timer rather than a queue.
+- **Host B's downlink path settings (read-only).** `qmi_wwan`, raw_ip=Y, pass_through=N, no QMAP
+  mux (ModemManager bearer "multiplexed: no"); GRO on with gro_flush_timeout 0,
+  napi_defer_hard_irqs 0, threaded NAPI off; coalescing not exposed; modem on USB 2.0 (480 Mbps)
+  with runtime PM disabled (power/control=on). Nothing on Host B's host side batches for ~50 ms.
+  The modem firmware's own DL aggregation (QMI WDA data format) is readable only via QMI as root,
+  so a modem-side DL batching timer is not excluded (operator: `qmicli --wda-get-data-format`).
+- **Thread placement (Host A, from Host B's 10 s snapshots):** network_thread shared a core with
+  WSI swapchain / local-video-gpu / VideoDecoderQue in 7/4/3 of 16 snapshots in c050 (bad) and
+  20/7/5 of 63 in c052 (good). Slightly higher in the bad run, but not evidence at this cadence.
 - **Not the Rust SDK's fixed waits.** Its only 50 ms waits are setup-time polling loops:
   `rtc_session.rs:2268` (waiting for the peer connections to connect), `rtc_session.rs:2438`
   (waiting for the publisher connection and data channel) and `remote_participant.rs:131`
