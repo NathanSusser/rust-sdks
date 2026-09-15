@@ -334,6 +334,29 @@ These codes therefore mark a UE's own uplink-busy state, identically on both mod
 and firmware). The bystander signature is different: in arm a the idle Host B logged fewer uplink
 scheduling reports (0xB872/0xB873 ×0.3, 0xB883 ×0.57) while Host A uploaded.
 
+## Overnight loop, 2026-09-15 — anomaly log
+
+The loop (`overnight-2026-09-15`, Host A driver) runs 600 s pinned 2 Mbps H.264 cells to
+16:30Z. From ~05:09Z, DIAG runs on k%3==1 cycles until 12:00Z, none 12:00–14:30Z, and every
+H.264 cycle 14:30Z–END, to concentrate modem logs in the morning busy hour. Anomalies are
+recorded here as they are localized.
+
+**#1 — cycle 1, 04:51:46Z: a Host B-only ~0.8 s radio-link hold (not the uplink question).**
+Host A's video at Host B stalled to 770 ms and 27 packets were lost at 04:51:47Z, while Host A's
+path to the SFU stayed 16–19 ms with no queue and Host A's modem log was flat. On Host B, pings
+to both 10.1.20.16 and 10.1.20.21 got no reply for 0.81 s after 04:51:46.071, then three held
+replies arrived within 20 ms (623, 425, 219 ms) and the next was 20 ms: held and released, none
+lost. The subscriber's receive rate dipped to ~20 fps and caught up at ~40 fps (frame assembly
+up to 335 ms). Host B's DLF shows one second with broad MAC/L1 reporting 30–55% below its
+neighbours (0xB8A8 100 → 45, 0xB883 224 → 158, 0xB887 164 → 81) and no RRC messages
+(0xB821 = 0), with 0xB97F measurement records steady; RSRP −89 dBm and SNR 26 dB unchanged.
+No 0xB975 NR_ML1_Serving_Cell_Beam_Management records and no RACH records (0xB889 trigger,
+0xB88A attempt) in the window, so neither a logged beam switch nor a random-access recovery;
+fixed-cadence MAC stats (0xB881, 0xB888) and RLC DL stats (0xB84D) steady; 0xB958 94 → 40 in
+the same second. Reading: a short Host B scheduling or retransmission interruption without RRC,
+beam-management or RACH signalling; not a handover and not a beam-failure recovery; cause
+unnamed.
+
 ### S3 arm c — result (Q3)
 
 **Q3, modem side: yes, and the coupling is symmetric.** Host A's DLF (Host A's parser with the
