@@ -318,6 +318,22 @@ The shared cell couples the two modems' uplink reporting (arm a), but at ~40 Mbp
 one other UE's 38 Mbps upload did not reduce what Host A could send. A capacity effect needs the
 cell actually congested: the busy-hour periods, which the overnight loop samples.
 
+**The uploading modem's signature is the same on both hosts.** Host B's own codes while Host B
+uploaded (arm b; medians −55…+50 → +61…+70) match Host A's while Host A uploaded in S2:
+
+| Code | Host A uploading (S2) | Host B uploading (S3 arm b) |
+|---|---|---|
+| 0xB882, 0xB8A6, 0xB958 (unnamed) | ~114 → 0 | ~60 → 0 |
+| 0xB8C4 / 0xB8CE (unnamed) | ×4.7 / ×3.1 | ×4.0 / ×3.2 |
+| 0xB887 / 0xB896 (unnamed) | ×2.0 / ×2.5 | ×2.5 / ×2.6 |
+| 0xB885 (unnamed) | ×1.3 | ×1.6 |
+| 0xB872 NR_L2_UL_TB / 0xB873 NR_L2_UL_BSR | ×1.56 | ×2.9 |
+| 0xB883 NR_MAC_UL_Physical_Channel_Schedule_Report | ×1.01 | ×1.14 |
+
+These codes therefore mark a UE's own uplink-busy state, identically on both modems (same model
+and firmware). The bystander signature is different: in arm a the idle Host B logged fewer uplink
+scheduling reports (0xB872/0xB873 ×0.3, 0xB883 ×0.57) while Host A uploaded.
+
 **Separate observation (not Q2): a 1.41 s render stall on Host B.** At +72.9…+74.8 s, just after
 Host B's upload ended, the per-frame CSV has no rows and frame_id jumps 2096 → 2152. This is not
 loss: Host B's wwan0 received a normal ~390–415 packets/s at 2.4–2.6 Mbps (0 rx_dropped, 0 UDP
