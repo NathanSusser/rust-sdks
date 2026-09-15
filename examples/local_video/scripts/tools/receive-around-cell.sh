@@ -26,6 +26,13 @@
 # itself: its diag-log-off step runs after QCSuper exits, and killing the shell
 # skips it, leaving the modem streaming logs and loading the baseband.
 #
+# CLOCK. DLF modem timestamps are not a usable clock on their own: a file can hold
+# garbage records (a 2.4e11 s min-max span was seen) and valid ones sit ~10 s off wall
+# with seconds of slop. timeline.txt records two independent wall anchors -- capture
+# live (ms) and media onset (first-packet µs from the CSV) -- so the DLF can be aligned
+# by a median(wall - modem) fit over records near each, outliers dropped, rather than
+# by trusting any single record.
+#
 # Usage: receive-around-cell.sh <label> <epoch> <room> [outdir]
 set -uo pipefail
 
@@ -55,8 +62,12 @@ now=$(date +%s)
 [ -x "$CAPTURE" ] || { echo "capture script missing: $CAPTURE" >&2; exit 1; }
 [ -x "$SUB" ]     || { echo "subscriber binary missing: $SUB" >&2; exit 1; }
 [ -c /dev/ttyUSB0 ] || { echo "DIAG port /dev/ttyUSB0 absent" >&2; exit 1; }
-if pgrep -f qcsuper >/dev/null; then
-  echo "a qcsuper process already holds a DIAG port; not starting:" >&2; pgrep -af qcsuper >&2; exit 1
+# Match the interpreter, not the word. `pgrep -f qcsuper` also matches any shell whose
+# command text merely contains "qcsuper" -- including Claude tool shells and monitors
+# on this host -- and would refuse, losing the run. capture.sh uses the same pattern.
+QC_PROC='^[^ ]*python[0-9.]* [^ ]*qcsuper'
+if pgrep -f "$QC_PROC" >/dev/null; then
+  echo "a qcsuper process already holds a DIAG port; not starting:" >&2; pgrep -af "$QC_PROC" >&2; exit 1
 fi
 [ -n "${DISPLAY:-}" ] || { echo "DISPLAY unset: run this at Host B's console, not over plain ssh" >&2; exit 1; }
 cd "$REPO" || exit 1
@@ -75,13 +86,13 @@ before=$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)
 "$CAPTURE" "$cap_dur" "$label" > "$outdir/capture.out" 2>&1 &
 cpid=$!
 dlf=""
-for _ in $(seq 1 40); do
+for _ in $(seq 1 200); do
   kill -0 "$cpid" 2>/dev/null || { say "CAPTURE DID NOT START:"; cat "$outdir/capture.out" >&2; exit 1; }
   if [ "$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)" -gt "$before" ]; then
     dlf=$(ls -1t "$HOME"/diag-logs/"$label"-*.dlf | head -1)
     [ -s "$dlf" ] && break
   fi
-  sleep 0.5
+  sleep 0.1
 done
 [ -n "$dlf" ] && [ -s "$dlf" ] || { say "CAPTURE ALIVE BUT WROTE NOTHING in 20 s (letting it finish so diag-log-off runs)"; wait "$cpid"; exit 1; }
 say "capture LIVE -> $dlf  (wall ms $(ms))"
@@ -112,7 +123,7 @@ while [ "$(date +%s)" -lt "$deadline" ] && kill -0 "$spid" 2>/dev/null; do
   sleep 1
 done
 if [ "$arrived" = 1 ]; then
-  say "MEDIA ARRIVED  (first decoded frames by wall ms $(ms))"
+  say "MEDIA ARRIVED  (poll saw decode by wall ms $(ms); precise onset from CSV at the end)"
 else
   say "NO MEDIA by epoch+40 s -- the downlink was idle; this DIAG window does not cover a loaded link"
 fi
@@ -129,13 +140,30 @@ echo
 cat "$outdir/capture.out"
 echo
 grep -E 'Decode health' "$outdir/subscriber.log" | tail -1
-python3 - "$outdir/subscriber.csv" "$epoch" <<'PY'
+python3 - "$outdir/subscriber.csv" "$epoch" "$outdir/timeline.txt" <<'PY'
 import csv, sys
 rows = list(csv.DictReader(open(sys.argv[1])))
 if not rows:
     print("subscriber.csv: no rows (nothing rendered -- check Decode health above for arrival)")
     raise SystemExit
 epoch_us = int(sys.argv[2]) * 1_000_000
+# Media onset: first-packet wire-arrival time, PTP-disciplined µs. The downlink MAC
+# records in the DLF jump at the same moment, so this is a second, independent anchor.
+arr = []
+for r in rows:
+    try:
+        v = int(r["webrtc_receive_timestamp_us"])
+    except (ValueError, KeyError):
+        continue
+    if v > 0:
+        arr.append(v)
+if arr:
+    onset = min(arr)
+    line = (f"media onset (first-packet wire time, PTP): {onset} us "
+            f"= epoch{(onset - epoch_us) / 1e6:+.3f} s")
+    print(line)
+    with open(sys.argv[3], "a") as t:
+        t.write(line + "\n")
 bins = {}
 for r in rows:
     try:
