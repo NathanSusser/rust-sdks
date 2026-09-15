@@ -229,6 +229,12 @@ if [ "$DIAG" = 1 ]; then
   done
   [ -n "$dlf" ] && [ -s "$dlf" ] || { say "CAPTURE ALIVE BUT WROTE NOTHING in 20 s (letting it finish so diag-log-off runs)"; exit 1; }
   say "capture LIVE -> $dlf  (wall ms $(ms))"
+  # A non-empty DLF is not proof: QCSuper can write a few records and exit at startup
+  # (opcode-158 race, 2026-09-15). A good start logs "Enabled logging for" within ~1 s.
+  for _ in $(seq 1 20); do grep -q 'Enabled logging for' "${dlf%.dlf}.log" 2>/dev/null && break; sleep 0.5; done
+  grep -q 'Enabled logging for' "${dlf%.dlf}.log" 2>/dev/null \
+    && say "capture logging ENABLED (QCSuper set the log mask)" \
+    || say "WARNING: no 'Enabled logging for' in ${dlf%.dlf}.log after 10 s; capture.sh may be retrying (see capture_rc in DONE)"
 else
   say "DIAG off for this cycle (no modem capture)"
 fi
