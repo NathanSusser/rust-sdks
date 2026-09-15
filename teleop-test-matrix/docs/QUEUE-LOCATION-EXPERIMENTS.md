@@ -341,7 +341,26 @@ The loop (`overnight-2026-09-15`, Host A driver) runs 600 s pinned 2 Mbps H.264 
 H.264 cycle 14:30Z–END, to concentrate modem logs in the morning busy hour. Anomalies are
 recorded here as they are localized.
 
-**Busy-hour result, Host B side (Host A's per-cycle capacity to be added from its summary).**
+**Busy-hour answer: the 10–11 Sep collapse did not recur.** The loop ran 53 cycles (36 H.264 to
+Host B, 17 H.265 Host A-only) from 04:42Z; the driver exited cleanly at 16:23:41Z. With GCC pinned
+and no bulk uplink probe during cells, collapse seconds were 0 in all 53 cycles, Host A's target
+minimum was ≥ 1.955 Mbps in 52 cycles (one brief dip to 1.698 Mbps in c002 at 04:56Z with p50 2.0,
+0 packets lost, qdisc peak 3), and Host A's qdisc held more than 10 packets for at most 1 s per
+cycle.
+
+- **Both hosts' uplink capacity stepped down together from ~13:30Z.** Host A's gap probe: 41–71
+  Mbps parallel / 32–45 single before 13:30Z; 38.5–53.0 / 25.1–38.4 after. Host B's: 45–67 before;
+  38–45 after. Same cell (PCI 85), same time, so cell- or carrier-level load rather than one modem.
+  The floor (~25 Mbps single) stayed more than 12× the 2 Mbps stream, and media was unaffected.
+- **Anomaly list, aligned with Host A:** #1 the Host B radio hold (cycle 1, the night's only
+  packet loss); #2 the Host B read hold; #3 the path-side ~45–65 ms holds; #4 a ~150 ms hold on
+  frames 10197–10200 in cycle 53 at 16:17:20.7Z, which Host A's ping (168 ms against a ~18 ms p50,
+  Host B's pings flat, Host A's egress and qdisc clean) places on Host A's radio path; #5 the
+  capacity step-down above. Per-cycle tables: `hosta-cycles-2026-09-15.csv` and
+  `hostb-night-summary-2026-09-15.txt` in `examples/local_video/scripts/results/overnight-cycles/`
+  (not in git).
+
+**Busy-hour result, Host B side.**
 36 H.264 cycles on Host B, 04:42–16:11Z (per-cycle table:
 `examples/local_video/scripts/results/overnight-cycles/hostb-night-summary-2026-09-15.txt`, not in git):
 
