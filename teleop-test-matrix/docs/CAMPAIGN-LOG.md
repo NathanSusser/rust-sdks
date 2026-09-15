@@ -59,6 +59,27 @@ which is why 78% of missing frames left no RTP sequence gap.
 four seconds before the agreed epoch — then recreated it with the same name and a new
 SID. Likely the real cause of several earlier zero-row runs.
 
+**The 10 Sep bitrate collapses line up with our own uplink speed test.** Host A's
+`uplink-monitor.sh` ran a 4-way parallel curl upload every ~190 s on the same modem uplink
+as the video. The evidence is timing correlation; a controlled A/B test is pending.
+
+- **Timing.** 20 of 21 latency episodes in the overnight ladder begin 7–15 s before a
+  probe ends. Host B transport p50 rose from ~45 to 200–520 ms, and Host A's target was cut
+  to ×0.13–0.62 about 1 s later, with zero packets lost. The VBR and motion cells'
+  35 kbps minima fall at probe times too.
+- **Dose.** Every in-cell probe after 08:05Z caused an episode: the uplink had dropped from
+  ~60 to 10–20 Mbps, so the upload saturated it. No in-cell probe before 08:05Z did (54–68 Mbps).
+- **Location.** The queue was on A→SFU (Host A's estimator reacted every time) and it was
+  lossless. Frames missing at Host B were encoder drops at a collapsed target, not network
+  loss.
+- **Verdict.** Neither a modem fault nor a network fault: cross-traffic we generated.
+  Tool: `examples/local_video/scripts/tools/collapse_timeline.py --scan`.
+
+**Still open, and separate:** Host A's uplink fell below 2 Mbps for hours at a time
+(10 Sep 14:49–16:13Z; 11 Sep 00:45–03:15Z and 18:29–20:59Z). That would collapse video
+with no probe running. Whether it is Host A's line or modem or the cell needs simultaneous
+measurement on both hosts.
+
 **The quality ladder (27 cells, PSNR against a 46.9 dB source):**
 
 | kbps | H.264 | AV1 |
