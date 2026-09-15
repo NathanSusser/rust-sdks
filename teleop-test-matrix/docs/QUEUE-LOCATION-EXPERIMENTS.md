@@ -409,6 +409,12 @@ Properties of the hold, from both hosts:
   mechanical (a late frame plus a burst forces a render gap); Host B had 1,059 render gaps vs 64
   stalls, so render judder is broader.
 
+- **Cycle 50 (15:31:58Z) repeats it.** 0 lost, 0 frozen, 0 dropped; 15 missing frame IDs.
+  Sampler period p99 5.08 ms, max 13 ms. Of 41 stalled frames (e2r ≥ 2.5× the 33.9 ms
+  baseline, next frame ≤ 25 ms later), 32 had their packets at the interface on time and 8 had
+  ≤ 2 (upstream-like: 3753, 7552, 10267, 11010, 11040, 15140, 15222, 16967). Ordering test: 0 of 40
+  with the next frame first (Δ p50 0.3 ms). Render timings stayed within the c044–c049 spread
+  with the sampler on.
 - **Not the Rust SDK's fixed waits.** Its only 50 ms waits are setup-time polling loops:
   `rtc_session.rs:2268` (waiting for the peer connections to connect), `rtc_session.rs:2438`
   (waiting for the publisher connection and data channel) and `remote_participant.rs:131`
