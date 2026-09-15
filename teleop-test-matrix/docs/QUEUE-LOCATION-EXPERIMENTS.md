@@ -334,6 +334,30 @@ These codes therefore mark a UE's own uplink-busy state, identically on both mod
 and firmware). The bystander signature is different: in arm a the idle Host B logged fewer uplink
 scheduling reports (0xB872/0xB873 ×0.3, 0xB883 ×0.57) while Host A uploaded.
 
+### S3 arm c — result (Q3, path side; modem side pending Host A's dlf-rates)
+
+Host B's upload: 12 × ~3.24 Mbps (38.9 Mbps aggregate) from epoch+60.01 s, single 29.9 Mbps,
+end +71.38 s. No video on either host; Host B ran with `SUBSCRIBE=0` (no subscriber, no room
+join). Host B's wwan0 sent 3.1–4.4 k packets/s with a 17–22 packet qdisc backlog for +61…+69 s.
+Host A's serving cell PCI 85 before and after (RSRP −92 / −90 dBm).
+
+**Host B's uploader signature without video** (medians −55…+50 → +61…+70): 0xB882/0xB8A6/
+0xB958 28 → 0; 0xB8C4 ×18.5, 0xB8CE ×12.8, 0xB887 ×8.4, 0xB896 ×7.2 (lower no-video baselines,
+so larger ratios than arm b); 0xB872/0xB873 ×2.55; 0xB885 ×2.05; 0xB884 ×1.68; 0xB883 ×1.33.
+
+**Host A's path while Host B uploaded, no video anywhere:**
+
+| Host A series | Baseline +10…+55 s (p50 / p90) | +61…+70 s |
+|---|---|---|
+| ICMP to SFU node | 19.2 / 26.2 ms | p50 21.5, max 28.1 |
+| UDP TTL=3 to hop 3 | 23.0 / 29.4 ms | p50 24.8, max 32.5 (32 ms in 4 of 10 s) |
+| TCP SYN→RST | 14.8 / 24.3 ms | p50 23.2, max 37.8 (level already ~23 from +56 s, before the upload) |
+| fq_codel backlog / requeues | 0 / 0 | 0 / 0 every second |
+
+At most a ~5–10 ms rise in Host A's round trips, partly preceding the upload, and no queue: the
+same answer as Q2. At tonight's ~40 Mbps headroom another UE's upload on PCI 85 does not
+meaningfully reduce what Host A can send.
+
 **Separate observation (not Q2): a 1.41 s render stall on Host B.** At +72.9…+74.8 s, just after
 Host B's upload ended, the per-frame CSV has no rows and frame_id jumps 2096 → 2152. This is not
 loss: Host B's wwan0 received a normal ~390–415 packets/s at 2.4–2.6 Mbps (0 rx_dropped, 0 UDP
