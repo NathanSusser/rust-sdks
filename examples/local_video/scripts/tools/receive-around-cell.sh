@@ -56,6 +56,11 @@ CAP_BEFORE=60      # capture starts this long before the epoch (idle baseline)
 CAP_AFTER=35       # and runs this long past the cell's end
 CELL_S=155
 SUB_BEFORE=20      # subscriber joins this long before the epoch
+# Show frame timing (latency) in the subscriber's diagnostics window. Costs a little
+# local render work on Host B's integrated GPU, which can nudge local latency; it has
+# no effect on the modem or the network. SHOW_TIMING=0 omits it, as in the runbook.
+TIMING_FLAG=(--display-timestamp)
+[ "${SHOW_TIMING:-1}" = "0" ] && TIMING_FLAG=()
 cap_dur=$((CAP_BEFORE + CELL_S + CAP_AFTER))
 
 say() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$outdir/timeline.txt"; }
@@ -135,7 +140,7 @@ say "capture LIVE -> $dlf  (wall ms $(ms))"
 python3 -c "import time;d=$epoch-$SUB_BEFORE-time.time()
 if d>0: time.sleep(d)"
 env -u WAYLAND_DISPLAY RUST_LOG=info timeout $((SUB_BEFORE + CELL_S + 25)) \
-  "$SUB" --url "$URL" --room-name "$room" --identity "host-b-$label" --low-latency \
+  "$SUB" --url "$URL" --room-name "$room" --identity "host-b-$label" --low-latency "${TIMING_FLAG[@]}" \
   --log-csv "$outdir/subscriber.csv" > "$outdir/subscriber.log" 2>&1 &
 spid=$!
 for _ in $(seq 1 30); do
