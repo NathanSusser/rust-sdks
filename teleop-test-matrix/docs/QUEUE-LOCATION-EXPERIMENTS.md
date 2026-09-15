@@ -192,6 +192,18 @@ flow-controls (no drops), media waits first in Host A's kernel queue and then in
 radio uplink. The SFU and DSCP/protocol classification are ruled out. The coupling to Host B
 points at the shared cell's scheduler (network side) rather than a modem fault.
 
+**Checks on the coupling reading (04:05Z).**
+
+- **Same cell: confirmed.** Host A (QMI, 03:57Z): NR-ARFCN 521310 (n41), PCI 85, cell ID
+  7622566199. Host B (SCAT decode of 0xB97F in a slice of its S2 DLF): layer 0 NR-ARFCN
+  521310, PCI 85, SSB 0; plus a second layer NR-ARFCN 393130, PCI 85, which Host A's QMI
+  readout did not list.
+- **Traffic-volume explanation (d9): does not account for it.** Host B is the subscriber of
+  Host A's stream, so its codes could fall if less media arrived. Over the upload seconds
+  Host B still received 26–33 frames/s, 1.69–2.12 Mbps (WebRTC) and 2.1–2.8 Mbps on wwan0
+  (baseline ~2.3–2.7), rx packets −20%, while the codes halved. S3 arm (a) removes the video
+  entirely as the clean control.
+
 ## H3 — Host A's uplink capacity is set by a cell scheduler shared with other UEs
 
 Other load on the same cell reduces what Host A is granted; that is the candidate mechanism
