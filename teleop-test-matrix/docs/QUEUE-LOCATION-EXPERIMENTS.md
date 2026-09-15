@@ -436,6 +436,20 @@ Properties of the hold, from both hosts:
   with runtime PM disabled (power/control=on). Nothing on Host B's host side batches for ~50 ms.
   The modem firmware's own DL aggregation (QMI WDA data format) is readable only via QMI as root,
   so a modem-side DL batching timer is not excluded (operator: `qmicli --wda-get-data-format`).
+- **Modem DL aggregation is off (Host A, via its existing NOPASSWD qmicli, read-only).**
+  `qmicli --wda-get-data-format` on Host A's RM520N: raw-ip, no QoS header, UL and DL aggregation
+  disabled (DL max datagrams 0, max size 0), firmware RM520NGLAAR03A04M4G. Host B has no QMAP mux,
+  which DL aggregation would need, so a modem host-interface batching timer is unlikely on either
+  host.
+- **Leading candidate for the fixed ~50 ms path-side hold: a radio-layer reordering timer.** When
+  one MAC transport block fails HARQ, RLC t-Reassembly and/or PDCP t-Reordering hold every later
+  in-sequence packet until the retransmission arrives or the timer expires. These are configured
+  constants (tens of ms; 50 ms is common). From the hosts it looks exactly like "interface quiet
+  ~50 ms, then a burst, no IP loss", and HARQ failures cluster in short bad-channel episodes. It can
+  sit in Host B's downlink (UE-side reordering) or Host A's uplink (gNB-side), and tonight's data
+  cannot pick. Test for the operator: decode each host's RRCReconfiguration (0xB821 NR RRC OTA) for
+  rlc-Config t-Reassembly and pdcp-Config t-Reordering, then match the holds to QCAT-decoded NR
+  MAC/RLC DL records at millisecond resolution on Host B.
 - **Thread placement (Host A, from Host B's 10 s snapshots):** network_thread shared a core with
   WSI swapchain / local-video-gpu / VideoDecoderQue in 7/4/3 of 16 snapshots in c050 (bad) and
   20/7/5 of 63 in c052 (good). Slightly higher in the bad run, but not evidence at this cadence.
