@@ -231,6 +231,39 @@ points at the shared cell's scheduler (network side) rather than a modem fault.
 Other load on the same cell reduces what Host A is granted; that is the candidate mechanism
 for the busy-hour < 2 Mbps periods.
 
+### S3 — registered 04:10Z, before any arm's data
+
+Three 120 s arms, DIAG on both hosts (build fast2, full mask), same upload traffic as S2
+(12 × 4,000,000-byte uploads then one single, `--max-time 25`) at epoch+60 s. Both hosts
+on NR-ARFCN 521310 / PCI 85; Host A reads its serving cell before and after each arm.
+
+| Arm | Epoch | Load | Video |
+|---|---|---|---|
+| a `s3a-upload-a-novideo` | 1789445640 (04:14:00Z) | Host A uploads | none |
+| b `s3b-stream-a-upload-b` | 1789446000 (04:20:00Z) | Host B uploads | Host A → Host B, pinned 2 Mbps |
+| c `s3c-upload-b-novideo` | 1789446360 (04:26:00Z) | Host B uploads | none |
+
+**Deviation, known before arm a's data:** the wrapper's no-subscriber switch was first named
+`SUB`, which the wrapper already uses for the subscriber binary path, so arm a on Host B ran a
+subscriber joined to an empty room (no publisher, no media; signalling and ICE keepalives
+only). Fixed as `SUBSCRIBE` for arms b and c.
+
+Predictions:
+
+- **Q1 (arm a):** if the S2 code changes on Host B were coupling through the shared cell, Host
+  B's 0xB882/0xB8A6/0xB958/0xB8A8 and 0xB872/0xB873 rates step during Host A's upload even
+  with no media anywhere. If they do not step, S2's Host B changes came from Host B's own
+  traffic pattern.
+- **Q2 (arm b), the busy-hour mechanism:** if another UE's upload on the shared cell cuts Host
+  A's uplink capacity, Host A's media delay at Host B, Host A's hop-3 UDP RTT and Host A's
+  qdisc backlog rise during Host B's upload although Host A offers only 2 Mbps. No rise means
+  the cell had headroom for both at tonight's load, and the busy-hour periods need more
+  concurrent demand than one extra UE.
+- **Q3 (arm c):** mirror of arm a. Host A's codes should respond to Host B's upload the way Host
+  B's responded to Host A's.
+- Readout stays on per-code record rates: the v3 record layouts of 0xB872/0xB873/0xB881/0xB883
+  are not supported by any public decoder we could verify (MobileInsight supports v2 only).
+
 Original proposal:
 
 - 300 s, H.264 2 Mbps **pinned**; probe N=12 at t+120 for a ~10 s episode.
