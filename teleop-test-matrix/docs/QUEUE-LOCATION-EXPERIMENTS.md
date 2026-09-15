@@ -357,6 +357,30 @@ the same second. Reading: a short Host B scheduling or retransmission interrupti
 beam-management or RACH signalling; not a handover and not a beam-failure recovery; cause
 unnamed.
 
+**#2 — overnight render skips: ~50 ms holds inside Host B, not the network (cycle 49,
+15:18Z).** Host A found frames decoded but never rendered all night (0–17 per cycle, off-peak
+and busy hour, DIAG on or off), each after a frame N−1 arriving ~75–90 ms late (baseline ~27–32)
+with N+1 close behind; Host A's side was clean (on-time packetize, no wwan0 egress gap > 6 ms,
+qdisc 0). Host B has no packet capture (tcpdump has no capabilities, no NOPASSWD), so Host B
+sampled `/sys/class/net/wwan0/statistics/rx_packets` at 5 ms on CLOCK_REALTIME
+(`nic-rx-sampler.py`; period p50 5.00 / p99 5.09 ms; one 668 ms pause, overlapping no stall;
+render impact within the c044–c047 spread) and ran `stall_locator.py`.
+
+Stalled frames (e2r ≥ 2.5× the 31.6 ms baseline, next frame ≤ 25 ms later): 64 of 17,388.
+- Whole-frame assembly 0.23 ms p50 (max 0.39), so not a late last packet.
+- At each stalled frame's expected on-time arrival (capture + 31.6 ms, window −10…+15 ms) the
+  interface counted p50 23 packets (p10 17; 0% zero), against p50 12 (p10 8; 0.1% zero) for
+  ordinary frames. At the actual WebRTC receive it counted ~11 (one frame, N).
+- 59 of 64 had their packets at the interface on time; 3 (frames 4458, 6768, 17228) had ≤ 2
+  and look upstream.
+- Stall counts do not follow DIAG: c044 (DIAG off) 138; c046, c047, c049 (DIAG on) 7, 71, 64.
+
+Reading: the packets reached Host B's kernel on time and WebRTC's receive timestamp came ~50 ms
+later, released together with the next frame: a hold between kernel receive and the WebRTC
+receive-thread read on Host B (thread scheduling or a blocked socket read), the same family as
+Host B's known render judder. Caveat: the counter marks NAPI handoff, so modem/USB batching would
+count as upstream. Being repeated on cycles 50, 52 and 53.
+
 ### S3 arm c — result (Q3)
 
 **Q3, modem side: yes, and the coupling is symmetric.** Host A's DLF (Host A's parser with the
