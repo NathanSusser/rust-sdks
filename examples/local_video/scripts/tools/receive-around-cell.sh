@@ -242,7 +242,8 @@ for _ in $(seq 1 30); do
   sleep 0.5
 done
 if grep -q 'Connected:' "$outdir/subscriber.log"; then
-  say "subscriber CONNECTED to $room"
+  # A room lives on one SFU node: Host A's log must show this same SID.
+  say "subscriber CONNECTED to $room  room_sid=$(grep -m1 -o 'Connected: .* - RM_[A-Za-z0-9]*' "$outdir/subscriber.log" | grep -o 'RM_[A-Za-z0-9]*')"
 else
   say "SUBSCRIBER FAILED TO CONNECT (recorders continue; log below)"; tail -8 "$outdir/subscriber.log" >&2
 fi
@@ -256,6 +257,9 @@ while [ "$(date +%s)" -lt "$deadline" ] && kill -0 "$spid" 2>/dev/null; do
 done
 if [ "$arrived" = 1 ]; then
   say "MEDIA ARRIVED  (poll saw decode by wall ms $(ms); precise onset from CSV at the end)"
+  # Same-SFU proof, from the SFU itself: both hosts' identities under one room SID.
+  timeout 20 python3 "$REPO/examples/local_video/scripts/tools/room_check.py" "$room" 2>&1 \
+    | sed 's/^/  sfu: /' | tee -a "$outdir/timeline.txt"
 else
   say "NO MEDIA by epoch+40 s -- the downlink was idle; this window does not cover a loaded link"
 fi
