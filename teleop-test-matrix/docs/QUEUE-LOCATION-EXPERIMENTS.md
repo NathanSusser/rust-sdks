@@ -45,6 +45,13 @@ when total offered uplink load exceeds uplink capacity. The SFU is not congested
 - Host B: per-frame subscriber CSV, 5 Hz SFU ping, 1 Hz rx / UDP socket-drop counters,
   modem DLF, SFU participant list (same room SID = same SFU node).
 
+- **Caveat on P6, known before the cell (02:49Z):** QCSuper has always discarded modem
+  frames with DIAG opcode 158, which carry NR5G log headers (0xB8C0/0xB8C5/0xB8CB seen),
+  at 4k–17k frames per 12 s against ~4k DLF records. No DLF so far contains them, so every
+  NR5G record count, 10 Sep analyses included, is incomplete by an unknown factor. Host B
+  now runs a patched qcsuper-noroot that drops them explicitly and counts them; decoding
+  them is follow-up work. CRC loss swung 27–58% in back-to-back tests.
+
 ### Predictions (H1 survives only if all hold)
 
 | # | Prediction | Falsified if |
