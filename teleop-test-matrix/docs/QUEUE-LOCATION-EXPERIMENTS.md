@@ -334,7 +334,32 @@ These codes therefore mark a UE's own uplink-busy state, identically on both mod
 and firmware). The bystander signature is different: in arm a the idle Host B logged fewer uplink
 scheduling reports (0xB872/0xB873 ×0.3, 0xB883 ×0.57) while Host A uploaded.
 
-### S3 arm c — result (Q3, path side; modem side pending Host A's dlf-rates)
+### S3 arm c — result (Q3)
+
+**Q3, modem side: yes, and the coupling is symmetric.** Host A's DLF (Host A's parser with the
+dlf-check acceptance rule, 0 resyncs; host = modem − 4.719 s) during Host B's upload, with no
+media on Host A and Host A only recording; medians +5…+55 → +61…+70 → +80…+150 s, verified on
+Host B from Host A's `dlf-rates-epoch.csv`:
+
+| Code | Before | Upload | After | Ratio |
+|---|---|---|---|---|
+| 0xB872 NR_L2_UL_TB / 0xB873 NR_L2_UL_BSR | 9 | 2 | 10 | ×0.22 |
+| 0xB883 NR_MAC_UL_Physical_Channel_Schedule_Report | 156 | 106.5 | 187 | ×0.68 |
+| 0xB884 / 0xB885 (unnamed) | 167 / 148 | 102.5 / 57 | 169 / 153 | ×0.61 / ×0.39 |
+| 0xB8D1 / 0xB8CF (unnamed) | 194 / 191 | 110.5 / 116 | 211 / 197 | ×0.57 / ×0.61 |
+| 0xB882 / 0xB8C4 (uploader markers) | 30 / 15 | 24 / 12.5 | 26 / 11 | ×0.80 / ×0.83 |
+
+The step starts ~2–3 s early on the DLF clock (as on Host B) and recovers as Host B's parallel
+uploads end. **Whichever UE on PCI 85 uploads, the other UE's uplink BSR/TB reporting drops to
+about a quarter and its uplink schedule reports to about two-thirds, for the upload window only,
+independent of that UE's own traffic.** Two code sets are now empirical: a *UE-own-uplink-busy*
+set (0xB882/0xB8A6/0xB958 stop; 0xB8C4/0xB8CE/0xB887/0xB896 rise) and a *bystander* set
+(0xB872/0xB873/0xB883/0xB884/0xB885/0xB8D1/0xB8CF fall). Both unnamed beyond the MobileInsight
+names; QCAT would name them. Observations only: Host A's 0xB883/0xB884/0xB885/0xB8D1 sit
+10–25% above baseline for +72…+150 s, and a single second at +76 s shows 2–3× spikes in
+0xB882/0xB8C4/0xB8CE, near the unexplained +76…+79 s dip on Host B in arm a.
+
+**Q3, path side:**
 
 Host B's upload: 12 × ~3.24 Mbps (38.9 Mbps aggregate) from epoch+60.01 s, single 29.9 Mbps,
 end +71.38 s. No video on either host; Host B ran with `SUBSCRIBE=0` (no subscriber, no room
