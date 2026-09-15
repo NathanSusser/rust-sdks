@@ -148,7 +148,7 @@ finish() {
   local rc=$?
   # Children with their own timers stop by themselves; these two are only ours to stop.
   [ -n "$hpid" ] && kill "$hpid" 2>/dev/null
-  [ -n "$ppid_" ] && kill "$ppid_" 2>/dev/null
+  [ -n "$ppid_" ] && kill $ppid_ 2>/dev/null
   # Never kill capture.sh (see PORT); wait for it so DONE means the modem is quiet.
   [ -n "$cpid" ] && wait "$cpid" 2>/dev/null
   [ -d "$outdir" ] && printf 'rc=%s subscriber_rc=%s capture_rc=%s dlf=%s finished_ms=%s\n' \
@@ -207,9 +207,13 @@ if [ "$HOPS" = 1 ]; then
   say "hops sampler LIVE -> $outdir/hops.csv (1 Hz)"
 fi
 if [ "$PING" = 1 ]; then
-  ping -D -n -i 0.2 -W 1 -w "$cap_dur" "$SFU_IP" > "$outdir/ping-sfu.txt" 2>&1 &
-  ppid_=$!
-  say "ping LIVE -> $outdir/ping-sfu.txt ($SFU_IP, 5 Hz)"
+  # 10.1.20.21 is the cluster ingress (signalling); media flows to the SFU node, which
+  # Host A's wwan0 pcap showed as 10.1.20.16 on 2026-09-15. Ping both.
+  for ip in ${PING_TARGETS:-10.1.20.16 $SFU_IP}; do
+    ping -D -n -i 0.2 -W 1 -w "$cap_dur" "$ip" > "$outdir/ping-$ip.txt" 2>&1 &
+    ppid_="$ppid_ $!"
+  done
+  say "ping LIVE -> $outdir/ping-<ip>.txt (${PING_TARGETS:-10.1.20.16 $SFU_IP}, 5 Hz)"
 fi
 if [ "$DIAG" = 1 ]; then
   before=$(ls -1 "$HOME"/diag-logs/"$label"-*.dlf 2>/dev/null | wc -l)
@@ -273,7 +277,7 @@ if [ -n "$cpid" ]; then
   say "capture exited rc=$crc"
 fi
 [ -n "$hpid" ] && { wait "$hpid"; hpid=""; }
-[ -n "$ppid_" ] && { wait "$ppid_"; ppid_=""; }
+[ -n "$ppid_" ] && { wait $ppid_; ppid_=""; }
 say "clock post-run: $(sntp_offset)"
 
 # ---- 5. what landed ----------------------------------------------------------
