@@ -291,6 +291,42 @@ uplink-scheduling reports because another UE on the same cell loaded the uplink.
 unnamed or undecoded beyond their names, so it is timing evidence of shared-cell coupling, not
 decoded grants.
 
+Host A's path during its own upload in arm a, no video anywhere: fq_codel backlog 23–26 packets
+throughout, requeue bursts 500/s at onset and 1,957/s at release, UDP TTL=3 82–148 ms, ICMP and
+TCP ~26–65 ms, all back to baseline within 1 s of the end. S2's path signature therefore needs
+only the upload, not the video. Host A's path showed nothing at +76…+79 s.
+
+### S3 arm b — result (Q2)
+
+Host B's upload: 12 × ~3.1 Mbps (37.6 Mbps aggregate) from epoch+60.01 s, single 28.0 Mbps,
+end +71.56 s. Host A published pinned 2 Mbps H.264 to Host B.
+
+**Q2: no measurable capacity effect at tonight's load.** While Host B saturated its own uplink
+(Host B qdisc backlog 19–30 packets, Host B → SFU ICMP 16 → up to 91 ms), Host A's path and
+Host A's video were unchanged:
+
+| Host A / media, +61…+71 s | Baseline (+20…+55 s) | During Host B's upload |
+|---|---|---|
+| Host A ICMP to SFU node, p50 | 16.8 ms | 15.2–24.4 ms |
+| Host A UDP TTL=3 to hop 3 | 20.7 ms | 17.5–30.0 ms |
+| Host A TCP SYN→RST, p50 | 17.1 ms | 15.3–21.0 ms |
+| Host A fq_codel backlog | 0 | 0 every second |
+| Host A target | 2.00 Mbps | 1.99–2.00 Mbps |
+| Host A video at Host B, p50 | 33.5 ms | 34.9–41.7 ms, 0 packets lost |
+
+The shared cell couples the two modems' uplink reporting (arm a), but at ~40 Mbps uplink headroom
+one other UE's 38 Mbps upload did not reduce what Host A could send. A capacity effect needs the
+cell actually congested: the busy-hour periods, which the overnight loop samples.
+
+**Separate observation (not Q2): a 1.41 s render stall on Host B.** At +72.9…+74.8 s, just after
+Host B's upload ended, the per-frame CSV has no rows and frame_id jumps 2096 → 2152. This is not
+loss: Host B's wwan0 received a normal ~390–415 packets/s at 2.4–2.6 Mbps (0 rx_dropped, 0 UDP
+socket-buffer errors), 0 packets were lost, and the subscriber's decode-health counters rose
+~29 frames/s straight through (received and decoded 2093 → 2123 → 2152 → 2181, 0 dropped). The
+CSV logs a row only on GPU render completion, so the missing IDs were received and decoded but
+not drawn: one gpu_complete_interval of 1,411 ms. That is Host B's display/render loop (the known
+render judder), not the network or the decoder. Logged for the loop; it does not affect Q2.
+
 Original proposal:
 
 - 300 s, H.264 2 Mbps **pinned**; probe N=12 at t+120 for a ~10 s episode.
