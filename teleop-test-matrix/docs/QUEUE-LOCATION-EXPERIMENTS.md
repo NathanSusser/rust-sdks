@@ -264,6 +264,33 @@ Predictions:
 - Readout stays on per-code record rates: the v3 record layouts of 0xB872/0xB873/0xB881/0xB883
   are not supported by any public decoder we could verify (MobileInsight supports v2 only).
 
+### S3 arm a — result (Q1)
+
+Host A's upload: 12 × ~3.6 Mbps (43.3 Mbps aggregate) from epoch+60.02 s, single 35.4 Mbps,
+end +69.9 s; serving cell PCI 85 before and after. Host B carried no media (idle subscriber in
+an empty room, 5 Hz pings). Host B DLF: 3,233,148 records, 0 bad CRC.
+
+**Q1: yes. Host B's modem changed for exactly Host A's upload, with no video anywhere.**
+Host B, records/s, medians over −55…+50 s → +61…+70 s → +80…+150 s:
+
+| Code | Before | Upload | After |
+|---|---|---|---|
+| 0xB872 NR_L2_UL_TB / 0xB873 NR_L2_UL_BSR | 10 | 3 | 9 |
+| 0xB883 NR_MAC_UL_Physical_Channel_Schedule_Report | 148.5 | 84.5 | 132 |
+| 0xB884 / 0xB885 (unnamed) | 156 / 155 | 88.5 / 71.5 | 138 / 134 |
+| 0xB8D1 / 0xB8CF (unnamed) | 201.5 / 148 | 113.5 / 84.5 | 170 / 133 |
+| 0xB896 / 0xB8D0 / 0xB89B / 0xB89E (unnamed) | 11 / 26 / 31 / 36 | 17 / 39 / 46 / 49.5 | 11 / 25 / 32 / 36 |
+
+Per second the step runs +58…+67 s on the DLF clock (±2 s; the same ~2 s early offset as S2).
+**Host B's own traffic did not change:** tx 16–33 packets/s, rx 15–31 packets/s, 10–55 kbps
+through the whole window, no step. A smaller dip in the same codes at ~+76…+79 s has no known
+load and is unexplained.
+
+This removes the traffic-volume explanation for S2's Host B changes: Host B's modem changed its
+uplink-scheduling reports because another UE on the same cell loaded the uplink. Codes are
+unnamed or undecoded beyond their names, so it is timing evidence of shared-cell coupling, not
+decoded grants.
+
 Original proposal:
 
 - 300 s, H.264 2 Mbps **pinned**; probe N=12 at t+120 for a ~10 s episode.
