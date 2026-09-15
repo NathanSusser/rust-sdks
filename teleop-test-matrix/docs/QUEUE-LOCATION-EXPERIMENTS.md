@@ -121,6 +121,14 @@ closed port 3478 (RST round trip; opens no connection). Kernel queue at 10 Hz. P
 pinned. Upload probe N=12 at 03:47:00Z. Both hosts run d9's lower-CPU modem-log build
 with the opcode-158 half written into the DLF, if it verifies in time.
 
+**Modem-log caveat found before S2 (03:30Z, d9, Host B, 60 s idle).** The reader used
+for every DLF so far (10 Sep, 15 Sep, S1) was pegged at 99.7% CPU and silently lost
+~95–97% of the modem's log stream in the tty buffer: 346 records/s against 14,100/s from a
+faster reader with 0 CRC failures. Per-code undersampling is ~11–28× and **not uniform**
+(0xB8C8 42 vs 942/s; 0xB885 5 vs 138/s), and the opcode-158 half was absent entirely.
+All earlier DLF rates are unusable for comparing log types, not just lower bounds. S1's P6
+is void, not merely inconclusive. The fast build writes ~8.2 MB/s (full mask).
+
 Registered readout:
 
 - **R1** EF-marked ICMP and UDP queue exactly like DSCP 0 → no DSCP-aware classifier
