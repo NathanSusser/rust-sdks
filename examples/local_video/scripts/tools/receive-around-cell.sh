@@ -55,6 +55,7 @@
 #   HOPS=1        1 Hz host counters: wwan0 rx/tx, qdisc, UDP socket-buffer drops, signal
 #   PING=1        5 Hz ICMP to the SFU (RTT and loss on the path, independent of media)
 #   SHOW_TIMING=1 frame timing in the subscriber's diagnostics window
+#   SUBSCRIBE=1   0: no subscriber or room join (recorders only), for no-video test arms
 #
 # Usage: receive-around-cell.sh <label> <epoch> <room> [outdir]
 set -uo pipefail
@@ -254,6 +255,14 @@ fi
 # ---- 2. subscriber, in the room before the publisher --------------------------
 python3 -c "import time;d=$epoch-$SUB_BEFORE-time.time()
 if d>0: time.sleep(d)"
+if [ "${SUBSCRIBE:-1}" = 0 ]; then
+  # No-video arm (e.g. S3 a/c): record the modem, counters and pings over the same window
+  # with no room join, so nothing on this host's link comes from the media path.
+  say "SUBSCRIBE=0: no subscriber this cell; recorders hold until the window ends"
+  python3 -c "import time;d=$epoch+$CELL_S+25-time.time()
+if d>0: time.sleep(d)"
+  src="skipped"
+else
 env -u WAYLAND_DISPLAY RUST_LOG=info timeout $((SUB_BEFORE + CELL_S + 25)) \
   "$SUB" --url "$URL" --room-name "$room" --identity "host-b-$label" --low-latency "${TIMING_FLAG[@]}" \
   --log-csv "$outdir/subscriber.csv" > "$outdir/subscriber.log" 2>&1 &
@@ -286,9 +295,13 @@ else
   say "NO MEDIA by epoch+40 s -- the downlink was idle; this window does not cover a loaded link"
 fi
 
+fi  # end of the SUB=0 / subscriber branch opened in section 2
+
 # ---- 4. hold for the cell, then let the recorders end on their own ------------
-wait "$spid"; src=$?
-say "subscriber exited rc=$src  (4 = publisher unpublished cleanly, 124 = timeout)"
+if [ -n "$spid" ]; then
+  wait "$spid"; src=$?
+  say "subscriber exited rc=$src  (4 = publisher unpublished cleanly, 124 = timeout)"
+fi
 if [ -n "$cpid" ]; then
   say "waiting for capture to finish and turn modem logging off..."
   wait "$cpid"; crc=$?; cpid=""
