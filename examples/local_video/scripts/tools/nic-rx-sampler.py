@@ -41,12 +41,17 @@ def main():
     last = None
     last_beat = 0
     n_rows = 0
+    periods = []           # achieved spacing between consecutive samples, microseconds
+    prev_t = None
     with open(out, "w") as w:
         w.write("unix_us,rx_packets,rx_bytes\n")
         nxt = time.monotonic()
         while time.time() < end:
-            t = time.time()
+            t = time.time()     # CLOCK_REALTIME, same clock as webrtc_receive_timestamp_us
             p, b = read(fp), read(fb)
+            if prev_t is not None:
+                periods.append(int((t - prev_t) * 1e6))
+            prev_t = t
             if (p, b) != last or t - last_beat >= 1.0:
                 w.write(f"{int(t * 1e6)},{p},{b}\n")
                 n_rows += 1
@@ -59,7 +64,14 @@ def main():
                 time.sleep(delay)
             else:
                 nxt = time.monotonic()
-    print(f"{out}: {n_rows} rows over {dur:.0f} s at {interval * 1000:.1f} ms")
+    periods.sort()
+    q = lambda f: periods[min(len(periods) - 1, int(len(periods) * f))] / 1000 if periods else float("nan")
+    summary = (f"samples {len(periods) + 1}; achieved sample period ms: p50 {q(0.5):.2f} p95 {q(0.95):.2f} "
+               f"p99 {q(0.99):.2f} max {q(1.0):.2f}; over 10 ms: {sum(1 for x in periods if x > 10000)}; "
+               f"target {interval * 1000:.1f} ms; clock CLOCK_REALTIME")
+    with open(out + ".period.txt", "w") as s:
+        s.write(summary + "\n")
+    print(f"{out}: {n_rows} rows over {dur:.0f} s; {summary}")
 
 
 if __name__ == "__main__":
