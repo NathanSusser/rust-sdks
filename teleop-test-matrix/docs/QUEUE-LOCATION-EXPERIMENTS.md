@@ -96,7 +96,7 @@ against 14–20 s at ~10 Mbps on 10 Sep. t = probe start (1789441080.009).
 | P3 | A qdisc backlog max 2 pkts; QMI TX dropped 0. A's pcap: media left wwan0 continuously, ~1.8–2.0 Mbps at +0.5–1.25 s while B's delay was already 77–130 ms | **holds** |
 | P4 | B → SFU media node ICMP 14–35 ms through the probe (cell p50 17.3) | **holds** |
 | P5 | 0 packets lost, 0 retransmits, 0 NACKs; A target 2000 → 1392 (+1.0) → 975 (+2.0) kbps | **holds** |
-| P6 | DLF record rates flat on both hosts across the probe | **not supported / inconclusive**: Host B's QCSuper was pegged at 99.8% CPU with ~35% CRC loss, and a record rate is not a grant size |
+| P6 | Host A NR MAC-range records/s rose ~30% in the first 2 s of the probe (baseline median 118 → 155, 150), Host B no clear change (107 baseline); 0xB9xx ~0 on both. Corrected 03:25Z with Host A's fixed reader (dlf-check acceptance rule): A 390,037 records / 5 resyncs, B 131,406 / 0 | **inconclusive**: the S1 reader lost ~95% of the log in the tty buffer and dropped the opcode-158 half, and a record rate is not a grant size |
 
 **Unpredicted:** A's ICMP echo to the SFU media node did **not** queue (14–21 ms, one
 49 ms sample) during the same seconds that A's UDP (media and TTL probes) queued ~100 ms.
