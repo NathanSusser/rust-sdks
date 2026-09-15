@@ -33,6 +33,12 @@
 # by a median(wall - modem) fit over records near each, outliers dropped, rather than
 # by trusting any single record.
 #
+# UTC. The rig clock is common to both hosts (PTP) but NOT UTC: Host A, the reference,
+# is not NTP-disciplined, and on 2026-09-15 both ran ~4.35 s behind UTC. Host-to-host
+# alignment is unaffected; joining against UTC-keyed logs (the SFU's) is not. One SNTP
+# offset is logged before the capture window opens and one after it closes -- ~100 ms
+# of traffic each, outside the DIAG window -- because the offset drifts.
+#
 # Usage: receive-around-cell.sh <label> <epoch> <room> [outdir]
 set -uo pipefail
 
@@ -54,6 +60,33 @@ cap_dur=$((CAP_BEFORE + CELL_S + CAP_AFTER))
 
 say() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$outdir/timeline.txt"; }
 ms()  { date +%s%3N; }
+# One SNTP query; prints local-minus-UTC. Never fails the run.
+sntp_offset() {
+  python3 - <<'NTP'
+import socket, struct, time
+E = 2208988800
+def query(host):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2)
+    pkt = bytearray(48); pkt[0] = 0x23                      # NTPv4, client mode
+    t1 = time.time()
+    struct.pack_into("!II", pkt, 40, int(t1) + E, int((t1 % 1) * 2**32))
+    s.sendto(pkt, (host, 123)); data, _ = s.recvfrom(512); t4 = time.time()
+    ts = lambda o: (lambda a, b: a - E + b / 2**32)(*struct.unpack_from("!II", data, o))
+    t2, t3 = ts(32), ts(40)
+    theta = ((t2 - t1) + (t3 - t4)) / 2                     # server minus local
+    delay = (t4 - t1) - (t3 - t2)
+    return -theta, delay
+for h in ("time.google.com", "time.cloudflare.com", "pool.ntp.org"):
+    try:
+        lmu, d = query(h)
+        print(f"local-UTC {lmu*1000:+.1f} ms ({'behind' if lmu < 0 else 'ahead of'} UTC) via {h}, delay {d*1000:.0f} ms")
+        break
+    except Exception:
+        continue
+else:
+    print("SNTP unavailable (no server answered; run continues)")
+NTP
+}
 
 # ---- pre-flight: fail BEFORE the epoch, not after it --------------------------
 now=$(date +%s)
@@ -78,6 +111,7 @@ export SSL_CERT_FILE="${SSL_CERT_FILE:-$REPO/.livekit-demo/corp-ca.pem}"
 mkdir -p "$outdir" "$HOME/diag-logs"
 : > "$outdir/timeline.txt"
 say "label=$label epoch=$epoch room=$room capture=${cap_dur}s server=-h265"
+say "clock pre-run:  $(sntp_offset)"
 
 # ---- 1. modem capture, live before the cell -----------------------------------
 python3 -c "import time;d=$epoch-$CAP_BEFORE-time.time()
@@ -134,6 +168,7 @@ say "subscriber exited rc=$src  (4 = publisher unpublished cleanly, 124 = timeou
 say "waiting for capture to finish and turn modem logging off..."
 wait "$cpid"; crc=$?
 say "capture exited rc=$crc"
+say "clock post-run: $(sntp_offset)"
 
 # ---- 5. what landed ----------------------------------------------------------
 echo
