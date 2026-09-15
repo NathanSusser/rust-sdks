@@ -415,6 +415,14 @@ Properties of the hold, from both hosts:
   ≤ 2 (upstream-like: 3753, 7552, 10267, 11010, 11040, 15140, 15222, 16967). Ordering test: 0 of 40
   with the next frame first (Δ p50 0.3 ms). Render timings stayed within the c044–c049 spread
   with the sampler on.
+- **Two populations, not one.** Host A's classifier on c050 (n=37): 22 Host B, 9 upstream, 6
+  unclear; it agrees on 7 of Host B's 8 upstream-like frames. The upstream holds are also ~50–65
+  ms and cluster in episodes (three within ~30 s, three within ~13 s). For all 9, Host A's wwan0
+  egress had no gap over 6 ms around packetize, so each hold began after Host A's host and ended
+  before Host B's interface counter: Host A's modem uplink, the core, the SFU, or Host B's modem
+  downlink. Pings (5 Hz) and per-second DLF rates (±2 s) cannot resolve a 50 ms hold and separate
+  nothing. Next tests (operator): millisecond-resolution QCAT-decoded PDCP/RLC timing on Host B,
+  and SFU-side packet timestamps.
 - **Not the Rust SDK's fixed waits.** Its only 50 ms waits are setup-time polling loops:
   `rtc_session.rs:2268` (waiting for the peer connections to connect), `rtc_session.rs:2438`
   (waiting for the publisher connection and data channel) and `remote_participant.rs:131`
