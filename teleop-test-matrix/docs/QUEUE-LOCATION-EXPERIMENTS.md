@@ -141,6 +141,62 @@ Registered readout:
   loss appears only if a buffer overflows.
 - **R5** 10 Hz requeues burst during the probe, as in S1.
 
+### S2 — results (03:45:00Z, epoch 1789443900, build=d9-fast on both hosts)
+
+Ran as registered. Pinned (`LK_PIN_BITRATE_TO_MAX=1`). Same SFU: room `RM_ve3bdMkcfck3`
+from both hosts. Clock host−UTC −4.644 s (both). Upload: 12 × ~3.3 Mbps for 9.8 s then
+30.9 Mbps single; 10.85 s total. Modem logs complete for the first time: Host B 6,437,498
+records / 9 bad CRC; Host A 11,873,765 records / 0 resyncs.
+
+| Series (A→10.1.20.16 unless noted) | Baseline | During upload | Rise |
+|---|---|---|---|
+| Host B video delay (per frame) | 36 ms | 150–248 ms, whole upload | +143 |
+| UDP TTL=3 to hop 3, DSCP 0 | 21 | 106–137 | +115 |
+| UDP TTL=3 to hop 3, EF (n=3–4) | 21 | 100–162 | +140 |
+| TCP SYN→RST | 18 | 27–105 | +65 |
+| ICMP DSCP 0 | 16 | 27–84 | +52 |
+| ICMP EF | 16 | 23–89 | +52 |
+| Host B → SFU ICMP | 19 | 17–29 | +10 |
+
+- **R1 supported:** EF behaved like DSCP 0 for ICMP and UDP; no DSCP-aware classifier
+  acted on our marks (marks may be bleached upstream).
+- **R2, R3 not supported:** every class queued; magnitude ordered media > UDP > TCP ≈ ICMP.
+  S1's "ICMP escaped" does not reproduce under a 10 s dose.
+- **R4 supported:** delay held ~150–180 ms for the whole upload, 0 packets lost; the pinned
+  target still dipped to 1.70 Mbps at +7…+10 s.
+- **R5 supported, sustained:** Host A's fq_codel backlog 41–65 packets for the whole upload
+  (baseline 0), requeue bursts at onset (748/s) and release (1,868/s); qdisc dropped 2;
+  driver and QMI TX dropped 0.
+- **New — part of the wait is inside Host A.** All 8,699 packetized frames order-aligned to
+  8,699 distinct video RTP timestamps on Host A's wwan0 (shift 0, no negative delays).
+  Packetize → last packet on the wire: baseline p50 0.5 / p95 0.9 / max 1.7 ms; during the
+  upload p50 38.4 / p95 88.3 / max 127.1 ms (p50 44–47 ms at +1…+8 s); after p50 0.5 ms.
+  So ~45 ms of Host B's ~150 ms is Host A's fq_codel holding media while the modem driver
+  refused packets; ~100 ms is below wwan0 (modem buffer / radio uplink).
+- **New — Host B's modem reacted to Host A's upload.** Same log codes, same window (DLF clock
+  ±2 s), opposite or proportional moves on the two modems:
+
+  | Code | Host A base → upload | Host B base → upload |
+  |---|---|---|
+  | 0xB882, 0xB8A6, 0xB958 | ~114/s → **0** | ~105/s → **~54** |
+  | 0xB870/72/73/7C | 16 → 25 | 13 → 5 |
+  | 0xB885 | 248 → 325 | 266 → 200 |
+  | 0xB8C4, 0xB8CE, 0xB887, 0xB896 | ×4.7, ×3.1, ×2.0, ×2.5 | unchanged |
+
+  Host B was only receiving a constant 2 Mbps. A bystander modem changing its reports exactly
+  while another host uploads fits one cell scheduler redistributing resources. Codes are
+  unnamed, so this is timing evidence, not decoded grants.
+
+**Conclusion.** The spike is uplink demand above the capacity Host A is granted. The modem
+flow-controls (no drops), media waits first in Host A's kernel queue and then in the UE /
+radio uplink. The SFU and DSCP/protocol classification are ruled out. The coupling to Host B
+points at the shared cell's scheduler (network side) rather than a modem fault.
+
+## H3 — Host A's uplink capacity is set by a cell scheduler shared with other UEs
+
+Other load on the same cell reduces what Host A is granted; that is the candidate mechanism
+for the busy-hour < 2 Mbps periods.
+
 Original proposal:
 
 - 300 s, H.264 2 Mbps **pinned**; probe N=12 at t+120 for a ~10 s episode.

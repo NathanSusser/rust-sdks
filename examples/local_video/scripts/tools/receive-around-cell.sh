@@ -161,6 +161,17 @@ now=$(date +%s)
   echo "epoch $epoch is too soon: need > $((CAP_BEFORE + 15)) s of lead for the capture to go live first" >&2; exit 1; }
 [ -x "$SUB" ]     || { echo "subscriber binary missing: $SUB" >&2; exit 1; }
 if [ "$DIAG" = 1 ]; then
+  # Fast-reader DLFs run ~8-13 MB/s. capture.sh refuses below 10 MB/s x window + 5 GB, and a
+  # refused capture would abort the whole cycle here; drop only the modem log instead, so the
+  # media, ping and counter data for the cell are still collected. MIN_FREE_GB adds headroom.
+  need_gb=$(( (10 * cap_dur + 1023) / 1024 + 5 + ${MIN_FREE_GB:-20} ))
+  free_gb=$(df -BG --output=avail "$HOME/diag-logs" 2>/dev/null | tail -1 | tr -dc 0-9)
+  if [ -n "$free_gb" ] && [ "$free_gb" -lt "$need_gb" ]; then
+    echo "only ${free_gb} GB free, ${need_gb} GB needed for a ${cap_dur}s DLF: running this cell with DIAG=0" >&2
+    DIAG=0 DIAG_SKIPPED_DISK="free ${free_gb} GB < ${need_gb} GB"
+  fi
+fi
+if [ "$DIAG" = 1 ]; then
   [ -x "$CAPTURE" ] || { echo "capture script missing: $CAPTURE" >&2; exit 1; }
   [ -c /dev/ttyUSB0 ] || { echo "DIAG port /dev/ttyUSB0 absent" >&2; exit 1; }
   # Match the interpreter, not the word. `pgrep -f qcsuper` also matches any shell whose
@@ -190,6 +201,7 @@ rm -f "$outdir/DONE"
 trap finish EXIT
 trap 'exit 130' INT TERM
 say "label=$label epoch=$epoch room=$room duration=$((CELL_S - 5))s window=${cap_dur}s diag=$DIAG hops=$HOPS ping=$PING server=-h265"
+[ -n "${DIAG_SKIPPED_DISK:-}" ] && say "DIAG SKIPPED for disk space: ${DIAG_SKIPPED_DISK}"
 sid=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$(id -un)" '$3==u && /seat/ {print $1; exit}')
 say "console session ${sid:-none}: $(loginctl show-session "${sid:-0}" -p Type -p LockedHint 2>/dev/null | paste -sd' ')"
 [ "$(loginctl show-session "${sid:-0}" -p LockedHint --value 2>/dev/null)" = yes ] && \
@@ -284,7 +296,24 @@ if [ -n "$cpid" ]; then
 fi
 [ -n "$hpid" ] && { wait "$hpid"; hpid=""; }
 [ -n "$ppid_" ] && { wait $ppid_; ppid_=""; }
-say "clock post-run: $(sntp_offset)"
+post_clock=$(sntp_offset)
+say "clock post-run: $post_clock"
+
+# Per-second per-code modem-log summary for the whole window. Raw DLFs are 3-9 GB and never
+# cross the PTP cable; this small CSV does. Seconds are relative to the epoch; the modem clock
+# (network time) is put on the host clock with this run's measured host-minus-UTC.
+if [ -n "$dlf" ] && [ -s "$dlf" ]; then
+  hmu=$(sed -n 's/^local-UTC \([-+][0-9.]*\) ms.*/\1/p' <<<"$post_clock")
+  hmu_s=$(awk -v m="${hmu:--4600}" 'BEGIN{printf "%.3f", m/1000}')
+  if timeout 600 python3 "$REPO/examples/local_video/scripts/tools/dlf_rates.py" "$dlf" \
+       --probe-start-ms $((epoch * 1000)) --probe-end-ms $(( (epoch + CELL_S) * 1000 )) \
+       --host-minus-utc "$hmu_s" --before "$CAP_BEFORE" --after "$CAP_AFTER" \
+       -o "$outdir/dlf-rates-hostb.csv" > "$outdir/dlf-rates.out" 2>&1; then
+    say "dlf-rates-hostb.csv written (host-minus-UTC ${hmu_s} s; seconds relative to epoch)"
+  else
+    say "WARNING: dlf-rates summary failed; see dlf-rates.out"
+  fi
+fi
 
 # ---- 5. what landed ----------------------------------------------------------
 echo
