@@ -150,6 +150,18 @@ def main():
               f"-> {'read hold (not NACK/RTX)' if neg <= 0.05 * len(deltas) else 'retransmission possible'}")
     print(f"  stalled frames with packets on time at the interface (>= ordinary p10): {len(host_like)} of {len(stalled)}  -> inside Host B (after NAPI, before WebRTC receive)")
     print(f"  stalled frames with <= 2 packets at the expected instant: {len(upstream_like)} -> upstream of NAPI: {[f for f, _ in upstream_like]}")
+    # This test asks whether ANY packets were at the interface when the frame was due. At
+    # 2 Mbps a frame is ~12 packets and neighbours barely overlap the window, so that is a
+    # fair question. At 10 Mbps it is ~45 packets, neighbouring frames fill the window, and
+    # the test answers "inside Host B" for frames the downlink demonstrably stopped on
+    # (2026-09-15 10 Mbps cell: this line said 5 of 10 inside Host B; the quiet-run verdicts
+    # above, and Host A's independent pass, made it 9 of 11 upstream). So say when it is
+    # confounded rather than letting the summary outrank the per-frame verdicts.
+    ordinary_packets = sorted(pk for pk, _ in ordinary) if ordinary else []
+    if ordinary_packets and ordinary_packets[len(ordinary_packets) // 2] >= 40:
+        print(f"  WARNING: ordinary windows carry {ordinary_packets[len(ordinary_packets) // 2]} packets (>= 40), so the"
+              f" expected-instant test above is confounded by neighbouring frames' packets."
+              f" Trust the per-frame quiet-run verdicts instead.")
 
 
 if __name__ == "__main__":

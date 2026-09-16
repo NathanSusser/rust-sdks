@@ -569,7 +569,15 @@ def draw_header(pdf: canvas.Canvas, title: str, subtitle: str | Sequence[str]) -
     pdf.setFillColor(NAVY)
     pdf.rect(0, height - 72, width, 72, fill=1, stroke=0)
     pdf.setFillColor(white)
-    pdf.setFont("Helvetica-Bold", 21)
+    # The title is a caller-supplied label and can be long: a 10 Mbps run's title ran off
+    # the right edge, taking "Host A -> Host B" with it. Shrink to fit, then truncate.
+    available = width - 76
+    size = 21.0
+    while size > 12 and pdf.stringWidth(title, "Helvetica-Bold", size) > available:
+        size -= 0.5
+    while title and pdf.stringWidth(title, "Helvetica-Bold", size) > available:
+        title = title[:-2] + "…"
+    pdf.setFont("Helvetica-Bold", size)
     pdf.drawString(38, height - 33, title)
     pdf.setFillColor(HexColor("#D9F2F4"))
     pdf.setFont("Helvetica", 8.5)
