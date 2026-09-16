@@ -42,18 +42,31 @@ def load_nic(path):
     return t, p
 
 
-def window_stats(t, p, lo_us, hi_us):
-    """Packets counted and longest no-increase run (ms) inside [lo, hi]."""
+def window_stats(t, p, lo_us, hi_us, quiet_share=0.15):
+    """Packets counted and longest quiet run (ms) inside [lo, hi].
+
+    "Quiet" is not exact counter equality. On 2026-09-15 an 80 ms downlink stop carried
+    one stray packet in the middle, and requiring a single no-increase run split it into
+    40 + 40 ms and lost the verdict (Host A's tool made the same mistake independently).
+    A stretch counts as quiet while it carries less than `quiet_share` of the packets the
+    link would have delivered over it, with the rate taken from the log itself so the
+    tolerance scales with bitrate -- ~1,350 pkt/s at 10 Mbps, ~350 at 2 Mbps.
+    """
     i = max(0, bisect.bisect_left(t, lo_us) - 1)
     j = bisect.bisect_right(t, hi_us)
     if j - i < 2:
         return None, None
     pk = p[min(j, len(p)) - 1] - p[i]
-    longest, run_start = 0.0, max(t[i], lo_us)
+    span_s = (t[-1] - t[0]) / 1e6
+    rate_pps = (p[-1] - p[0]) / span_s if span_s > 0 else 0.0
+    longest, run_start, run_start_p = 0.0, max(t[i], lo_us), p[i]
     for k in range(i + 1, min(j, len(t))):
-        if p[k] > p[k - 1]:
+        elapsed_s = (t[k] - run_start) / 1e6
+        expected = rate_pps * elapsed_s
+        # One packet is always tolerated, so a single stray never ends a stop.
+        if p[k] - run_start_p > max(1.0, quiet_share * expected):
             longest = max(longest, (t[k] - run_start) / 1000)
-            run_start = t[k]
+            run_start, run_start_p = t[k], p[k]
     longest = max(longest, (hi_us - run_start) / 1000)
     return pk, longest
 
