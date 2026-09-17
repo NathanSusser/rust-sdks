@@ -306,6 +306,41 @@ run with a different set.
 - **Every instrument must be checked against a known-good cell before the campaign is trusted.**
   The control-path probe read 99.7% loss in a cell that was demonstrably perfect and nobody
   noticed for a week. One healthy cell, every instrument read, before the rest of the campaign.
+
+### Pre-flight cell: the acceptance criteria
+
+One short `h264-2000k` forced cell, both hosts fully instrumented, **before** the ladder. Every
+instrument is *read*, each against a named pass condition, so "pre-flight passed" is not left to
+either side to assume. Approved by the operator 2026-09-17.
+
+| side | instrument | passes when |
+|---|---|---|
+| A | pcap | file exists, non-zero, readable, genuine UDP to the SFU |
+| A | DIAG | ~11.3M records / ~9.8M NR5G per 700 s pro-rata, 0 resyncs, ~0 bad CRC |
+| A | `diag-log-off` | ran, and the modem log mask is **off** afterwards |
+| A | jsonl | `video_out` present, `frames_encoded ≈ 30 × duration`, retx share plausible |
+| A | pin / degradation | logged from the values actually passed, matching what was exported |
+| A | control probe | **absent**, not 99.7% |
+| B | pcap | same four checks, headers only, snaplen 96 |
+| B | DIAG | same record benchmark |
+| B | `subscriber.csv` | rows ≈ 30 × duration, `frame_id` non-zero, assembly times sane |
+| B | decode health | received/decoded climbing within the first second, decoder named |
+| B | media onset | ~+1.3 s, **not** +40 s |
+| B | clock offset | measured per cell, three servers, spread < 50 ms |
+| **paired** | **RTP sequence numbers** | **A's capture matches B's capture for a sample of frames** |
+
+**The paired row is the one that matters.** It is the entire attribution table, and it has never
+once been demonstrated end to end — every previous campaign inferred delay from interface byte
+counters instead. If it fails, the sweep cannot answer the operator's question and every other
+row passing is irrelevant.
+
+`diag-log-off` is load-bearing rather than belt-and-braces: the `fast2` QCSuper build makes
+QCSuper's own `on_deinit` a no-op, so if `diag-log-off` is skipped the modem keeps logging into
+nothing and the next capture starts dirty.
+
+**If anything fails: fix it and re-run the pre-flight.** Do not enter the ladder with a known-bad
+instrument and a caveat — that is how 17 Sep produced six cells and one usable answer. A second
+pre-flight costs ten minutes; re-running the sweep costs ninety.
 - **Host B stays analysis-quiet during each cell**; reports generate between cells.
 
 ## Reports
