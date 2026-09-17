@@ -45,6 +45,18 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump
 
 One command, once, on Host B. Without it this design degrades to what we already have.
 
+**Host B: done, 2026-09-17. Host A: STILL REQUIRED** — `getcap /usr/bin/tcpdump` on Host A
+returns empty, so A cannot capture unprivileged and needs the same `setcap` command run there.
+
+**A paired run must never proceed half-instrumented.** Because B can capture and A currently
+cannot, a sweep started today would silently produce a wire capture on *one* side, and the whole
+attribution table below depends on having both. So each side checks its own capture capability
+before the epoch and the run **refuses, or marks every affected cell as single-ended**, rather
+than producing a capture that looks complete. Check capability with `getcap`, or a one-packet
+probe — **never with `sudo -n tcpdump --version`**, which is how `hop-recorder.sh` tests it and
+is why B was believed incapable for weeks: sudo needs a password here, while the binary needs no
+sudo at all. The gate was wrong, not the host.
+
 **Done, 2026-09-17.** `getcap /usr/bin/tcpdump` reports `cap_net_admin,cap_net_raw=eip`, and
 `~/diag-capture/pcap.sh SECONDS [label] [iface]` is written to match `capture.sh`'s conventions:
 headers only (`-s 96`), UDP, `-U` so a killed capture keeps everything up to the kill, a 2×512 MB
