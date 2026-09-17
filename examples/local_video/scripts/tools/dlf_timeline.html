@@ -1,0 +1,350 @@
+<title>__TITLE__</title>
+<style>
+:root {
+  color-scheme: light;
+  --plane: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --band: rgba(42,120,214,0.08);
+  --h1: #cde2fb; --h2: #9ec5f4; --h3: #6da7ec; --h4: #3987e5; --h5: #256abf; --h6: #184f95; --h7: #0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --plane: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --band: rgba(57,135,229,0.12);
+    --h1: #0d366b; --h2: #184f95; --h3: #256abf; --h4: #3987e5; --h5: #6da7ec; --h6: #9ec5f4; --h7: #cde2fb;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --band: rgba(57,135,229,0.12);
+  --h1: #0d366b; --h2: #184f95; --h3: #256abf; --h4: #3987e5; --h5: #6da7ec; --h6: #9ec5f4; --h7: #cde2fb;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--plane); color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; display: grid; gap: 28px; }
+h1 { font-size: 26px; line-height: 1.2; margin: 0; text-wrap: balance; }
+h2 { font-size: 18px; margin: 0 0 4px; }
+p { margin: 0; max-width: 72ch; }
+.sub { color: var(--ink-2); margin-top: 6px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 20px 16px; }
+.findings { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.findings h3 { font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); margin: 0 0 6px; }
+.findings ul { margin: 0; padding-left: 18px; }
+.findings li { margin: 2px 0; }
+.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; }
+.tag { font-size: 11px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: center; color: var(--ink-2); font-size: 13px; }
+.ramp { display: inline-flex; gap: 2px; vertical-align: middle; margin: 0 6px; }
+.ramp span { width: 18px; height: 12px; border-radius: 2px; display: inline-block; }
+figure { margin: 0; }
+figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 10px; }
+figcaption .meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+svg { display: block; }
+svg text { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
+svg text.row { fill: var(--ink-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.h1 { fill: var(--h1); } .h2 { fill: var(--h2); } .h3 { fill: var(--h3); } .h4 { fill: var(--h4); }
+.h5 { fill: var(--h5); } .h6 { fill: var(--h6); } .h7 { fill: var(--h7); }
+button { font: inherit; font-size: 13px; color: var(--ink); background: transparent; border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; margin-top: 10px; }
+button:hover { background: var(--band); }
+button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th { color: var(--ink-2); font-weight: 600; }
+thead tr.group th { border-bottom: none; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.12); z-index: 10; }
+#tip .v { font-weight: 650; font-size: 15px; color: var(--ink); }
+#tip .k { color: var(--ink-2); }
+.notes { color: var(--ink-2); display: grid; gap: 8px; }
+.notes b { color: var(--ink); }
+</style>
+
+<main>
+  <header>
+    <h1 id="title"></h1>
+    <p class="sub">Log records per second, by log type, around one timed video cell. The shaded span in each bitrate strip is when video was flowing. Time is in seconds from the cell start, on the PTP-synced host clock.</p>
+  </header>
+
+  <section class="card">
+    <h2>Largest changes while video flows</h2>
+    <p class="sub">Each log type's rate during the video, against its idle rate before and after. These are the log types worth decoding first in QCAT.</p>
+    <div class="findings" id="findings" style="margin-top:14px"></div>
+  </section>
+
+  <div class="legend">
+    <span>Records per second, relative to that log type's busiest 5 s on that host
+      <span class="ramp" aria-hidden="true"><span style="background:var(--h1)"></span><span style="background:var(--h2)"></span><span style="background:var(--h3)"></span><span style="background:var(--h4)"></span><span style="background:var(--h5)"></span><span style="background:var(--h6)"></span><span style="background:var(--h7)"></span></span>
+      none → peak</span>
+    <span>Blank: outside that capture</span>
+    <span><span class="tag" style="margin-left:0">NR</span> 5G NR log range (0xB800–0xB9FF)</span>
+  </div>
+
+  <div id="hosts" style="display:grid; gap:28px"></div>
+
+  <section class="card">
+    <h2>Rates by window</h2>
+    <p class="sub">Mean records per second. Before: capture start to 5 s before the cell. During: 10 s after the start to 10 s before the end. After: from 8 s past the end.</p>
+    <div class="scroll" style="margin-top:12px"><table id="summary"></table></div>
+  </section>
+
+  <section class="card notes">
+    <h2 style="color:var(--ink)">What this can and can't tell you</h2>
+    <p><b>It shows which log types switch on, off, or scale with the video. It does not show what the records say.</b> Grant sizes, MCS, rank and buffer status sit inside Qualcomm's proprietary record layouts, which only QCAT or QXDM decode. Log types are left unnamed on purpose: an earlier guess at ID ranges produced a wrong conclusion.</p>
+    <p><b>Counts are lower bounds.</b> QCSuper drops frames with bad checksums, at a rate that varies between runs and drifts within one.</p>
+    <p id="clocknote"></p>
+  </section>
+</main>
+<div id="tip" hidden></div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  "use strict";
+  const D = JSON.parse(document.getElementById("data").textContent);
+  const SVG = "http://www.w3.org/2000/svg";
+  const LABEL_W = 104, CELL_W = 14, CELL_H = 16, GROUP_GAP = 10, RIGHT = 16;
+  const plotW = D.bins * CELL_W;
+  const width = LABEL_W + plotW + RIGHT;
+  const xOf = t => LABEL_W + (t - D.bin_start) / D.bin * CELL_W;
+  const tip = document.getElementById("tip");
+  const fmt = v => v == null ? "–" : v.toFixed(1);
+  const phase = t => t < 0 ? "before video" : (t < D.cell_end ? "during video" : "after video");
+  const signed = t => (t > 0 ? "+" : t < 0 ? "−" : "") + Math.abs(t);
+
+  document.getElementById("title").textContent = D.title;
+
+  function el(tag, attrs, parent) {
+    const n = document.createElementNS(SVG, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(n);
+    return n;
+  }
+  function h(tag, text, cls) {
+    const n = document.createElement(tag);
+    if (text != null) n.textContent = text;
+    if (cls) n.className = cls;
+    return n;
+  }
+  function showTip(evt, lines) {
+    tip.replaceChildren();
+    for (const [text, cls] of lines) tip.appendChild(h("div", text, cls));
+    tip.hidden = false;
+    const pad = 14, w = tip.offsetWidth, hh = tip.offsetHeight;
+    let x = evt.clientX + pad, y = evt.clientY + pad;
+    if (x + w > innerWidth - 8) x = evt.clientX - w - pad;
+    if (y + hh > innerHeight - 8) y = evt.clientY - hh - pad;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  const hideTip = () => { tip.hidden = true; };
+
+  // Row geometry: NR log types first, then a small gap, then the rest.
+  const rowY = [];
+  let y = 0, sawOther = false;
+  D.codes.forEach((c, i) => {
+    if (!D.nr[i] && !sawOther && i > 0) { y += GROUP_GAP; }
+    if (!D.nr[i]) sawOther = true;
+    rowY.push(y); y += CELL_H;
+  });
+  const gridH = y;
+
+  // ---- findings: computed from the data, never hard-coded -------------------
+  const findings = document.getElementById("findings");
+  D.hosts.forEach(host => {
+    const scored = [];
+    host.rates.forEach((r, i) => {
+      if (r.during == null) return;
+      const idle = [r.before, r.after].filter(v => v != null);
+      if (!idle.length) return;
+      const base = idle.reduce((a, b) => a + b, 0) / idle.length;
+      if (Math.max(base, r.during) < 2) return;
+      scored.push({ code: D.codes[i], nr: D.nr[i], base, during: r.during, ratio: (r.during + 1) / (base + 1) });
+    });
+    const box = document.createElement("div");
+    box.appendChild(h("h3", host.label));
+    const ul = document.createElement("ul");
+    const rises = scored.filter(s => s.ratio > 1.25).sort((a, b) => b.ratio - a.ratio).slice(0, 3);
+    const falls = scored.filter(s => s.ratio < 0.8).sort((a, b) => a.ratio - b.ratio).slice(0, 3);
+    const add = (s, verb) => {
+      const li = document.createElement("li");
+      li.appendChild(h("span", s.code, "code"));
+      if (s.nr) li.appendChild(h("span", "NR", "tag"));
+      li.appendChild(document.createTextNode(
+        ` ${verb} — ${s.base.toFixed(1)}/s idle to ${s.during.toFixed(1)}/s during video` +
+        (verb === "rises" ? ` (${(s.during / Math.max(s.base, 0.01)).toFixed(1)}×)` : "")));
+      ul.appendChild(li);
+    };
+    rises.forEach(s => add(s, "rises"));
+    falls.forEach(s => add(s, "falls"));
+    if (!ul.children.length) ul.appendChild(h("li", "No log type changed by more than 25% with the video, or this capture has no idle window to compare against."));
+    box.appendChild(ul);
+    findings.appendChild(box);
+  });
+
+  // ---- one figure per host --------------------------------------------------
+  const hostsEl = document.getElementById("hosts");
+  D.hosts.forEach((host, hi) => {
+    const fig = document.createElement("figure");
+    fig.className = "card";
+    const cap = document.createElement("figcaption");
+    cap.appendChild(h("h2", host.label));
+    cap.appendChild(h("span",
+      `${host.records.toLocaleString()} records · capture t${signed(host.lo)}…t${signed(host.hi)} s · ` +
+      `modem clock ${host.offset >= 0 ? "+" : ""}${host.offset.toFixed(2)} s vs host` +
+      (host.gaps ? ` · ${host.gaps} zero-byte gap${host.gaps > 1 ? "s" : ""} skipped` : ""), "meta"));
+    fig.appendChild(cap);
+    const scroll = document.createElement("div");
+    scroll.className = "scroll";
+    fig.appendChild(scroll);
+
+    // bitrate strip, same x scale
+    if (host.bitrate && host.bitrate.points.length) {
+      const pts = host.bitrate.points;
+      const H = 78, top = 18, plotH = 46;
+      const maxV = Math.max(0.5, ...pts.map(p => p[1])) * 1.15;
+      const yOf = v => top + plotH - v / maxV * plotH;
+      const s = el("svg", { width, height: H, viewBox: `0 0 ${width} ${H}`, role: "img",
+        "aria-label": `${host.label} bitrate ${host.bitrate.kind}` }, scroll);
+      el("rect", { x: xOf(0), y: top, width: xOf(D.cell_end) - xOf(0), height: plotH, fill: "var(--band)" }, s);
+      el("line", { x1: LABEL_W, x2: LABEL_W + plotW, y1: top + plotH, y2: top + plotH, stroke: "var(--baseline)", "stroke-width": 1 }, s);
+      const cap1 = el("text", { x: 0, y: top + 10 }, s); cap1.textContent = "Mbps";
+      const tmax = el("text", { x: LABEL_W - 8, y: top + 4, "text-anchor": "end" }, s); tmax.textContent = (maxV / 1.15).toFixed(1);
+      const t0 = el("text", { x: LABEL_W - 8, y: top + plotH + 4, "text-anchor": "end" }, s); t0.textContent = "0";
+      let d = "", prev = null;
+      pts.forEach(p => {
+        if (p[0] < D.bin_start || p[0] > D.bin_start + D.bins * D.bin) return;
+        const cmd = (prev == null || p[0] - prev > 3) ? "M" : "L";
+        d += `${cmd}${xOf(p[0]).toFixed(1)},${yOf(p[1]).toFixed(1)}`;
+        prev = p[0];
+      });
+      el("path", { d, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, s);
+      [[0, "video starts"], [D.cell_end, "video stops"]].forEach(([t, label]) => {
+        el("line", { x1: xOf(t), x2: xOf(t), y1: top, y2: top + plotH, stroke: "var(--ink-2)", "stroke-width": 1 }, s);
+        const tx = el("text", { x: xOf(t) + 4, y: 12 }, s); tx.textContent = label;
+      });
+      const cross = el("line", { y1: top, y2: top + plotH, stroke: "var(--baseline)", "stroke-width": 1, visibility: "hidden" }, s);
+      s.addEventListener("pointermove", evt => {
+        const r = s.getBoundingClientRect(), x = evt.clientX - r.left;
+        if (x < LABEL_W || x > LABEL_W + plotW) { cross.setAttribute("visibility", "hidden"); hideTip(); return; }
+        const t = D.bin_start + (x - LABEL_W) / CELL_W * D.bin;
+        let best = pts[0];
+        for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+        cross.setAttribute("x1", xOf(best[0])); cross.setAttribute("x2", xOf(best[0]));
+        cross.setAttribute("visibility", "visible");
+        showTip(evt, [[`${best[1].toFixed(2)} Mbps`, "v"], [`t${signed(Math.round(best[0]))} s · ${phase(best[0])}`, "k"],
+                      [`bitrate ${host.bitrate.kind}`, "k"]]);
+      });
+      s.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+    }
+
+    // heatmap
+    const AXIS_H = 34, TOP = 4;
+    const hm = el("svg", { width, height: TOP + gridH + AXIS_H, viewBox: `0 0 ${width} ${TOP + gridH + AXIS_H}`, role: "img",
+      "aria-label": `${host.label} log records per second by log type over time; values are in the table below` }, scroll);
+    const g = el("g", { transform: `translate(0,${TOP})` }, hm);
+    D.codes.forEach((code, i) => {
+      const lbl = el("text", { x: 0, y: rowY[i] + CELL_H - 4, class: "row" }, g); lbl.textContent = code;
+      if (D.nr[i]) { const tg = el("text", { x: 58, y: rowY[i] + CELL_H - 4 }, g); tg.textContent = "NR"; }
+      const row = host.grid[i];
+      const peak = Math.max(0, ...row.filter(v => v != null));
+      row.forEach((v, k) => {
+        if (v == null) return;
+        const level = v <= 0 || peak <= 0 ? 1 : Math.min(7, Math.max(1, Math.ceil(v / peak * 7)));
+        el("rect", { x: LABEL_W + k * CELL_W, y: rowY[i], width: CELL_W - 2, height: CELL_H - 2, rx: 2, class: "h" + level }, g);
+      });
+    });
+    [[0, "start"], [D.cell_end, "stop"]].forEach(([t]) => {
+      el("line", { x1: xOf(t) - 1, x2: xOf(t) - 1, y1: 0, y2: gridH, stroke: "var(--ink-2)", "stroke-width": 1 }, g);
+    });
+    const axisY = gridH + 6;
+    el("line", { x1: LABEL_W, x2: LABEL_W + plotW, y1: axisY, y2: axisY, stroke: "var(--baseline)", "stroke-width": 1 }, g);
+    for (let t = Math.ceil(D.bin_start / 30) * 30; t <= D.bin_start + D.bins * D.bin; t += 30) {
+      el("line", { x1: xOf(t), x2: xOf(t), y1: axisY, y2: axisY + 4, stroke: "var(--baseline)", "stroke-width": 1 }, g);
+      const tx = el("text", { x: xOf(t), y: axisY + 17, "text-anchor": "middle" }, g); tx.textContent = signed(t);
+    }
+    const unit = el("text", { x: 0, y: axisY + 17 }, g); unit.textContent = "seconds";
+    const hover = el("rect", { width: CELL_W - 2, height: CELL_H - 2, rx: 2, fill: "none", stroke: "var(--ink)",
+      "stroke-width": 1.5, visibility: "hidden" }, g);
+    hm.addEventListener("pointermove", evt => {
+      const r = hm.getBoundingClientRect();
+      const x = evt.clientX - r.left, yy = evt.clientY - r.top - TOP;
+      const k = Math.floor((x - LABEL_W) / CELL_W);
+      const i = rowY.findIndex(ry => yy >= ry && yy < ry + CELL_H);
+      if (k < 0 || k >= D.bins || i < 0 || host.grid[i][k] == null) { hover.setAttribute("visibility", "hidden"); hideTip(); return; }
+      const v = host.grid[i][k], t = D.bin_start + k * D.bin;
+      const peak = Math.max(0, ...host.grid[i].filter(x => x != null));
+      hover.setAttribute("x", LABEL_W + k * CELL_W); hover.setAttribute("y", rowY[i]);
+      hover.setAttribute("visibility", "visible");
+      showTip(evt, [[`${v.toFixed(1)} records/s`, "v"], [`${D.codes[i]} · ${host.label}`, "k"],
+                    [`t${signed(t)} to ${signed(t + D.bin)} s · ${phase(t)}`, "k"],
+                    [peak > 0 ? `${Math.round(v / peak * 100)}% of this log type's peak` : "never logged here", "k"]]);
+    });
+    hm.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); hideTip(); });
+
+    // table view: the accessible twin of the heatmap, built on demand
+    const btn = h("button", "Show values as a table");
+    btn.setAttribute("aria-expanded", "false");
+    const tWrap = document.createElement("div");
+    tWrap.className = "scroll"; tWrap.hidden = true; tWrap.style.marginTop = "10px";
+    btn.addEventListener("click", () => {
+      if (!tWrap.firstChild) {
+        const t = document.createElement("table");
+        const hr = document.createElement("tr");
+        hr.appendChild(h("th", "Log type"));
+        for (let k = 0; k < D.bins; k++) hr.appendChild(h("th", signed(D.bin_start + k * D.bin)));
+        const thead = document.createElement("thead"); thead.appendChild(hr); t.appendChild(thead);
+        const tb = document.createElement("tbody");
+        D.codes.forEach((code, i) => {
+          const tr = document.createElement("tr");
+          tr.appendChild(h("td", code + (D.nr[i] ? " NR" : ""), "code"));
+          host.grid[i].forEach(v => tr.appendChild(h("td", fmt(v))));
+          tb.appendChild(tr);
+        });
+        t.appendChild(tb); tWrap.appendChild(t);
+      }
+      tWrap.hidden = !tWrap.hidden;
+      btn.textContent = tWrap.hidden ? "Show values as a table" : "Hide table";
+      btn.setAttribute("aria-expanded", String(!tWrap.hidden));
+    });
+    fig.appendChild(btn); fig.appendChild(tWrap);
+    hostsEl.appendChild(fig);
+  });
+
+  // ---- summary table ---------------------------------------------------------
+  const st = document.getElementById("summary");
+  const thead = document.createElement("thead");
+  const g1 = document.createElement("tr"); g1.className = "group";
+  g1.appendChild(h("th", ""));
+  D.hosts.forEach(host => { const th = h("th", host.label); th.colSpan = 3; th.style.textAlign = "center"; g1.appendChild(th); });
+  const g2 = document.createElement("tr");
+  g2.appendChild(h("th", "Log type"));
+  D.hosts.forEach(() => ["Before", "During", "After"].forEach(n => g2.appendChild(h("th", n))));
+  thead.appendChild(g1); thead.appendChild(g2); st.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  D.codes.forEach((code, i) => {
+    const tr = document.createElement("tr");
+    const td = h("td", null, "code"); td.appendChild(document.createTextNode(code));
+    if (D.nr[i]) td.appendChild(h("span", "NR", "tag"));
+    tr.appendChild(td);
+    D.hosts.forEach(host => {
+      const r = host.rates[i];
+      ["before", "during", "after"].forEach(w => tr.appendChild(h("td", fmt(r[w]))));
+    });
+    tbody.appendChild(tr);
+  });
+  st.appendChild(tbody);
+
+  document.getElementById("clocknote").replaceChildren(
+    h("b", "Clock alignment is estimated, to about ±1 s. "),
+    document.createTextNode("Modem timestamps have no reliable epoch, so each capture's modem clock is lined up with its known start time on the host clock (" +
+      D.hosts.map(x => `${x.label} ${x.offset >= 0 ? "+" : ""}${x.offset.toFixed(2)} s`).join(", ") +
+      "). Records timestamped more than an hour from their capture's median are dropped as garbage."));
+})();
+</script>

@@ -43,11 +43,31 @@ examples/local_video/scripts/incoming/
 !/results-shared/**/README.md
 /teleop-test-matrix/e1-gate-2-samples/
 /teleop-test-matrix/incoming/
+
+# Dated campaign trees (Host A). This BROAD rule comes first, and the specific
+# 2026-09-10 block below re-includes that tree's docs and the two reports the
+# operator asked to keep in git. A directory exclusion cannot be undone by a
+# later negation on a file inside it, so the directory is re-included explicitly.
+/overnight-20??-??-??/
+!/overnight-2026-09-10/
+# The overnight joint-report tree: CSVs, logs, 2.4 GB of raw I420 reference frames, and
+# generated reports. Same reason as the rules above -- measurement data stays out of git.
+# It was untracked but NOT ignored, which is one careless `git add -A` from the problem
+# those rules exist to prevent. Bucket/report README files remain documentation.
+overnight-2026-09-10/**
+!overnight-2026-09-10/**/
+!overnight-2026-09-10/README.md
+!overnight-2026-09-10/clock-sync-hostb.txt
+# Operator asked for the generated reports in git so they can be pulled. These carry
+# embedded measurement imagery, which the rule above otherwise excludes -- exception is
+# deliberate and scoped to these two files, not to the data trees behind them.
+!overnight-2026-09-10/reports/
+!overnight-2026-09-10/reports/per-run-reports.html
+!overnight-2026-09-10/reports/overnight-ladder.html
 # Dated campaign trees holding the joint two-host capture: publisher jsonl/CSV, Host B's
 # subscriber CSVs and its stored raw I420 frames. The 2026-09-10 tree alone is >7 GB of
 # frames. These were UNTRACKED rather than ignored, which is the state that put 155 MB
 # into reach of a plain `git add -A` twice before.
-/overnight-20??-??-??/
 # Modem diag captures. A DLF holds the full baseband log -- IMSI, cell IDs,
 # RRC/NAS signalling -- so it must never reach the history. The venv is a
 # local install with absolute paths baked in and is useless to anyone else.
