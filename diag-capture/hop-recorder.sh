@@ -34,9 +34,19 @@ csv="$out/${label}.hops.csv" pcap="$out/${label}.${IF}.pcap"
 # Say up front which hops this host can record. Hosts without the NOPASSWD rule for
 # tcpdump/qmicli still record queue, driver and modem-log hops; they just cannot
 # capture the wire or read QMI counters -- and must not pretend they did.
-can_wire=0; sudo -n tcpdump --version >/dev/null 2>&1 && can_wire=1
+# Capture capability has TWO independent routes and the gate must test both, or a paired
+# run silently captures at one end while looking complete. Host A reaches tcpdump through
+# scoped NOPASSWD sudo (sudo -n -l: /usr/bin/tcpdump, /usr/bin/qmicli); Host B reaches it
+# through file capabilities (cap_net_admin,cap_net_raw=eip) and needs no sudo at all.
+# Testing only `sudo -n` reports a capability-carrying host as incapable -- which is what
+# a `sudo -n` gate would now do on B, skipping its capture without saying so.
+can_wire=0; TCPDUMP=""
+if sudo -n tcpdump --version >/dev/null 2>&1; then can_wire=1; TCPDUMP="sudo -n tcpdump"
+elif getcap "$(command -v tcpdump 2>/dev/null)" 2>/dev/null | grep -q cap_net_raw; then can_wire=1; TCPDUMP="tcpdump"
+elif timeout 5 tcpdump -i "$IF" -c 1 -w /dev/null >/dev/null 2>&1; then can_wire=1; TCPDUMP="tcpdump"
+fi
 can_qmi=0;  sudo -n qmicli --version >/dev/null 2>&1 && can_qmi=1
-echo "recording: queue+driver=yes  wire(pcap)=$([ $can_wire = 1 ] && echo yes || echo 'NO - no NOPASSWD tcpdump')  qmi+signal=$([ $can_qmi = 1 ] && echo yes || echo 'NO - no NOPASSWD qmicli')  modem-log=$([ "${DIAG:-0}" = 1 ] && echo yes || echo no)"
+echo "recording: queue+driver=yes  wire(pcap)=$([ $can_wire = 1 ] && echo yes || echo 'NO - neither NOPASSWD sudo nor cap_net_raw')  qmi+signal=$([ $can_qmi = 1 ] && echo yes || echo 'NO - no NOPASSWD qmicli')  modem-log=$([ "${DIAG:-0}" = 1 ] && echo yes || echo no)"
 
 tpid="" dpid="" cleaned=0
 cleanup() {
@@ -54,7 +64,7 @@ trap 'exit 130' INT TERM
 
 # Header-only capture: 128 bytes covers IP+UDP+RTP+extensions, never media.
 if [ $can_wire = 1 ]; then
-  sudo -n tcpdump -i "$IF" -nn -s 128 -Z "$(id -un)" --time-stamp-precision=nano \
+  $TCPDUMP -i "$IF" -nn -s 128 -Z "$(id -un)" --time-stamp-precision=nano \
     -G "$dur" -W 1 -w "$pcap" udp >/dev/null 2>"$out/${label}.tcpdump.log" &
   tpid=$!
 fi

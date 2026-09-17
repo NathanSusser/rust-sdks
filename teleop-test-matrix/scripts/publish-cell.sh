@@ -33,6 +33,13 @@ URL="wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t
 # default clip and wants ~2.8x the bitrate for the same quality, so every run logs which
 # clip it used (first line of the log, below).
 CLIP="${CLIP:-/home/nsusser/teleop-media/robot-src-30m.mp4}"
+# Degradation axis. `locked` holds resolution AND frame rate, so a forced bitrate is
+# delivered as forced pixels at frame rate rather than being paid in either. The
+# UNFORCED control cell must NOT be locked: locking it would leave it constrained on a
+# different axis from every other cell and it would stop being a control. Logged below
+# from this variable, never as a literal -- a cell that mis-states its own pin or
+# degradation state poisons every comparison drawn from it.
+DEGRADATION="${DEGRADATION:-locked}"
 LIVENESS_S=25
 
 cd "$REPO" || exit 1
@@ -62,7 +69,7 @@ rm -f "$snap"
 export LK_PIN_BITRATE_TO_MAX="${LK_PIN_BITRATE_TO_MAX:-1}"
 export LK_MAX_START_BITRATE_KBPS="${LK_MAX_START_BITRATE_KBPS:-$cap}"
 {
-  echo "gcc-overrides: LK_PIN_BITRATE_TO_MAX=$LK_PIN_BITRATE_TO_MAX LK_MAX_START_BITRATE_KBPS=$LK_MAX_START_BITRATE_KBPS degradation=locked"
+  echo "gcc-overrides: LK_PIN_BITRATE_TO_MAX=$LK_PIN_BITRATE_TO_MAX LK_MAX_START_BITRATE_KBPS=$LK_MAX_START_BITRATE_KBPS degradation=$DEGRADATION"
   echo "source: clip=$CLIP cap=${cap}k codec=$codec duration=${DURATION:-150}s"
 } > "$log"
 
@@ -71,7 +78,7 @@ teleop-test-matrix/scripts/at-epoch.sh "$epoch" \
     --url "$URL" --room-name "$room" \
     --duration-s "${DURATION:-150}" --warmup-s 5 --codec "$codec" --encoder nvenc \
     --width 1600 --height 1300 --fps 30 --max-bitrate $((cap * 1000)) \
-    --degradation locked \
+    --degradation "$DEGRADATION" \
     --camera-source "$CLIP" \
     --attach-timestamp --attach-frame-id --buffering-mode zero_jitter \
     --control-transport dc_reliable \
