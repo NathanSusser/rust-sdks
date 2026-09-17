@@ -1,0 +1,71 @@
+#!/home/nsusser/diag-capture/venv/bin/python
+"""Strict DLF walk: count records, detect misalignment, resync.
+
+A record is accepted only if its length fits AND its log code is plausible AND
+the NEXT record also parses (or the file ends). A length that merely "fits" is
+not enough: a record written with a wrong declared length (QCSuper's "Dismissing
+log type ... indicating size X instead of Y") lands the walk inside a payload,
+where random bytes often still look like valid lengths.
+
+The file is mmap'ed, not read into memory: fast-build DLFs are GBs.
+
+Usage: dlf-check FILE.dlf [--codes]
+"""
+import collections
+import mmap
+import os
+import struct
+import sys
+
+path = sys.argv[1]
+N = os.path.getsize(path)
+if N == 0:
+    print(f'{path}: 0 bytes, 0 records (0 NR5G), 0 resyncs, 0 bytes skipped')
+    sys.exit(0)
+f = open(path, 'rb')
+d = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+unpack = struct.Struct('<HH').unpack_from
+
+
+def plausible_code(code):
+    return 0x1000 <= code <= 0x1FFF or 0xB000 <= code <= 0xB9FF
+
+
+def rec_ok(i):
+    if i + 12 > N:
+        return False
+    ln, code = unpack(d, i)
+    return ln >= 12 and i + ln <= N and plausible_code(code)
+
+
+def accept(i):
+    if not rec_ok(i):
+        return False
+    j = i + unpack(d, i)[0]
+    return j == N or rec_ok(j)
+
+
+i = n = nr = resyncs = skipped = 0
+codes = collections.Counter()
+want_codes = '--codes' in sys.argv
+while i + 12 <= N:
+    if accept(i):
+        ln, code = unpack(d, i)
+        n += 1
+        if 0xB800 <= code <= 0xB9FF:
+            nr += 1
+        if want_codes:
+            codes[code] += 1
+        i += ln
+        continue
+    j = i + 1
+    while j + 12 <= N and not accept(j):
+        j += 1
+    resyncs += 1
+    skipped += min(j, N) - i
+    i = j
+if i < N:
+    skipped += N - i
+print(f'{path}: {N} bytes, {n} records ({nr} NR5G), {resyncs} resyncs, {skipped} bytes skipped')
+if want_codes:
+    print(' '.join(f'{c:#06x}:{k}' for c, k in codes.most_common(40)))

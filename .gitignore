@@ -48,3 +48,13 @@ examples/local_video/scripts/incoming/
 # frames. These were UNTRACKED rather than ignored, which is the state that put 155 MB
 # into reach of a plain `git add -A` twice before.
 /overnight-20??-??-??/
+# Modem diag captures. A DLF holds the full baseband log -- IMSI, cell IDs,
+# RRC/NAS signalling -- so it must never reach the history. The venv is a
+# local install with absolute paths baked in and is useless to anyone else.
+/diag-capture/logs/
+/diag-capture/venv/
+# Random 4 MB upload payload for the controlled uplink probe (S1). Not data, not code.
+/diag-capture/up4m.bin
+# Runtime flock for the DIAG serial port, created per cell by hop-recorder.sh,
+# capture-around-cell.sh and test-qcsuper-build.sh. Zero-byte lock state, not source.
+/diag-capture/.ttyUSB0.lock
