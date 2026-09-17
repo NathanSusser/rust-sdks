@@ -795,8 +795,9 @@ class ModemRates:
 
 # Codes shown by raw-record analysis to be periodic heartbeats rather than traffic. A
 # 50 ms window holds a fixed count regardless of radio behaviour, so any ratio is 1.00 by
-# construction. Host A measured 0xB881 in c049 at 238/s with inter-arrival p10-p90 of
-# 4.97-5.03 ms over 14 distinct values and zero window-count spread.
+# construction. Host A measured 0xB881 in c052 at 238/s with inter-arrival p10 = p50 = p90
+# = 5.00 ms across five distinct gap values in 2,000 samples, and all 14 stall windows
+# returning exactly 10 records with zero spread (c049 agreed, with 14 distinct values).
 MODEM_ARTIFACT_CODES = {"0xB881"}
 
 MODEM_NAMED_CODES = {
