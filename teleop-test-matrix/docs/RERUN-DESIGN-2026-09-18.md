@@ -45,6 +45,53 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump
 
 One command, once, on Host B. Without it this design degrades to what we already have.
 
+**Both hosts can capture, by two different mechanisms. Neither needs anything from the operator.**
+
+- **Host B: file capabilities.** `getcap /usr/bin/tcpdump` → `cap_net_admin,cap_net_raw=eip`,
+  granted 2026-09-17 (see below). No sudo involved, and sudo here needs a password anyway.
+- **Host A: scoped NOPASSWD sudo.** `sudo -n -l` → `(root) NOPASSWD: /usr/bin/tcpdump,
+  /usr/bin/qmicli, /usr/sbin/nft, /usr/bin/mmcli`. Its `getcap` is empty and always will be;
+  it captured 43 MB of real packets per cell on 17 Sep this way.
+
+**So capability must be probed three ways, and the trap is symmetrical.** This cost real time
+twice in one day, in mirror image:
+
+| probe | wrong on | why |
+|---|---|---|
+| `sudo -n tcpdump --version` | **Host B** | sudo needs a password there; the binary needs no sudo |
+| `sudo -n true` | **Host A** | NOPASSWD is granted *per command*, so a blanket probe fails |
+
+Each host tested the other with the probe suited to its own mechanism, and both concluded the
+other was incapable. A correct gate tries **scoped sudo, then file capabilities, then a
+one-packet probe**, and reports incapable only if all three fail. `hop-recorder.sh` on Host A
+has been fixed to do exactly that.
+
+**A paired run must never proceed half-instrumented.** The attribution table below needs both
+ends; a run with one end capturing would look complete and answer nothing. So each side probes
+*itself* before the epoch and the run **refuses, or marks every affected cell single-ended**.
+
+To be precise about the history, because an earlier version of this paragraph got it wrong:
+B's inability was **real, not a measurement artefact**. Its `tcpdump` genuinely carried no
+capabilities until the `setcap` above was run on 2026-09-17, so the premise in "Why the last
+campaigns could not attribute anything" was true when written.
+
+The file metadata settles it, and is recorded here because this claim was stated three different
+ways in one day and memory clearly is not enough:
+
+```
+$ stat /usr/bin/tcpdump
+Modify: 2025-09-10 08:28:48   <- packaged binary, contents never altered
+Change: 2026-09-17 11:55:25   <- capability granted, today
+```
+
+`setcap` rewrites a security xattr, which bumps `ctime` while leaving `mtime` alone — so that
+pair *is* the signature of the grant, and it lands **393 seconds after** commit `33224fc`, the
+one that listed this `setcap` as prerequisite #1. Before 11:55:25 on 2026-09-17, B could not
+capture. Host A's long-standing comment gating B to h264 cells was correct at the time. The `sudo -n` gate is a
+*forward-looking* bug: now that B has the capability, that gate would still report it as
+incapable and silently skip B's capture. Both things are worth fixing; only one of them explains
+the past.
+
 **Done, 2026-09-17.** `getcap /usr/bin/tcpdump` reports `cap_net_admin,cap_net_raw=eip`, and
 `~/diag-capture/pcap.sh SECONDS [label] [iface]` is written to match `capture.sh`'s conventions:
 headers only (`-s 96`), UDP, `-U` so a killed capture keeps everything up to the kill, a 2×512 MB
