@@ -60,7 +60,21 @@ sudo at all.
 To be precise about the history, because an earlier version of this paragraph got it wrong:
 B's inability was **real, not a measurement artefact**. Its `tcpdump` genuinely carried no
 capabilities until the `setcap` above was run on 2026-09-17, so the premise in "Why the last
-campaigns could not attribute anything" was true when written. The `sudo -n` gate is a
+campaigns could not attribute anything" was true when written.
+
+The file metadata settles it, and is recorded here because this claim was stated three different
+ways in one day and memory clearly is not enough:
+
+```
+$ stat /usr/bin/tcpdump
+Modify: 2025-09-10 08:28:48   <- packaged binary, contents never altered
+Change: 2026-09-17 11:55:25   <- capability granted, today
+```
+
+`setcap` rewrites a security xattr, which bumps `ctime` while leaving `mtime` alone — so that
+pair *is* the signature of the grant, and it lands **393 seconds after** commit `33224fc`, the
+one that listed this `setcap` as prerequisite #1. Before 11:55:25 on 2026-09-17, B could not
+capture. Host A's long-standing comment gating B to h264 cells was correct at the time. The `sudo -n` gate is a
 *forward-looking* bug: now that B has the capability, that gate would still report it as
 incapable and silently skip B's capture. Both things are worth fixing; only one of them explains
 the past.
