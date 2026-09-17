@@ -906,7 +906,7 @@ def draw_modem_page(
     # "ordinary" and "late" were the same population and every ratio came out 1.00x.
     for m in modems:
         for le in late_elapsed:
-            second = int(round((le + capture0_ms - m.probe_start_ms) / 1000.0))
+            second = math.floor((le + capture0_ms - m.probe_start_ms) / 1000.0)
             if m.seconds[0] <= second <= m.seconds[1]:
                 late_seconds.add((m.label, second))
 
@@ -997,16 +997,45 @@ def draw_modem_page(
         hi = min(second_to_elapsed(m, m.seconds[1]), duration_ms)
         return max(1, int((hi - lo) / 1000))
 
-    covered = max(
-        (len({sec for lbl, sec in late_seconds if lbl == m.label}) / overlap_seconds(m))
-        for m in modems
-    )
+    # Weight by late FRAMES, not by seconds touched: a second holding 30 late frames and a
+    # second holding one are not equal evidence, and on a cell whose late frames are
+    # scattered singletons a raw second-count trips the guard on noise. On S2, 12 seconds
+    # carry 291 of 296 in-window late frames and 4 seconds carry 5 between them.
+    lead = modems[0]
+    per_second_frames: dict[int, int] = {}
+    for le in late_elapsed:
+        sec = math.floor((le + capture0_ms - lead.probe_start_ms) / 1000.0)
+        if lead.seconds[0] <= sec <= lead.seconds[1]:
+            per_second_frames[sec] = per_second_frames.get(sec, 0) + 1
+    in_window = sum(per_second_frames.values())
+    dense = {sec: n for sec, n in per_second_frames.items() if n >= 5}
+    covered = len(per_second_frames) / overlap_seconds(lead)
     pdf.setFont("Helvetica", 7.0)
     pdf.setFillColor(MUTED)
-    pdf.drawString(
-        x, row_y, f"late-frame seconds cover {covered * 100:.0f}% of the window the modem log and the video cell share"
-    )
+    if in_window:
+        pdf.drawString(
+            x,
+            row_y,
+            f"{len(dense)} second(s) carry {sum(dense.values()):,} of the {in_window:,} late frames in the "
+            f"window the modem log and the video cell share; {len(per_second_frames) - len(dense)} further "
+            f"second(s) carry {in_window - sum(dense.values()):,} between them "
+            f"({covered * 100:.0f}% of seconds touched)",
+        )
     row_y -= 12
+    if in_window and not dense:
+        wrap_text(
+            pdf,
+            f"WEAK EVIDENCE: the {in_window:,} late frames here are scattered singletons with no second "
+            "carrying five or more, so each ratio below rests on a handful of isolated seconds. Treat a "
+            "departure from 1.00 as a hint to capture a cell where late frames concentrate, not as a finding.",
+            x,
+            row_y,
+            width,
+            7.4,
+            9.0,
+            font="Helvetica-Bold",
+        )
+        row_y -= 22
     if covered > 0.5:
         wrap_text(
             pdf,
