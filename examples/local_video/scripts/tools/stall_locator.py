@@ -59,14 +59,18 @@ def window_stats(t, p, lo_us, hi_us, quiet_share=0.15):
     pk = p[min(j, len(p)) - 1] - p[i]
     span_s = (t[-1] - t[0]) / 1e6
     rate_pps = (p[-1] - p[0]) / span_s if span_s > 0 else 0.0
-    longest, run_start, run_start_p = 0.0, max(t[i], lo_us), p[i]
+    # Test each gap on its own, not the packets accumulated since the run began. Measuring
+    # cumulatively lets a steady trickle stay "idle": on the 2026-09-16 8 Mbps cell, 3 packets
+    # spread over 40 ms read as 9% of expected and merged two 20 ms lulls into one 40 ms
+    # "stop" that never happened. Per gap, a lull ends as soon as one gap carries real traffic.
+    longest, run_start = 0.0, max(t[i], lo_us)
     for k in range(i + 1, min(j, len(t))):
-        elapsed_s = (t[k] - run_start) / 1e6
-        expected = rate_pps * elapsed_s
+        gap_s = (t[k] - t[k - 1]) / 1e6
+        expected = rate_pps * gap_s
         # One packet is always tolerated, so a single stray never ends a stop.
-        if p[k] - run_start_p > max(1.0, quiet_share * expected):
+        if p[k] - p[k - 1] > max(1.0, quiet_share * expected):
             longest = max(longest, (t[k] - run_start) / 1000)
-            run_start, run_start_p = t[k], p[k]
+            run_start = t[k]
     longest = max(longest, (hi_us - run_start) / 1000)
     return pk, longest
 
