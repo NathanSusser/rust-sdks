@@ -53,9 +53,17 @@ cannot, a sweep started today would silently produce a wire capture on *one* sid
 attribution table below depends on having both. So each side checks its own capture capability
 before the epoch and the run **refuses, or marks every affected cell as single-ended**, rather
 than producing a capture that looks complete. Check capability with `getcap`, or a one-packet
-probe — **never with `sudo -n tcpdump --version`**, which is how `hop-recorder.sh` tests it and
-is why B was believed incapable for weeks: sudo needs a password here, while the binary needs no
-sudo at all. The gate was wrong, not the host.
+probe — **never with `sudo -n tcpdump --version`**, which is how `hop-recorder.sh` tests it.
+That gate fails here because sudo needs a password, while a capability-carrying tcpdump needs no
+sudo at all.
+
+To be precise about the history, because an earlier version of this paragraph got it wrong:
+B's inability was **real, not a measurement artefact**. Its `tcpdump` genuinely carried no
+capabilities until the `setcap` above was run on 2026-09-17, so the premise in "Why the last
+campaigns could not attribute anything" was true when written. The `sudo -n` gate is a
+*forward-looking* bug: now that B has the capability, that gate would still report it as
+incapable and silently skip B's capture. Both things are worth fixing; only one of them explains
+the past.
 
 **Done, 2026-09-17.** `getcap /usr/bin/tcpdump` reports `cap_net_admin,cap_net_raw=eip`, and
 `~/diag-capture/pcap.sh SECONDS [label] [iface]` is written to match `capture.sh`'s conventions:
