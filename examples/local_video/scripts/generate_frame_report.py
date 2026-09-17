@@ -793,6 +793,12 @@ class ModemRates:
         return sorted(volume, key=lambda c: -volume[c])[:n]
 
 
+# Codes shown by raw-record analysis to be periodic heartbeats rather than traffic. A
+# 50 ms window holds a fixed count regardless of radio behaviour, so any ratio is 1.00 by
+# construction. Host A measured 0xB881 in c049 at 238/s with inter-arrival p10-p90 of
+# 4.97-5.03 ms over 14 distinct values and zero window-count spread.
+MODEM_ARTIFACT_CODES = {"0xB881"}
+
 MODEM_NAMED_CODES = {
     "0xB872": "NR L2 UL TB",
     "0xB873": "NR L2 UL BSR",
@@ -1074,13 +1080,36 @@ def draw_modem_page(
             med_o = statistics.median(ordinary)
             med_l = statistics.median(late) if late else float("nan")
             ratio = (med_l / med_o) if med_o else float("nan")
+            # Per-capture viability, because a code's character changes between captures:
+            # 0xB881 is a 5 ms heartbeat in c049 (238/s, inter-arrival p10-p90 4.97-5.03 ms,
+            # every 50 ms window holding exactly 10 records, ratio structurally 1.00) and an
+            # irregular 10/s stream in S1. A near-constant per-second rate is that heartbeat
+            # signature and its ratio carries no information; a very low rate cannot resolve
+            # a sub-second event at all. Say which, rather than print a number that looks
+            # like a measurement.
+            # A per-second summary CANNOT tell a heartbeat from steady traffic: 0xB881 is a
+            # 5 ms heartbeat (every 50 ms window holds exactly 10 records, ratio structurally
+            # 1.00) and 0xB883 is genuinely variable at 50 ms, yet both look flat at 1 s.
+            # So only exclude what raw-record analysis has actually shown to be an artifact,
+            # and otherwise print the ratio with the 1 s flatness flagged as unknown rather
+            # than asserted. Host A established 0xB881's heartbeat by scanning c049's records.
+            spread = (statistics.pstdev(ordinary) / med_o) if med_o else float("inf")
+            if code in MODEM_ARTIFACT_CODES:
+                note = "heartbeat - ratio meaningless"
+            elif med_o < 5:
+                note = "too sparse to say"
+            else:
+                note = ""
+            if note:
+                ratio = float("nan")
+            flat = not note and spread < 0.02
             cells = (
                 m.label,
                 code,
                 MODEM_NAMED_CODES.get(code, "(high volume)"),
                 f"{med_o:,.0f}",
                 "-" if med_l != med_l else f"{med_l:,.0f}",
-                "-" if ratio != ratio else f"{ratio:.2f}x",
+                note if note else (f"{ratio:.2f}x *" if flat else f"{ratio:.2f}x"),
             )
             pdf.setFillColor(INK if ratio == ratio and (ratio < 0.8 or ratio > 1.25) else MUTED)
             pdf.setFont("Helvetica-Bold" if ratio == ratio and (ratio < 0.8 or ratio > 1.25) else "Helvetica", 7.2)
@@ -1095,6 +1124,8 @@ def draw_modem_page(
     pdf.setFont("Helvetica-Oblique", 7.0)
     wrap_text(
         pdf,
+        "* marks a code whose per-second rate barely varies. This summary cannot tell a periodic heartbeat "
+        "from steady traffic -- only raw-record timing can -- so treat a starred ratio as unverified. "
         "A ratio far from 1.00 means the modem's activity on that code changed in the seconds holding late "
         "frames. It says when, not why: a fall in uplink scheduling records is consistent with the radio "
         "withholding grants, but these counts cannot distinguish that from the modem logging less for "
