@@ -1,8 +1,21 @@
-# Re-run design: attributing latency to network, modem or host
+# Re-run design: finding the bitrate breakpoint, and attributing it
 
 Written 2026-09-17 after the codec×bitrate matrix produced one usable cell in six.
-The operator's question, verbatim: *"confirm whether network is dropping packets or is
-taking too long etc or if its on the modem or host side."*
+
+Two operator questions, both verbatim, and the design serves them in this order:
+
+1. *"I want to pin it so I know when the network has issues at what bitrate. then I can
+   configure based on that bitrate."* — the **capacity-breakpoint sweep**, below.
+2. *"confirm whether network is dropping packets or is taking too long etc or if its on the
+   modem or host side."* — the **attribution** that paired packet capture provides, which is
+   what turns a breakpoint into a *reason* for the breakpoint.
+
+**One warning that governs how the result gets used.** A breakpoint from a single sweep is a
+sample of one hour on one link, not a constant. Host A has documented recurring sub-2 Mbps
+episodes, and the archive's own note is that capacity figures here are *samples, not levels*.
+So the sweep tells you where the knee was **today**; configuring at that exact rate leaves no
+margin for the hours when the link is worse. Configure below the highest clean rate, and re-run
+the ladder at a different time of day before treating any number as a setting.
 
 This document exists because the previous campaigns could not answer that question, and
 the reason was a single missing instrument rather than a flaw in the analysis.
@@ -87,32 +100,76 @@ almost nothing to analyse. Every forced cell therefore runs with:
   that sequence is the collapse signature;
 - **no early abort.** A collapsed cell is a result. Let it run the full window and record it.
 
-## Cells
+## The goal: find the bitrate where the network starts having issues
 
-Four cells, plus one repeat. Identical instrumentation on every one. **Bitrate forced
-(`LK_PIN_BITRATE_TO_MAX=1` + `--max-bitrate` + `--degradation locked`) on every cell except the
-explicitly unpinned control.**
+**Operator's purpose, 2026-09-17, verbatim: *"I want to pin it so I know when the network has
+issues at what bitrate. then I can configure based on that bitrate."*** This is a
+**capacity-breakpoint sweep**, not a latency comparison, and it changes the cell list.
 
-1. `h264-2000k` — the known-good configuration; 17,395 frames last time.
-2. `h264-2000k-repeat` — **a repeat, not a new bitrate.** We have no repeated cell in any
-   campaign, so we cannot separate a codec or bitrate effect from ordinary cell-to-cell
-   variation. Cell 2 of the last matrix differed from its neighbour by 3× on p99 for
-   reasons unrelated to its label.
-3. `h264-5000k` — the bufferbloat case, deliberately included now that the mechanism is
-   understood. Expect the standing queue; the point is to observe it with packets.
-4. `av1-2000k` — **forced, and no longer gated on anything.** There is no Host B AV1 bug; the
-   gate this cell used to carry was based on a verdict I retracted (see below). This is the cell
-   that failed at this exact pin on 17 Sep while h264 at the same pin was clean, so it is the
-   campaign's most informative cell either way: if it collapses again, the paired captures say
-   whether Host A's packets left, and that is the question the whole re-run exists to answer.
-5. `h264-2000k-unpinned` — **the one unforced cell, kept deliberately.** It is the only
-   operator-representative latency figure (every number we have is from a pinned publisher,
-   which costs ~6–7 ms of decode on Host B and ~0.35 ms of encode on Host A), and it is the
-   baseline that makes the four forced cells interpretable — without it, a forced cell's latency
-   has nothing to be a delta *from*. If a slot is needed for another forced cell, this is the one
-   to trade, and the cost is losing that baseline.
+The pin is the correct instrument for it, and the only one: an unpinned sender backs off before
+it stresses the link, so it can never show you where the link breaks. Forcing the rate is what
+makes the link answer.
 
-**No 8000k cells.** The link bufferbloats above ~5 Mbps and an 8000k pin measures the pin.
+**The knee is already bracketed between 2 and 5 Mbps**, so that is where the steps go:
+
+| h264, 17 Sep | retx | e2e p99 | verdict |
+|---|---|---|---|
+| 2000k | 0.0% | 94.5 ms | clean |
+| 5000k | 4.4% | 565 ms | degraded, but completed 599 s |
+| 8000k | 29.1% | — | collapsed |
+
+Steps at the edges of that range tell us nothing new. Steps *inside* it locate the knee.
+
+### What counts as "the network has issues"
+
+Stated numerically so the sweep produces an actionable bitrate rather than a pile of numbers.
+Thresholds are anchored on the 17 Sep clean cell, not invented. A cell is:
+
+- **CLEAN** — retx < 0.5%, qdisc backlog 0, media onset < 2 s, p99 within 1.5× the anchor's p99.
+- **QUEUEING** (the knee — this is the number you want) — retx ≥ 0.5%, **or** any sustained
+  qdisc backlog, **or** p99 ≥ 1.5× anchor. The link is now carrying the rate by *delaying* it.
+- **FAILING** — retx ≥ 10%, media onset > 5 s, or any frame loss at Host B.
+- **COLLAPSED** — any signalling `ping timeout` or resume. Hard failure; the rate is unusable.
+
+**Configure below the highest CLEAN rate, not at the QUEUEING rate.** A queueing link still
+delivers video, which is exactly why it is dangerous: it looks like it works and it is silently
+spending hundreds of milliseconds of latency to do so.
+
+## Cells: an anchored ladder
+
+**Forced (`LK_PIN_BITRATE_TO_MAX=1` + `--max-bitrate` + `--degradation locked`) on every cell
+except the final unforced control.** 300 s per cell, ≥120 s between cells.
+
+**The 2000k anchor is repeated through the ladder and is not optional.** Ascending a ladder in
+order confounds bitrate with time-of-day, and that confound is exactly what produced two wrong
+verdicts on 17 Sep: the AV1 cells failed partly because they ran *later*, and I read it as a
+codec effect. Host A has documented recurring sub-2 Mbps episodes, so link capacity is a
+*sample, not a level*. The anchor is how we tell "3500k broke it" from "18:20 broke it": if an
+anchor degrades mid-ladder, the ladder is measuring the hour and the affected cells are void.
+
+| # | cell | purpose |
+|---|---|---|
+| 1 | `h264-2000k-anchor-a` | reference; establishes the CLEAN baseline for every threshold above |
+| 2 | `h264-2500k` | ladder |
+| 3 | `h264-3000k` | ladder |
+| 4 | `h264-2000k-anchor-b` | **time control** — did the link change, or did the bitrate? |
+| 5 | `h264-3500k` | ladder |
+| 6 | `h264-4000k` | ladder |
+| 7 | `h264-2000k-anchor-c` | **time control** |
+| 8 | `h264-4500k` | ladder |
+| 9 | `h264-5000k` | the known-degraded rate; confirms the ladder reproduces 17 Sep |
+| 10 | `h264-2000k-anchor-d` | **time control**, closes the ladder |
+| 11 | `av1-2000k` | the breakpoint is **codec-dependent** — this exact pin collapsed AV1 on 17 Sep while h264 was clean at it. Configuring off an h264-only number would be wrong for an AV1 stream. |
+| 12 | `av1-3000k` | second AV1 point; two points give a direction, one gives nothing |
+| 13 | `h264-2000k-unpinned` | operator-representative latency, and a final check the link is still healthy |
+
+≈13 cells × 420 s ≈ **91 minutes**. Drop cells 2, 5 or 8 to shorten — never an anchor.
+
+**No 8000k cells.** Cancelled by the operator, and 29.1% retx already tells us the answer.
+
+**300 s, not 600 s.** Retx share and p99 stabilise within a minute; the 17 Sep collapse announced
+itself 32 s after the pin. But `av1-5000k`'s media onset was +291 s, so **any cell that collapses
+or shows a late onset is re-run at 600 s** to characterise it properly.
 
 ## What the 17 Sep AV1 failures actually were
 
