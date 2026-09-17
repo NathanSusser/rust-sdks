@@ -45,17 +45,30 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump
 
 One command, once, on Host B. Without it this design degrades to what we already have.
 
-**Host B: done, 2026-09-17. Host A: STILL REQUIRED** — `getcap /usr/bin/tcpdump` on Host A
-returns empty, so A cannot capture unprivileged and needs the same `setcap` command run there.
+**Both hosts can capture, by two different mechanisms. Neither needs anything from the operator.**
 
-**A paired run must never proceed half-instrumented.** Because B can capture and A currently
-cannot, a sweep started today would silently produce a wire capture on *one* side, and the whole
-attribution table below depends on having both. So each side checks its own capture capability
-before the epoch and the run **refuses, or marks every affected cell as single-ended**, rather
-than producing a capture that looks complete. Check capability with `getcap`, or a one-packet
-probe — **never with `sudo -n tcpdump --version`**, which is how `hop-recorder.sh` tests it.
-That gate fails here because sudo needs a password, while a capability-carrying tcpdump needs no
-sudo at all.
+- **Host B: file capabilities.** `getcap /usr/bin/tcpdump` → `cap_net_admin,cap_net_raw=eip`,
+  granted 2026-09-17 (see below). No sudo involved, and sudo here needs a password anyway.
+- **Host A: scoped NOPASSWD sudo.** `sudo -n -l` → `(root) NOPASSWD: /usr/bin/tcpdump,
+  /usr/bin/qmicli, /usr/sbin/nft, /usr/bin/mmcli`. Its `getcap` is empty and always will be;
+  it captured 43 MB of real packets per cell on 17 Sep this way.
+
+**So capability must be probed three ways, and the trap is symmetrical.** This cost real time
+twice in one day, in mirror image:
+
+| probe | wrong on | why |
+|---|---|---|
+| `sudo -n tcpdump --version` | **Host B** | sudo needs a password there; the binary needs no sudo |
+| `sudo -n true` | **Host A** | NOPASSWD is granted *per command*, so a blanket probe fails |
+
+Each host tested the other with the probe suited to its own mechanism, and both concluded the
+other was incapable. A correct gate tries **scoped sudo, then file capabilities, then a
+one-packet probe**, and reports incapable only if all three fail. `hop-recorder.sh` on Host A
+has been fixed to do exactly that.
+
+**A paired run must never proceed half-instrumented.** The attribution table below needs both
+ends; a run with one end capturing would look complete and answer nothing. So each side probes
+*itself* before the epoch and the run **refuses, or marks every affected cell single-ended**.
 
 To be precise about the history, because an earlier version of this paragraph got it wrong:
 B's inability was **real, not a measurement artefact**. Its `tcpdump` genuinely carried no
