@@ -987,14 +987,24 @@ def draw_modem_page(
     pdf.setFont("Helvetica-Bold", 10)
     pdf.drawString(x, row_y - 2, "Named codes at the late frames")
     row_y -= 14
+    # Coverage is over the span the table actually compares across: where the DLF window and
+    # the video cell OVERLAP. Neither the cell length nor the capture window is right on its
+    # own -- on S2 the DLF brackets a 10.9 s upload burst 119 s into a 298 s cell, so "of the
+    # cell" reads 6% and "of the capture window" reads 27%, both true and neither what the
+    # ratios were computed over. On a cell captured end to end the two coincide.
+    def overlap_seconds(m: ModemRates) -> int:
+        lo = max(second_to_elapsed(m, m.seconds[0]), 0.0)
+        hi = min(second_to_elapsed(m, m.seconds[1]), duration_ms)
+        return max(1, int((hi - lo) / 1000))
+
     covered = max(
-        (len({s for lbl, s in late_seconds if lbl == m.label}) / max(1, m.seconds[1] - m.seconds[0]))
+        (len({sec for lbl, sec in late_seconds if lbl == m.label}) / overlap_seconds(m))
         for m in modems
     )
     pdf.setFont("Helvetica", 7.0)
     pdf.setFillColor(MUTED)
     pdf.drawString(
-        x, row_y, f"late-frame seconds cover {covered * 100:.0f}% of the run"
+        x, row_y, f"late-frame seconds cover {covered * 100:.0f}% of the window the modem log and the video cell share"
     )
     row_y -= 12
     if covered > 0.5:
