@@ -140,12 +140,36 @@ spending hundreds of milliseconds of latency to do so.
 **Forced (`LK_PIN_BITRATE_TO_MAX=1` + `--max-bitrate` + `--degradation locked`) on every cell
 except the final unforced control.** 300 s per cell, ≥120 s between cells.
 
-**The 2000k anchor is repeated through the ladder and is not optional.** Ascending a ladder in
-order confounds bitrate with time-of-day, and that confound is exactly what produced two wrong
-verdicts on 17 Sep: the AV1 cells failed partly because they ran *later*, and I read it as a
-codec effect. Host A has documented recurring sub-2 Mbps episodes, so link capacity is a
-*sample, not a level*. The anchor is how we tell "3500k broke it" from "18:20 broke it": if an
-anchor degrades mid-ladder, the ladder is measuring the hour and the affected cells are void.
+### Why the same 2000k cell is run four times
+
+**Plain version: we re-run one test we already know is good, at intervals, to prove the link
+didn't change underneath us while we were sweeping.**
+
+The ladder takes about 90 minutes. Suppose we ran 2000k, 2500k, 3000k … straight upward and
+4000k came back bad. There would be two possible explanations and no way to choose between them:
+
+1. **4000k is past what the link can carry** — the answer we're after; or
+2. **the link simply got worse** in the 50 minutes since we started — nothing to do with bitrate.
+
+Host A's uplink does exactly that: it drops below 2 Mbps for stretches and then recovers, seen
+on four separate dates. So capacity here is a *sample, not a level*.
+
+The fix is a yardstick. 2000k is the rate we already know runs clean (0.0% retransmission), so
+we re-run **that same cell** after every few ladder steps and read it like a spirit level:
+
+- **all four anchors come back the same** → the link held steady for the whole 90 minutes, so
+  differences between the ladder steps really are caused by bitrate. The sweep is valid.
+- **an anchor comes back degraded** → the link itself changed at that moment. The ladder steps
+  run near it are **void** and get re-run later, rather than being published as a breakpoint
+  that is really just a clock reading.
+
+This is not a theoretical worry — it is precisely the mistake made on 17 Sep. The h264 cells ran
+first and passed, the AV1 cells ran later and failed, and I concluded AV1 was broken. It wasn't.
+One 2000k anchor immediately before the AV1 cells would have caught that in minutes instead of
+producing two retracted verdicts.
+
+So: drop ladder steps to save time. **Never drop an anchor** — without them the sweep cannot
+tell a bitrate limit from a bad half-hour.
 
 | # | cell | purpose |
 |---|---|---|
