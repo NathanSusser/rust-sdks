@@ -239,7 +239,24 @@ run with a different set.
 
 ## Reports
 
-Each cell gets the paired report plus a **radio panel**:
+### The ladder curve is the deliverable
+
+A sweep's answer lives *across* cells, not inside any one of them. Thirteen per-cell PDFs do not
+answer "at what bitrate", so the campaign's primary output is one **ladder page**:
+
+- x-axis **forced bitrate**; one line each for **retx %**, **e2e p99**, **media onset**, and
+  **peak qdisc backlog**, each on its own panel rather than a shared scale (they differ by orders
+  of magnitude, and a dual-axis chart would misread).
+- every **anchor cell plotted at 2000k in run order**, so anchor drift is visible as spread at a
+  single x position. Anchors that separate are the signal that the ladder measured the hour.
+- each cell annotated **CLEAN / QUEUEING / FAILING / COLLAPSED** per the thresholds above, and
+  the **highest CLEAN rate called out as the headline number** — that is the configuration input.
+- h264 and AV1 as separate series, since the breakpoint is codec-dependent.
+- cells voided by anchor drift drawn but struck through, never silently dropped.
+
+### Per cell
+
+Each cell also gets the paired report plus a **radio panel**:
 
 - **signal strength** — RSRP/RSRQ per serving cell and per beam, ~6 Hz, decoded from the
   DIAG capture with SCAT (free; verified working on our own `.dlf` files)
