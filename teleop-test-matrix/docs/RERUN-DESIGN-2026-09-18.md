@@ -53,9 +53,45 @@ against Host B's per-frame render log.
 Each row is a table lookup, not a threshold. The modem logs then say *which* of network
 or modem for row 2 — and that is the only row where the modem logs are load-bearing.
 
+## Forcing the bitrate: the operator's decision, and what it actually sets
+
+**Decision, 2026-09-17: the re-run forces the bitrate.** Recorded here with the mechanism spelled
+out, because "force the bitrate" can mean either of two knobs that behave very differently.
+
+- **`--max-bitrate` is the ceiling** (harness default 5,000,000; `cli.rs:375`). Both the 10 Sep
+  ladder and the 17 Sep matrix passed it, so the cell's bitrate was always being *set*.
+- **`LK_PIN_BITRATE_TO_MAX=1` raises the floor to meet it**, munging `x-google-min-bitrate` up to
+  the configured maximum (`peer_transport.rs:382`, `munge_min_bitrate_to_max`). This is what
+  "forcing" means operationally, and the source states why it exists: *"Congestion control
+  normally hands the encoder `min(estimate, max_bitrate)`. When the estimate is the smaller term,
+  the configured maximum stops being the independent variable — a bitrate sweep whose cells all
+  get the same estimate is measuring the link, not the cells."* It also states the price:
+  *"This deliberately disables the mechanism that keeps a sender inside the link's capacity… It is
+  a measurement mode, not a control law."*
+- **`--degradation locked`** stops the encoder trading resolution or frame rate away instead of
+  bitrate, so the forced rate is delivered as forced *pixels at frame rate*.
+
+So the pin is kept for precisely the reason it was written: an unpinned sweep measures the link.
+Two things make this safer than 17 Sep. The approved bitrates are the ones that held — pinned
+h264 at 2000k ran at **0.0%** retransmission and at 5000k completed the full 599 s at **4.4%**;
+the catastrophic cells were the 8000k ones, which are cancelled. And with packet capture at both
+ends, a cell that collapses now yields the packet-level reason instead of an unexplained gap.
+
+**When a forced cell collapses, it must still produce data.** Yesterday four cells failed and left
+almost nothing to analyse. Every forced cell therefore runs with:
+
+- pcap armed *before* the epoch and stopped *after* it, at both ends, so the collapse itself is
+  captured — the queue building, the retransmission burst, and the signalling timeout;
+- `qdisc_backlog_pkts` and `rx_dropped` sampled throughout (already in `hops.csv`);
+- every signalling `ping timeout` / resume / re-pin timestamped into the cell's timeline, since
+  that sequence is the collapse signature;
+- **no early abort.** A collapsed cell is a result. Let it run the full window and record it.
+
 ## Cells
 
-Four cells, plus one repeat. Identical instrumentation on every one.
+Four cells, plus one repeat. Identical instrumentation on every one. **Bitrate forced
+(`LK_PIN_BITRATE_TO_MAX=1` + `--max-bitrate` + `--degradation locked`) on every cell except the
+explicitly unpinned control.**
 
 1. `h264-2000k` — the known-good configuration; 17,395 frames last time.
 2. `h264-2000k-repeat` — **a repeat, not a new bitrate.** We have no repeated cell in any
@@ -64,12 +100,17 @@ Four cells, plus one repeat. Identical instrumentation on every one.
    reasons unrelated to its label.
 3. `h264-5000k` — the bufferbloat case, deliberately included now that the mechanism is
    understood. Expect the standing queue; the point is to observe it with packets.
-4. `av1-2000k-unpinned` — **no longer gated on anything, and deliberately unpinned.** There is
-   no Host B AV1 bug; the gate this cell used to carry was based on a verdict I retracted. See
-   "What the 17 Sep AV1 failures actually were" below.
-5. `h264-2000k-unpinned` — the operator-representative figure. Every latency number we
-   have is from a pinned publisher, which we measured as costing ~6–7 ms of decode on
-   Host B and ~0.35 ms of encode on Host A.
+4. `av1-2000k` — **forced, and no longer gated on anything.** There is no Host B AV1 bug; the
+   gate this cell used to carry was based on a verdict I retracted (see below). This is the cell
+   that failed at this exact pin on 17 Sep while h264 at the same pin was clean, so it is the
+   campaign's most informative cell either way: if it collapses again, the paired captures say
+   whether Host A's packets left, and that is the question the whole re-run exists to answer.
+5. `h264-2000k-unpinned` — **the one unforced cell, kept deliberately.** It is the only
+   operator-representative latency figure (every number we have is from a pinned publisher,
+   which costs ~6–7 ms of decode on Host B and ~0.35 ms of encode on Host A), and it is the
+   baseline that makes the four forced cells interpretable — without it, a forced cell's latency
+   has nothing to be a delta *from*. If a slot is needed for another forced cell, this is the one
+   to trade, and the cost is losing that baseline.
 
 **No 8000k cells.** The link bufferbloats above ~5 Mbps and an 8000k pin measures the pin.
 
