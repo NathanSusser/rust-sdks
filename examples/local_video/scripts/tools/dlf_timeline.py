@@ -52,6 +52,7 @@ def iter_dlf(path, chunk=64 << 20, stats=None):
     is a dict that receives the zero-gap count.
     """
     gaps = 0
+    base = 0                     # bytes consumed before the current buffer, for resync offsets
     buf = b""
     with open(path, "rb") as f:
         while True:
@@ -68,14 +69,18 @@ def iter_dlf(path, chunk=64 << 20, stats=None):
                         j += 1
                     if j == n and more:
                         break                      # the zero run may continue in the next chunk
+                    step = (j - i) if j > i else 1
                     i = j if j > i else i + 1
                     gaps += 1
+                    if stats is not None:
+                        stats.setdefault("resyncs", []).append((base + i, step))
                     continue
                 if i + length > n and more:
                     break                          # record straddles the chunk boundary
                 ts = struct.unpack_from("<Q", buf, i + 4)[0]
                 yield code, (ts >> 16) * TICK_S + (ts & 0xFFFF) / 32768 * TICK_S + GPS_EPOCH
                 i += length
+            base += i
             buf = buf[i:]
             if not more:
                 break
