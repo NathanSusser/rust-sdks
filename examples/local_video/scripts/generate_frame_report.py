@@ -777,6 +777,11 @@ class ModemRates:
 
     label: str
     probe_start_ms: int
+    # The window's end, when the header states it. Only needed as a FALLBACK axis: a cell
+    # where almost nothing rendered has no usable subscriber frame span, and the modem page
+    # is exactly what you want to see on such a cell. Optional because it is not required
+    # for the normal path, and a file without it must still produce a page.
+    probe_end_ms: int | None
     host_minus_utc_s: float | None
     per_second: dict[str, dict[int, int]]      # code -> {second_rel_probe: count}
     seconds: tuple[int, int]
@@ -817,6 +822,7 @@ def read_modem_rates(path: Path, label: str) -> ModemRates | None:
     except OSError:
         return None
     probe_start_ms: int | None = None
+    probe_end_ms: int | None = None
     offset: float | None = None
     for line in text[:6]:
         if not line.startswith("#"):
@@ -825,6 +831,13 @@ def read_modem_rates(path: Path, label: str) -> ModemRates | None:
             probe_start_ms = int(m.group(1))
         elif (m := re.search(r"probe_start=([0-9.]+)", line)):
             probe_start_ms = int(float(m.group(1)) * 1000)
+        # Both hosts spell the window's end differently, the same way they differ on
+        # probe_start: Host B writes probe_end_ms=<int>, Host A writes probe_end=<float>.
+        # Accept both rather than normalising one host's tooling to the other's.
+        if (m := re.search(r"probe_end_ms=(\d+)", line)):
+            probe_end_ms = int(m.group(1))
+        elif (m := re.search(r"probe_end=([0-9.]+)", line)):
+            probe_end_ms = int(float(m.group(1)) * 1000)
         if (m := re.search(r"host_minus_utc_s=(-?[0-9.]+)", line)):
             offset = float(m.group(1))
         elif (m := re.search(r"host=modem(-?[0-9.]+)s", line)):
@@ -843,7 +856,7 @@ def read_modem_rates(path: Path, label: str) -> ModemRates | None:
         lo, hi = min(lo, second), max(hi, second)
     if not per_second:
         return None
-    return ModemRates(label, probe_start_ms, offset, per_second, (lo, hi))
+    return ModemRates(label, probe_start_ms, probe_end_ms, offset, per_second, (lo, hi))
 
 
 def wrap_text(
@@ -884,12 +897,39 @@ def draw_modem_page(
     """Modem activity against the video timeline, plus what it did at the late frames."""
     _, page_height = landscape(letter)
     captures = [v for v in (number(r.get("capture_timestamp_us")) for r in subscriber.rows) if v]
-    if not captures:
-        return
-    capture0_ms = min(captures) / 1000.0
+    capture0_ms = min(captures) / 1000.0 if captures else 0.0
     duration_ms = max(values(subscriber.rows, "elapsed_ms"), default=0.0)
-    if duration_ms <= 0:
-        return
+
+    # Fall back to the CELL WINDOW when the subscriber's frame span is unusable.
+    #
+    # This page used to `return` on duration_ms <= 0, which blanked it on exactly the cells
+    # it matters most for: a run where the publisher sent 8,606 frames and one reached the
+    # screen has elapsed_ms = 0.000 on its single row, so the axis collapsed and the page
+    # came out empty apart from its header. The modem timeline is most worth seeing when the
+    # video timeline has nothing in it.
+    #
+    # The modem files carry the window themselves (probe_start_ms/probe_end_ms), so an axis
+    # exists independently of how many frames rendered. Anchor to probe_start too, or
+    # second_to_elapsed measures from a capture instant that may sit anywhere in the window.
+    # The test is whether the frame span COVERS the cell, not whether it is merely positive.
+    # A cell that rendered 2 frames one second apart has duration_ms ~= 1000, which passes a
+    # `> 0` guard and then stretches one second of video across the full page width while
+    # to_x() clamps 380 s of modem seconds into it -- every point piles up at the right edge
+    # and the strip draws as a near-straight line that LOOKS like a real measurement. That is
+    # worse than the blank page it replaced. Require the span to be a real fraction of the
+    # window before trusting it as an axis.
+    window_fallback = False
+    starts = [m.probe_start_ms for m in modems]
+    ends = [m.probe_end_ms for m in modems if m.probe_end_ms]
+    window_ms = (float(max(ends)) - float(min(starts))) if (starts and ends) else 0.0
+    if duration_ms <= 0 or not captures or (window_ms > 0 and duration_ms < 0.5 * window_ms):
+        if not starts or not ends:
+            return
+        capture0_ms = float(min(starts))
+        duration_ms = window_ms
+        window_fallback = True
+        if duration_ms <= 0:
+            return
 
     # Late frames, on the same definition the rest of the report uses.
     e2r = values(subscriber.rows, "exposure_to_receive_ms")
@@ -928,6 +968,18 @@ def draw_modem_page(
         "decode, so this shows WHEN the modem's scheduling activity changed and by how much in relative "
         "terms, never the grant in bytes. Red ticks mark seconds holding a late frame."
     )
+    if window_fallback:
+        # Say which axis this is. Without it the page looks like the normal video timeline
+        # and a reader would take the absence of red ticks as "no frame was late", when the
+        # truth is that almost no frame arrived at all.
+        blurb = (
+            "Per-second DIAG RECORD COUNTS -- these are not grant sizes. The v3 record layouts need QCAT "
+            "to decode, so this shows WHEN the modem's scheduling activity changed and by how much in "
+            "relative terms, never the grant in bytes. "
+            "AXIS IS THE CELL WINDOW, NOT THE VIDEO TIMELINE: too few frames reached the screen to give "
+            "one, so seconds run from the capture's own probe_start. There are no late-frame ticks "
+            "because there were almost no frames -- that is the finding, not an empty chart."
+        )
     wrap_text(pdf, blurb, x, top + 6, width, 7.4, 9.0)
 
     strip_h, gap = 92.0, 26.0
@@ -1110,7 +1162,18 @@ def draw_modem_page(
                 MODEM_NAMED_CODES.get(code, "(high volume)"),
                 f"{med_o:,.0f}",
                 "-" if med_l != med_l else f"{med_l:,.0f}",
-                note if note else (f"{ratio:.2f}x *" if flat else f"{ratio:.2f}x"),
+                # ratio is NaN whenever there is nothing to divide -- a cell where almost
+                # nothing rendered has NO late frames, so med_l is NaN and "{nan:.2f}x"
+                # formats as the literal "nanx", which reads like a measurement that failed
+                # rather than a comparison that does not apply. The median column already
+                # guards this; the ratio column must too.
+                note
+                if note
+                else (
+                    "no late frames"
+                    if ratio != ratio
+                    else (f"{ratio:.2f}x *" if flat else f"{ratio:.2f}x")
+                ),
             )
             pdf.setFillColor(INK if ratio == ratio and (ratio < 0.8 or ratio > 1.25) else MUTED)
             pdf.setFont("Helvetica-Bold" if ratio == ratio and (ratio < 0.8 or ratio > 1.25) else "Helvetica", 7.2)
