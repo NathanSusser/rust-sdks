@@ -20,7 +20,9 @@ DUR=${2:-300}
 REPO=$(cd "$(dirname "$0")/../../../.." && pwd)
 CELL=~/teleop/cells/$ROOM
 A_HOST=${A_HOST:-nsusser@192.168.99.1}
-A_RESULTS=${A_RESULTS:-\$HOME/code/rust-sdks/results/$ROOM}
+# NOT "\$HOME/..." -- that goes over the wire literally inside the quoted ssh string and
+# scp looks for a directory whose name starts with a dollar sign. Resolved remotely instead.
+A_RESULTS=${A_RESULTS:-}
 # Deployment. NOT defaulted to $LIVEKIT_URL: joining a different deployment with the same
 # room name succeeds SILENTLY and receives nothing, which is indistinguishable from a real
 # failure. Switching is an explicit act -- and Host A must be switched to match.
@@ -132,11 +134,25 @@ fi
 
 # Host A's artefacts, if the cable answers. Absence is reported, not fatal.
 mkdir -p "$CELL/hosta"
-if timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 "$A_HOST" "ls $A_RESULTS" >/dev/null 2>&1; then
-  say "pulling Host A artefacts"
-  timeout 180 scp -q -o BatchMode=yes -o ConnectTimeout=8 \
-    "$A_HOST:$A_RESULTS/*.pub.csv" "$A_HOST:$A_RESULTS/*.jsonl" \
-    "$A_HOST:$A_RESULTS/dlf-rates.csv" "$CELL/hosta/" 2>/dev/null
+# Resolve the remote directory ON HOST A, so $HOME expands in A's shell and not in this
+# string. Then pull ONE FILE PER scp: a single scp with several sources fails as a whole
+# when any one source does not match, so a missing dlf-rates.csv silently pulled NOTHING
+# and the report rendered Host B only without saying so (2026-09-18, cell5m-a).
+if [ -z "$A_RESULTS" ]; then
+  A_RESULTS=$(timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 "$A_HOST" \
+                "echo \$HOME/code/rust-sdks/results/$ROOM" 2>/dev/null)
+fi
+if [ -n "$A_RESULTS" ] &&
+   timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 "$A_HOST" "test -d '$A_RESULTS'" 2>/dev/null; then
+  say "pulling Host A artefacts from $A_RESULTS"
+  for pat in '*.pub.csv' '*.jsonl' 'dlf-rates.csv' 'dlf-rates-hosta.csv'; do
+    if timeout 180 scp -q -o BatchMode=yes -o ConnectTimeout=8 \
+         "$A_HOST:$A_RESULTS/$pat" "$CELL/hosta/" 2>/dev/null; then
+      say "  pulled $pat"
+    else
+      say "  MISSING on Host A: $pat"
+    fi
+  done
   ls "$CELL/hosta" | sed 's/^/  hosta: /' | tee -a "$CELL/timeline.txt"
 else
   say "Host A artefacts NOT reachable -- report will be Host B only"
@@ -144,7 +160,13 @@ fi
 
 # The two modem files are anchored to each host's own probe_start. If those differ the
 # report draws both strips as if simultaneous and nothing on the page looks wrong.
-A_MODEM="$CELL/hosta/dlf-rates.csv"
+# Look in the cell directory too, not only hosta/: when the pull breaks, Host A pushes its
+# reduction straight into $CELL rather than waiting for a pull that is the broken part.
+A_MODEM=""
+for c in "$CELL/hosta/dlf-rates.csv" "$CELL/hosta/dlf-rates-hosta.csv" \
+         "$CELL/dlf-rates-hosta.csv" "$CELL/dlf-rates-a.csv"; do
+  [ -s "$c" ] && { A_MODEM="$c"; break; }
+done
 if [ -s "$A_MODEM" ] && [ -s "$CELL/dlf-rates-hostb.csv" ]; then
   python3 - "$A_MODEM" "$CELL/dlf-rates-hostb.csv" "$CELL/hosta/dlf-rates-aligned.csv" <<'PY' | tee -a "$CELL/timeline.txt"
 import re, sys, csv
@@ -173,10 +195,22 @@ fi
 
 # ---- report ----------------------------------------------------------------------
 PDF="$CELL/$ROOM-paired.pdf"
+PUB=$(ls "$CELL"/hosta/*.pub.csv "$CELL"/*.pub.csv 2>/dev/null | head -1)
+JSONL=$(ls "$CELL"/hosta/*.jsonl "$CELL"/*.jsonl 2>/dev/null | head -1)
+
+# Say it in the TITLE when an input is missing. A transfer bug will recur; a report that
+# cannot hide a missing input is what catches it. The 2026-09-18 B-only report was
+# indistinguishable from a paired one at a glance, which is how it shipped.
+TITLE="$ROOM"
+missing=""
+[ -s "${PUB:-}" ]                  || missing="$missing no-publisher"
+[ -s "$A_MODEM" ]                  || missing="$missing no-modem-A"
+[ -s "$CELL/dlf-rates-hostb.csv" ] || missing="$missing no-modem-B"
+[ -n "$missing" ] && TITLE="$ROOM  [INCOMPLETE:$missing ]"
+[ -n "$missing" ] && say "REPORT IS INCOMPLETE --$missing"
+
 args=(--subscriber "$CELL/subscriber.csv" --subscriber-log "$CELL/subscriber.log"
-      --title "$ROOM" -o "$PDF")
-PUB=$(ls "$CELL"/hosta/*.pub.csv 2>/dev/null | head -1)
-JSONL=$(ls "$CELL"/hosta/*.jsonl 2>/dev/null | head -1)
+      --title "$TITLE" -o "$PDF")
 [ -s "${PUB:-}" ]   && args+=(--publisher "$PUB")
 [ -s "${JSONL:-}" ] && args+=(--publisher-stats "$JSONL")
 [ -s "$A_MODEM" ]   && args+=(--modem-rates-a "$A_MODEM")
