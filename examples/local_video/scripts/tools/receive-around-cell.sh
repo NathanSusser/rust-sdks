@@ -67,8 +67,20 @@ label=$1 epoch=$2 room=$3
 
 REPO=$(cd "$(dirname "$0")/../../../.." && pwd)
 outdir=${4:-$REPO/examples/local_video/scripts/results/diag-$room}
-URL="wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com"
-SFU_IP=10.1.20.21
+# Deployment. Defaults to -h265, which is what every campaign has used and what
+# publish-cell.sh hardcodes. NOT defaulted to $LIVEKIT_URL on purpose: .env has pointed
+# at the newer server for weeks, and joining a different deployment with the same room
+# name SUCCEEDS SILENTLY and receives nothing -- that is how the 2026-09-11 uplink DIAG
+# test got zero media, and it is indistinguishable from a real failure. So switching
+# deployments is an explicit act:
+#     LK_URL="$LIVEKIT_URL" receive-around-cell.sh ...
+# Host A must be switched to the SAME deployment in the same run, or both sides sit in
+# same-named rooms on different servers and every frame count is meaningless.
+URL="${LK_URL:-wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com}"
+# Ping target, for the path RTT alongside the cell. Tied to the deployment: 10.1.20.21 is
+# an -h265 node, so it must be overridden whenever URL is, or the ping measures a host
+# that is not in the media path at all.
+SFU_IP=${LK_SFU_IP:-10.1.20.21}
 CAPTURE="$HOME/diag-capture/capture.sh"
 SUB="$REPO/target/release/subscriber"
 IF=wwan0
@@ -201,7 +213,12 @@ rm -f "$outdir/DONE"
 : > "$outdir/timeline.txt"
 trap finish EXIT
 trap 'exit 130' INT TERM
-say "label=$label epoch=$epoch room=$room duration=$((CELL_S - 5))s window=${cap_dur}s diag=$DIAG hops=$HOPS ping=$PING server=-h265"
+# Record the URL ACTUALLY USED, not a literal. This line used to print "server=-h265"
+# unconditionally, so a run on any other deployment still claimed -h265 in its own
+# timeline -- the record would have been silently false exactly when it mattered most.
+# Same class of bug as a publisher logging a hardcoded "degradation=locked" while the
+# flag it exported said otherwise: configuration asserted rather than read back.
+say "label=$label epoch=$epoch room=$room duration=$((CELL_S - 5))s window=${cap_dur}s diag=$DIAG hops=$HOPS ping=$PING server=$URL sfu_ip=$SFU_IP"
 [ -n "${DIAG_SKIPPED_DISK:-}" ] && say "DIAG SKIPPED for disk space: ${DIAG_SKIPPED_DISK}"
 sid=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$(id -un)" '$3==u && /seat/ {print $1; exit}')
 say "console session ${sid:-none}: $(loginctl show-session "${sid:-0}" -p Type -p LockedHint 2>/dev/null | paste -sd' ')"
