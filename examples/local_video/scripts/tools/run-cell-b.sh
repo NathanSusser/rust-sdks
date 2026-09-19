@@ -31,7 +31,10 @@ URL=${LK_URL:-wss://livekit-figure-ai.apps.oai01.stc.edgeai.t-mobile.com}
 # Capture windows must OUTLAST the cell. Sized from DUR rather than fixed, because a cell
 # that outruns its DIAG window leaves the last minute with no modem log and the report
 # looks complete anyway.
-LEAD=${LEAD:-20}
+# LEAD is the allowance for the operator-driven handshake between B arming and A
+# publishing. Observed: 81 s on 2026-09-19. A capture that outlasts the cell measured
+# from OUR start must carry the handshake too, or the tail is lost.
+LEAD=${LEAD:-120}
 PCAP_S=$(( DUR + LEAD + 120 ))
 DIAG_S=$(( DUR + LEAD + 90 ))
 
@@ -121,17 +124,6 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 
-DLF=$(ls -t ~/diag-logs/"$ROOM"-*.dlf 2>/dev/null | head -1)
-if [ -n "$DLF" ]; then
-  # Anchor the modem timeline to the cell's own start, and record the MEASURED offset.
-  EP=$(date -u -d "$(grep -m1 -oE '^\[[0-9:]+' "$CELL/timeline.txt" | tr -d '[')" +%s 2>/dev/null || date -u +%s)
-  say "reducing $(basename "$DLF") at offset ${OFFSET}s"
-  python3 "$REPO/examples/local_video/scripts/tools/dlf_rates.py" "$DLF" \
-    --probe-start-ms $((EP * 1000)) --probe-end-ms $(((EP + DUR) * 1000)) \
-    --host-minus-utc "$OFFSET" --before 60 --after 60 \
-    -o "$CELL/dlf-rates-hostb.csv" >> "$CELL/timeline.txt" 2>&1
-fi
-
 # Host A's artefacts, if the cable answers. Absence is reported, not fatal.
 mkdir -p "$CELL/hosta"
 # Resolve the remote directory ON HOST A, so $HOME expands in A's shell and not in this
@@ -156,6 +148,40 @@ if [ -n "$A_RESULTS" ] &&
   ls "$CELL/hosta" | sed 's/^/  hosta: /' | tee -a "$CELL/timeline.txt"
 else
   say "Host A artefacts NOT reachable -- report will be Host B only"
+fi
+
+# ---- reduce the modem log, anchored on the MEDIA, not on our own arming instant -----
+# The arming instant is not the media instant: the operator starts Host A by hand, and on
+# 2026-09-19 the handshake was 81 s. A window of DUR+60 measured from arming therefore
+# ended 21 s BEFORE the media did, and the report drew a strip that stopped early without
+# saying so. capture_timestamp_us in A's publisher CSV is the only instant that means the
+# same thing on both hosts, so prefer it and fall back loudly.
+DLF=$(ls -t ~/diag-logs/"$ROOM"-*.dlf 2>/dev/null | head -1)
+if [ -n "$DLF" ]; then
+  PUB0=$(ls "$CELL"/hosta/*.pub.csv "$CELL"/*.pub.csv 2>/dev/null | head -1)
+  MEDIA=$(python3 - "${PUB0:-}" <<'PYMEDIA'
+import csv, sys
+p = sys.argv[1] if len(sys.argv) > 1 else ""
+if p:
+    ts = [float(r["capture_timestamp_us"]) / 1e6
+          for r in csv.DictReader(open(p)) if r.get("capture_timestamp_us")]
+    if ts:
+        print(f"{int(min(ts))} {int(max(ts)) + 1}")
+PYMEDIA
+)
+  if [ -n "$MEDIA" ]; then
+    set -- $MEDIA; EP=$1; EPEND=$2
+    say "modem window from A capture timestamps: ${EP}..${EPEND} ($((EPEND-EP))s of media)"
+  else
+    EP=$(date -u -d "$(grep -m1 -oE '^\[[0-9:]+' "$CELL/timeline.txt" | tr -d '[')" +%s 2>/dev/null || date -u +%s)
+    EPEND=$(( EP + DUR + 180 ))
+    say "NO publisher CSV -- modem window falls back to arming+${DUR}s+180s slack; strip may not match the media"
+  fi
+  say "reducing $(basename "$DLF") at offset ${OFFSET}s"
+  python3 "$REPO/examples/local_video/scripts/tools/dlf_rates.py" "$DLF" \
+    --probe-start-ms $((EP * 1000)) --probe-end-ms $((EPEND * 1000)) \
+    --host-minus-utc "$OFFSET" --before 60 --after 60 \
+    -o "$CELL/dlf-rates-hostb.csv" >> "$CELL/timeline.txt" 2>&1
 fi
 
 # The two modem files are anchored to each host's own probe_start. If those differ the
