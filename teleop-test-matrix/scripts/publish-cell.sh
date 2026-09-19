@@ -27,7 +27,13 @@ set -uo pipefail
 epoch=$1 room=$2 cap=$3 codec=$4 D=$5; shift 5
 
 REPO=/home/nsusser/code/rust-sdks
-URL="wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com"
+# SFU deployment. Overridable, but NOT defaulted to $LIVEKIT_URL: .env has pointed at the
+# newer server for weeks, and joining a different deployment with the SAME room name SUCCEEDS
+# SILENTLY and receives nothing -- which is how the 2026-09-11 uplink DIAG test got zero media
+# and is indistinguishable from a total-loss cell. Switching deployments must be an explicit
+# act by whoever runs the cell, so the default stays the one every campaign has used.
+#   LK_URL="$LIVEKIT_URL" publish-cell.sh ...
+URL="${LK_URL:-wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com}"
 # Source clip. Overridable per run: results depend on content as much as on bitrate --
 # the 2026-09-04 depal face-lower capture has 12.6x the frame-to-frame motion of the
 # default clip and wants ~2.8x the bitrate for the same quality, so every run logs which
@@ -71,6 +77,7 @@ export LK_MAX_START_BITRATE_KBPS="${LK_MAX_START_BITRATE_KBPS:-$cap}"
 {
   echo "gcc-overrides: LK_PIN_BITRATE_TO_MAX=$LK_PIN_BITRATE_TO_MAX LK_MAX_START_BITRATE_KBPS=$LK_MAX_START_BITRATE_KBPS degradation=$DEGRADATION"
   echo "source: clip=$CLIP cap=${cap}k codec=$codec duration=${DURATION:-150}s"
+  echo "sfu: url=$URL"   # read back from the variable actually passed to --url, never a literal
 } > "$log"
 
 teleop-test-matrix/scripts/at-epoch.sh "$epoch" \
