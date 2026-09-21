@@ -259,6 +259,13 @@ PYMEDIA
   # file does not exist -- on cell5m-a2 only a stale capture existed at all. So check
   # what came out: does the reduction actually cover the media? This one test catches a
   # stale capture, a non-overlapping window and a wrong clock offset alike.
+  #
+  # Coverage is PER-SECOND PRESENCE, not the span from first record to last. The span
+  # form is the trap: records at both window edges with a hole between score 100%.
+  # There is deliberately NO midpoint test. It existed as a cheap proxy for "the window
+  # really is inside the data", which only matters under the span form; under density it
+  # is redundant AND harmful -- a reduction 99% covered whose one missing second happens
+  # to be the midpoint was being rejected outright. Do not re-add it.
   COV=$(python3 - "$CELL/dlf-rates-hostb.csv" "$EP" "$EPEND" <<'PYCOV'
 import csv, sys
 path, ep, epend = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -269,13 +276,12 @@ try:
 except Exception:
     print("0 0 0"); raise SystemExit
 have = sum(1 for s in range(0, span) if s in secs)
-mid  = 1 if (span // 2) in secs else 0
-print(f"{len(secs)} {100 * have // span} {mid}")
+print(f"{len(secs)} {100 * have // span}")
 PYCOV
 )
-  set -- $COV; NSEC=${1:-0}; PCT=${2:-0}; MID=${3:-0}
-  say "modem coverage: ${PCT}% of the ${DUR}s media window, midpoint present=${MID}, ${NSEC} seconds in file"
-  if [ "${PCT:-0}" -lt 50 ] || [ "${MID:-0}" != 1 ]; then
+  set -- $COV; NSEC=${1:-0}; PCT=${2:-0}
+  say "modem coverage: ${PCT}% of the ${DUR}s media window, ${NSEC} seconds in file"
+  if [ "${PCT:-0}" -lt 50 ]; then
     say "MODEM REDUCTION DOES NOT COVER THE MEDIA -- discarding it rather than drawing it."
     say "  capture: $(basename "$DLF")   media window: ${EP}..${EPEND}"
     say "  This cell has NO usable Host B modem data. Do not read a quiet modem page as quiet."
