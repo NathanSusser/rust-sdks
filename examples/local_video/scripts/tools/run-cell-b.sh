@@ -122,11 +122,28 @@ running() {
 # PREVIOUS run's tcpdump, which carried the same room name in its argv and was still
 # alive, and reported "pcap: RUNNING" while our own capture had refused to start. The
 # only honest evidence is a capture FILE created after we armed, whose size is growing.
-fresh() {                      # fresh <glob> -> newest file with mtime >= ARM_T
-  local newest="" f
+# MTIME IS THE WRONG CLOCK HERE. A previous run's capture that is still writing has a
+# mtime of "just now" -- on 2026-09-21 the stale DLF's mtime was 8 minutes after its own
+# start. What we need is when the file was CREATED. Birth time (%W) gives it where the
+# filesystem records it; the capture scripts also stamp the creation instant into the
+# name as <room>-YYYYMMDDTHHMMSSZ, written by `date -u` on this same clock, so that is
+# the authority and works everywhere.
+born() {                       # born <path> -> creation epoch, or 0
+  local f=$1 stamp b
+  stamp=$(printf '%s' "${f##*/}" | grep -oE '[0-9]{8}T[0-9]{6}Z' | tail -1)
+  if [ -n "$stamp" ]; then
+    b=$(date -u -d "${stamp:0:4}-${stamp:4:2}-${stamp:6:2} ${stamp:9:2}:${stamp:11:2}:${stamp:13:2}" +%s 2>/dev/null)
+    [ -n "$b" ] && { printf '%s' "$b"; return; }
+  fi
+  b=$(stat -c %W "$f" 2>/dev/null)
+  case "$b" in ''|0|-) b=0;; esac
+  printf '%s' "$b"
+}
+fresh() {                      # fresh <glob> -> newest file CREATED at or after ARM_T
+  local newest="" f t
   for f in $1; do
     [ -f "$f" ] || continue
-    [ "$(stat -c %Y "$f" 2>/dev/null || echo 0)" -ge "$ARM_T" ] || continue
+    t=$(born "$f"); [ "${t:-0}" -ge "$ARM_T" ] || continue
     newest=$f
   done
   printf '%s' "$newest"
