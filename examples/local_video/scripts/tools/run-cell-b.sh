@@ -254,10 +254,32 @@ PYMEDIA
     --probe-start-ms $((EP * 1000)) --probe-end-ms $((EPEND * 1000)) \
     --host-minus-utc "$OFFSET" --before 60 --after 60 \
     -o "$CELL/dlf-rates-hostb.csv" >> "$CELL/timeline.txt" 2>&1
-  if [ "$(grep -cvE '^#|^second_rel_probe' "$CELL/dlf-rates-hostb.csv" 2>/dev/null || echo 0)" -lt 10 ]; then
-    say "MODEM REDUCTION IS EMPTY -- the capture window does not overlap the media."
-    say "  capture: $(basename "$DLF")   media: ${EP}..${EPEND}"
-    say "  This cell has NO Host B modem data. Do not read the modem page as quiet."
+  # GUARD THE PRODUCT, NOT THE SELECTION (Host A's framing, 2026-09-21, and it is the
+  # better one). No rule for picking the right capture file can succeed when the right
+  # file does not exist -- on cell5m-a2 only a stale capture existed at all. So check
+  # what came out: does the reduction actually cover the media? This one test catches a
+  # stale capture, a non-overlapping window and a wrong clock offset alike.
+  COV=$(python3 - "$CELL/dlf-rates-hostb.csv" "$EP" "$EPEND" <<'PYCOV'
+import csv, sys
+path, ep, epend = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+span = max(1, epend - ep)
+try:
+    secs = {int(r["second_rel_probe"]) for r in
+            csv.DictReader(l for l in open(path) if not l.startswith("#"))}
+except Exception:
+    print("0 0 0"); raise SystemExit
+have = sum(1 for s in range(0, span) if s in secs)
+mid  = 1 if (span // 2) in secs else 0
+print(f"{len(secs)} {100 * have // span} {mid}")
+PYCOV
+)
+  set -- $COV; NSEC=${1:-0}; PCT=${2:-0}; MID=${3:-0}
+  say "modem coverage: ${PCT}% of the ${DUR}s media window, midpoint present=${MID}, ${NSEC} seconds in file"
+  if [ "${PCT:-0}" -lt 50 ] || [ "${MID:-0}" != 1 ]; then
+    say "MODEM REDUCTION DOES NOT COVER THE MEDIA -- discarding it rather than drawing it."
+    say "  capture: $(basename "$DLF")   media window: ${EP}..${EPEND}"
+    say "  This cell has NO usable Host B modem data. Do not read a quiet modem page as quiet."
+    mv -f "$CELL/dlf-rates-hostb.csv" "$CELL/dlf-rates-hostb.REJECTED.csv" 2>/dev/null
   fi
 fi
 
