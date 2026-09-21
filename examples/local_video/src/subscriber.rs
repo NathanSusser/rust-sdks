@@ -613,7 +613,13 @@ impl LatestRenderFrameSlot {
     }
 
     fn store(&self, frame: BoxVideoFrame) {
-        *self.frame.lock() = Some(frame);
+        let mut slot = self.frame.lock();
+        // An occupied slot means the render loop has not taken the previous frame yet,
+        // so this assignment drops it. Count it before it disappears.
+        if slot.is_some() {
+            FRAMES_SUPERSEDED.fetch_add(1, Ordering::Relaxed);
+        }
+        *slot = Some(frame);
     }
 
     fn take(&self) -> Option<BoxVideoFrame> {
@@ -682,6 +688,33 @@ const EXIT_PUBLISHER_INACTIVITY: i32 = 3;
 /// track-subscription chain: there is exactly one subscriber per process, and the
 /// alternative is six call sites of plumbing for one bit.
 static STOPPED_BY_INACTIVITY: AtomicBool = AtomicBool::new(false);
+
+/// Frames superseded in the render slot: stored while a previous frame was still
+/// waiting to be drawn, and therefore dropped by the assignment in
+/// `LatestRenderFrameSlot::store`.
+///
+/// Latest-frame-wins is deliberate -- on resume a teleoperator wants the freshest
+/// frame, not a backlog of stale ones -- but until 2026-09-21 nothing counted it, and
+/// a 2.45 s render stall on cell5m-a3 therefore discarded 69 frames that had arrived
+/// and decoded perfectly. The paired report, having no other explanation, attributed
+/// them to network loss. WebRTC cannot see this: its `frames_dropped` and
+/// `freeze_count` both stay at zero because from its side the frames were delivered.
+/// This counter is the only thing that distinguishes "the network lost it" from "we
+/// superseded it", so it is process-wide for the same reason as the flag above:
+/// one subscriber per process, against threading an Arc through the paint callback.
+static FRAMES_SUPERSEDED: AtomicU64 = AtomicU64::new(0);
+
+/// Wall-clock microseconds at the previous render-loop iteration, 0 before the first.
+static RENDER_LOOP_LAST_US: AtomicU64 = AtomicU64::new(0);
+/// Longest gap observed between consecutive render-loop iterations, microseconds.
+static RENDER_LOOP_MAX_GAP_US: AtomicU64 = AtomicU64::new(0);
+/// Iterations whose gap exceeded `RENDER_LOOP_STALL_US`.
+static RENDER_LOOP_STALLS: AtomicU64 = AtomicU64::new(0);
+
+/// A render-loop gap this long is a stall, not jitter. At 30 fps an iteration is ~33 ms
+/// and the 99th percentile on a healthy cell is under 70 ms, so 250 ms is far outside
+/// normal variation while still catching anything a viewer would perceive as a hitch.
+const RENDER_LOOP_STALL_US: u64 = 250_000;
 
 /// How long the subscriber waits for a frame before concluding the publisher is gone.
 ///
@@ -1072,6 +1105,16 @@ fn log_video_decode_health(stats: &[livekit::webrtc::stats::RtcStats]) {
         inbound.inbound.frames_assembled_from_multiple_packets,
         inbound.inbound.total_decode_time,
         inbound.inbound.decoder_implementation,
+    );
+
+    // WebRTC's own counters stop at the decoder. These two cover the gap between the
+    // decoder and the screen, which is where cell5m-a3 lost 69 frames while every
+    // WebRTC counter read healthy.
+    info!(
+        "Render health: superseded={}, loop_stalls={}, loop_max_gap={:.1}ms",
+        FRAMES_SUPERSEDED.load(Ordering::Relaxed),
+        RENDER_LOOP_STALLS.load(Ordering::Relaxed),
+        RENDER_LOOP_MAX_GAP_US.load(Ordering::Relaxed) as f64 / 1000.0,
     );
 
     if inbound.inbound.frames_received > 0 && inbound.inbound.frames_decoded == 0 {
@@ -1985,6 +2028,29 @@ impl eframe::App for VideoApp {
         if self.ctrl_c_received.load(Ordering::Acquire) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
+        }
+
+        // Time the loop itself. A stall here is invisible everywhere else: decode keeps
+        // running on its own thread, WebRTC counts the frames as delivered, and the only
+        // symptom is frames quietly superseded in the slot above. Warning at the moment
+        // it happens puts a timestamp in the log to correlate against.
+        {
+            let now_us = current_timestamp_us();
+            let prev_us = RENDER_LOOP_LAST_US.swap(now_us, Ordering::Relaxed);
+            if prev_us != 0 {
+                let gap_us = now_us.saturating_sub(prev_us);
+                RENDER_LOOP_MAX_GAP_US.fetch_max(gap_us, Ordering::Relaxed);
+                if gap_us >= RENDER_LOOP_STALL_US {
+                    RENDER_LOOP_STALLS.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        "Render loop stalled {:.1} ms (frames superseded so far: {}). \
+                         Decode and the network are unaffected; frames arriving during \
+                         a stall are dropped by latest-frame-wins.",
+                        gap_us as f64 / 1000.0,
+                        FRAMES_SUPERSEDED.load(Ordering::Relaxed),
+                    );
+                }
+            }
         }
 
         if let Some((width, height)) = self.video_size.load() {
