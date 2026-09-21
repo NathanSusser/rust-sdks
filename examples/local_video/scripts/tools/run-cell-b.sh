@@ -331,6 +331,13 @@ missing=""
 [ -s "${PUB:-}" ]                  || missing="$missing no-publisher"
 [ -s "$A_MODEM" ]                  || missing="$missing no-modem-A"
 [ -s "$CELL/dlf-rates-hostb.csv" ] || missing="$missing no-modem-B"
+# Accept/reject is not enough. A reduction covering 53% of the media passes the 50%
+# floor with its midpoint just inside, and is then DRAWN as though complete -- the same
+# silent-partial failure as the 21 s tail lost on cloud5m-a, only larger. So anything
+# short of near-total coverage is named in the title rather than quietly rendered.
+if [ -s "$CELL/dlf-rates-hostb.csv" ] && [ "${PCT:-100}" -lt 95 ]; then
+  missing="$missing modem-B-only-${PCT}%"
+fi
 [ -n "$missing" ] && TITLE="$ROOM  [INCOMPLETE:$missing ]"
 [ -n "$missing" ] && say "REPORT IS INCOMPLETE --$missing"
 
