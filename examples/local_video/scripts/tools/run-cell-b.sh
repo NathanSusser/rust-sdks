@@ -54,13 +54,25 @@ if [ "$servo" != "s2" ]; then
 fi
 say "pre-flight: PTP servo $servo"
 
-# Wait for the capture locks rather than failing. A previous cell's captures
-# self-terminate; colliding with them just loses this cell too.
+# Wait for the capture locks to clear. NOTE: `flock -n 9 9>f` only TESTS the lock --
+# the redirection is scoped to the flock command, so the lock is released the instant
+# it returns. This loop therefore cannot reserve anything, and on 2026-09-21 a previous
+# run's captures were still alive when it stopped waiting: the new pcap.sh and capture.sh
+# both refused to start, and the whole 300 s cell recorded nothing. So: wait longer, and
+# REFUSE rather than proceed blind.
+locks_free() {
+  flock -n 9 9>~/diag-capture/.pcap-wwan0.lock && flock -n 8 8>~/diag-capture/.ttyUSB0.lock
+}
+lock_ok=0
 for _ in $(seq 1 60); do
-  if flock -n 9 9>~/diag-capture/.pcap-wwan0.lock &&
-     flock -n 8 8>~/diag-capture/.ttyUSB0.lock; then break; fi
+  if locks_free; then lock_ok=1; break; fi
   say "waiting for capture locks to clear..."; sleep 5
 done
+if [ "$lock_ok" != 1 ]; then
+  echo "Capture locks still held after 5 minutes -- a previous cell is still capturing." >&2
+  echo "Wait for it to finish, or set FORCE=1 to run a cell with NO captures." >&2
+  [ "${FORCE:-0}" = 1 ] || exit 1
+fi
 
 # Clock offset MEASURED, never estimated. An estimated -12.3 against a real -14.758
 # misaligned a whole modem timeline by 2.5 s; the counts were fine and the alignment
@@ -83,6 +95,9 @@ PY
 say "clock offset measured: ${OFFSET}s local-UTC"
 
 # ---- arm -------------------------------------------------------------------------
+# ARM_T gates every freshness check below. A capture file older than this belongs to a
+# previous run and must never be mistaken for ours.
+ARM_T=$(date +%s)
 say "arming pcap ${PCAP_S}s and DIAG ${DIAG_S}s for room $ROOM"
 setsid nohup ~/diag-capture/pcap.sh "$PCAP_S" "$ROOM" wwan0 > "$CELL/pcap.out" 2>&1 </dev/null &
 sleep 4
@@ -103,8 +118,43 @@ running() {
   done
   return 1
 }
-running tcpdump "$ROOM"        && say "pcap: RUNNING"  || say "pcap: NOT RUNNING -- cell will be single-ended"
-running qcsuper-noroot "$ROOM" && say "DIAG: RUNNING"  || say "DIAG: NOT RUNNING -- no modem log this cell"
+# `running <comm> <room>` is NOT sufficient on its own: on 2026-09-21 it matched the
+# PREVIOUS run's tcpdump, which carried the same room name in its argv and was still
+# alive, and reported "pcap: RUNNING" while our own capture had refused to start. The
+# only honest evidence is a capture FILE created after we armed, whose size is growing.
+fresh() {                      # fresh <glob> -> newest file with mtime >= ARM_T
+  local newest="" f
+  for f in $1; do
+    [ -f "$f" ] || continue
+    [ "$(stat -c %Y "$f" 2>/dev/null || echo 0)" -ge "$ARM_T" ] || continue
+    newest=$f
+  done
+  printf '%s' "$newest"
+}
+growing() {                    # growing <file> -> 0 if it gained bytes over 3 s
+  local a b
+  a=$(stat -c %s "$1" 2>/dev/null || echo 0); sleep 3
+  b=$(stat -c %s "$1" 2>/dev/null || echo 0)
+  [ "${b:-0}" -gt "${a:-0}" ]
+}
+PCAP_F=$(fresh "$HOME/pcap-logs/$ROOM-*.pcap")
+DIAG_F=$(fresh "$HOME/diag-logs/$ROOM-*.dlf")
+armed=1
+if [ -n "$PCAP_F" ] && running tcpdump "$ROOM" && growing "$PCAP_F"; then
+  say "pcap: RUNNING -> $(basename "$PCAP_F")"
+else
+  say "pcap: NOT RUNNING -- no capture file newer than arming, or it is not growing"; armed=0
+fi
+if [ -n "$DIAG_F" ] && running qcsuper-noroot "$ROOM" && growing "$DIAG_F"; then
+  say "DIAG: RUNNING -> $(basename "$DIAG_F")"
+else
+  say "DIAG: NOT RUNNING -- no capture file newer than arming, or it is not growing"; armed=0
+fi
+if [ "$armed" != 1 ]; then
+  say "ABORTING before the subscriber starts -- a cell with no captures is 5 wasted minutes"
+  echo "See $CELL/pcap.out and $CELL/capture.out. Set FORCE=1 to run anyway." >&2
+  [ "${FORCE:-0}" = 1 ] || exit 1
+fi
 
 # ---- the cell --------------------------------------------------------------------
 say "subscriber joining $ROOM (foreground -- Ctrl-C to stop)"
@@ -156,7 +206,12 @@ fi
 # ended 21 s BEFORE the media did, and the report drew a strip that stopped early without
 # saying so. capture_timestamp_us in A's publisher CSV is the only instant that means the
 # same thing on both hosts, so prefer it and fall back loudly.
-DLF=$(ls -t ~/diag-logs/"$ROOM"-*.dlf 2>/dev/null | head -1)
+# Must be OUR dlf. `ls -t | head -1` picked a previous run's file on 2026-09-21 and
+# reduced a window that did not overlap the media at all, writing zero rows.
+DLF=$(fresh "$HOME/diag-logs/$ROOM-*.dlf")
+if [ -z "$DLF" ]; then
+  say "NO modem log from this run -- not reducing a stale one (report will have no Host B strip)"
+fi
 if [ -n "$DLF" ]; then
   PUB0=$(ls "$CELL"/hosta/*.pub.csv "$CELL"/*.pub.csv 2>/dev/null | head -1)
   MEDIA=$(python3 - "${PUB0:-}" <<'PYMEDIA'
@@ -182,6 +237,11 @@ PYMEDIA
     --probe-start-ms $((EP * 1000)) --probe-end-ms $((EPEND * 1000)) \
     --host-minus-utc "$OFFSET" --before 60 --after 60 \
     -o "$CELL/dlf-rates-hostb.csv" >> "$CELL/timeline.txt" 2>&1
+  if [ "$(grep -cvE '^#|^second_rel_probe' "$CELL/dlf-rates-hostb.csv" 2>/dev/null || echo 0)" -lt 10 ]; then
+    say "MODEM REDUCTION IS EMPTY -- the capture window does not overlap the media."
+    say "  capture: $(basename "$DLF")   media: ${EP}..${EPEND}"
+    say "  This cell has NO Host B modem data. Do not read the modem page as quiet."
+  fi
 fi
 
 # The two modem files are anchored to each host's own probe_start. If those differ the
