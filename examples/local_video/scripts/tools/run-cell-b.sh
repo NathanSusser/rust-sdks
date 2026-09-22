@@ -102,6 +102,14 @@ say "arming pcap ${PCAP_S}s and DIAG ${DIAG_S}s for room $ROOM"
 setsid nohup ~/diag-capture/pcap.sh "$PCAP_S" "$ROOM" wwan0 > "$CELL/pcap.out" 2>&1 </dev/null &
 sleep 4
 setsid nohup ~/diag-capture/capture.sh "$DIAG_S" "$ROOM" > "$CELL/capture.out" 2>&1 </dev/null &
+# Host B's receive-side recorder: qdisc, driver counters, PER-SOCKET UDP drops, and the radio
+# (rsrp/rsrq/snr via mmcli, unprivileged). Until 2026-09-22 Host B recorded NO radio metrics at
+# all, so cell5m-a's +8 dB step on Host A could not be checked against this host -- a one-host
+# step is equally consistent with a beam change local to A and a cell change nobody instrumented
+# here. NOT hop-recorder.sh: that one needs sudo for its QMI columns, which this host does not
+# have, and would return them silently empty.
+setsid nohup ~/diag-capture/hop-recorder-b.sh "$ROOM" "$(( DUR + LEAD + 60 ))" "$CELL" \
+  > "$CELL/hops-b.out" 2>&1 </dev/null &
 sleep 8
 
 # Verify by POSITIVE OBSERVATION, not by exit code. An ssh/launch exit status says
@@ -167,6 +175,19 @@ if [ -n "$DIAG_F" ] && running qcsuper-noroot "$ROOM" && growing "$DIAG_F"; then
 else
   say "DIAG: NOT RUNNING -- no capture file newer than arming, or it is not growing"; armed=0
 fi
+HOPS_F="$CELL/$ROOM.hops-b.csv"
+if [ -s "$HOPS_F" ]; then
+  # An empty radio column is the documented failure here: mmcli returns nothing unless signal
+  # polling is armed. Say so rather than shipping a file that looks complete.
+  if awk -F, 'NR>1 && $16!="" {found=1} END{exit !found}' "$HOPS_F" 2>/dev/null; then
+    say "hops-b: RUNNING -> $(basename "$HOPS_F") (radio columns populated)"
+  else
+    say "hops-b: running but RADIO COLUMNS EMPTY -- mmcli signal polling not armed; qdisc and UDP counters still valid"
+  fi
+else
+  say "hops-b: NOT RUNNING -- no receive-side counters or radio metrics this cell"
+fi
+
 if [ "$armed" != 1 ]; then
   say "ABORTING before the subscriber starts -- a cell with no captures is 5 wasted minutes"
   echo "See $CELL/pcap.out and $CELL/capture.out. Set FORCE=1 to run anyway." >&2
