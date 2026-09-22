@@ -82,6 +82,29 @@ if [ "${DIAG:-0}" = 1 ]; then
   dpid=$!
 fi
 
+# VERIFY THE RADIO COLUMN PARSES, not merely that the query runs. A well-formed CSV with
+# three empty fields per row looks exactly like a successful capture, and Host B shipped
+# one for four days: its mmcli route needs periodic polling armed (--signal-setup), the
+# modem defaults to "refresh rate: 0 seconds", and nothing armed it. My smoke test passed
+# only because an earlier diagnostic command of mine had armed it by accident -- the test
+# inherited a state the script never established. A's route is qmicli --nas-get-signal-info,
+# which needs no polling, so the trigger here is different: losing the NOPASSWD qmicli rule.
+# Same outcome either way, so check the value, not the exit code.
+if [ $can_qmi = 1 ]; then
+  # USE THE COLLECTOR'S OWN EXPRESSION, not a second one written to look equivalent.
+  # My first version of this check used grep -oE 'RSRP: *-?[0-9.]+' and warned on a modem
+  # that was reading perfectly, because qmicli quotes the value -- RSRP: '-89 dBm' -- and
+  # the regex stopped at the quote. A verifier with its own parser can disagree with the
+  # thing it verifies, in either direction. Share the parser or do not bother.
+  probe=$(sudo -n qmicli -d "$QMI" -p --nas-get-signal-info 2>/dev/null | sed -n '/5G/,$p' \
+          | sed -n "s/.*RSRP: '\(-*[0-9.]*\).*/\1/p" | head -1)
+  if [ -z "$probe" ]; then
+    echo "WARNING: qmicli runs but no 5G RSRP parsed -- radio columns will be EMPTY." >&2
+    echo "         Check: sudo -n qmicli -d $QMI -p --nas-get-signal-info" >&2
+  else
+    echo "radio: 5G RSRP reads ${probe} dBm"
+  fi
+fi
 echo "unix_ms,qdisc_sent_pkts,qdisc_dropped,qdisc_overlimits,qdisc_requeues,qdisc_backlog_bytes,qdisc_backlog_pkts,sys_tx_packets,sys_tx_dropped,sys_tx_errors,qmi_tx_ok,qmi_tx_dropped,qmi_rx_ok,qmi_rx_dropped,nr_rsrp_dbm,nr_rsrq_db,nr_snr_db" > "$csv"
 end=$(( $(date +%s) + dur ))
 while [ "$(date +%s)" -lt "$end" ]; do
