@@ -34,9 +34,9 @@ ms() { date +%s%3N; }
 snapshot() {
   {
     echo "== $label $1 $(date -u +%FT%T.%3NZ) ms=$(ms)"
-    mmcli -m 0 2>/dev/null | grep -E 'access tech|signal quality|state:' | sed 's/\x1b\[[0-9;]*m//g'
-    mmcli -m 0 --3gpp 2>/dev/null | grep -E 'registration|operator' || mmcli -m 0 2>/dev/null | grep -E 'registration|operator'
-    mmcli -m 0 --signal-get 2>/dev/null | sed -n '/5G/,/^ *-/p'
+    mmcli -m any 2>/dev/null | grep -E 'access tech|signal quality|state:' | sed 's/\x1b\[[0-9;]*m//g'
+    mmcli -m any --3gpp 2>/dev/null | grep -E 'registration|operator' || mmcli -m any 2>/dev/null | grep -E 'registration|operator'
+    mmcli -m any --signal-get 2>/dev/null | sed -n '/5G/,/^ *-/p'
   } >> "$out/gap-probe-modem.txt"
 }
 
@@ -44,7 +44,7 @@ up() { curl --interface wwan0 -s -o /dev/null -w '%{speed_upload}\n' --max-time 
          -F "f=@$PAY" "$URL" 2>/dev/null | tail -1; }
 
 snapshot before
-mmcli -m 0 --signal-setup=5 >/dev/null 2>&1
+mmcli -m any --signal-setup=5 >/dev/null 2>&1
 
 par=$(mktemp); trap 'rm -f "$par"' EXIT
 t0=$(ms)
