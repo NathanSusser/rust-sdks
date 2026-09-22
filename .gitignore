@@ -4,6 +4,14 @@ soxr-sys/test-input.wav
 soxr-sys/test-output.wav
 .DS_Store
 .env
+# .env was ignored but its BACKUPS were not: a .livekit-demo/.env.bak-<timestamp> was sitting
+# untracked in the working tree, one `git add -A` from being published to a PUBLIC repo. Cover
+# every variant, not just the exact name.
+.env.*
+*.env
+.env.bak*
+*/.env
+*/.env.*
 .cursor
 __pycache__
 .livekit-demo/corp-ca.pem

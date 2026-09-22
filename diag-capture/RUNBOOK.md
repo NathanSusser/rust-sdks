@@ -50,7 +50,18 @@ done
 ```
 
 Interface `00` matches and maps to `ttyUSB0`. ModemManager must show it as **`(ignored)`**
-(`mmcli -m 0 | grep -A3 'ports:'`); if MM claims it, a udev rule has to make it let go.
+(`mmcli -m $IDX | grep -A3 'ports:'`); if MM claims it, a udev rule has to make it let go.
+
+> **Never hardcode the modem index.** It is **1** on Host A and **0** on Host B, and
+> `mmcli -m 0` on Host A fails with a bare `error: couldn't find modem` — a wrong-index
+> command that looks like a missing modem rather than a wrong argument. Resolve it first:
+> ```bash
+> IDX=$(mmcli -L | sed -n 's|.*/Modem/\([0-9]*\).*|\1|p' | head -1)
+> ```
+> Identity fields, no sudo needed: `mmcli -m $IDX | grep -iE 'model|firmware|carrier config|h/w'`.
+> Both rigs read **RM520N-GL / RM520NGLAAR03A04M4G / Commercial-TMO 0A01050F / h-w 20000** —
+> byte-identical, which is why the 0xB97F record-layout differences between the hosts are
+> **not** firmware skew. See the 0xB97F note in §4b.
 
 > `wwan0` carries the host's default route. DIAG capture does not disturb the bearer, but
 > anything that re-registers the modem drops the link.
@@ -408,8 +419,32 @@ servo=$(journalctl --since "-60 sec" --no-pager | grep -oE "phc2sys.*s[0-9]" | t
 [ "$servo" = s2 ] || exit 1                       # FORCE=1 overrides
 
 # clock offset — MEASURED, never estimated
-python3 ~/diag-capture/clock-offset.py            # median of 3 SNTP servers -> host_minus_utc_s
+python3 ~/diag-capture/clock-offset.py            # median of 3 STABLE SNTP servers -> host_minus_utc_s
 ```
+
+**The server list is `time.google.com` / `time.cloudflare.com` / `time.apple.com` on BOTH hosts,
+and the two must always match.** `pool.ntp.org` was dropped on 2026-09-22: it resolves to a
+different server on every lookup, so it contributes a fresh network path each time, and it was the
+worst server on both hosts by a wide margin (A: 23 ms range; B: 16.9 ms stdev, 3–4× the next
+worst). Dropping it took the per-measurement stdev from 3.4 → 1.6 ms on A and 6.3 → 4.2 ms on B.
+
+Before changing that list, run `ntp-server-check.py` **on both hosts** and compare on **stdev**,
+never on range — range can only grow as samples are added, so ranges from different n are not
+comparable. Three traps, all of which we walked into:
+
+| Trap | What happened |
+|---|---|
+| RTT predicts stability | It does not. `time.apple.com` is the slowest server on both hosts (~90 ms) and the steadiest on both; `time.nist.gov` is slow *and* near-worst. A least-RTT estimator therefore optimises the wrong quantity. |
+| A result from one host transfers | A least-RTT estimator measured 3× better on A and ~10% on B. On A one server won the RTT race 28/30, so it was really "always ask the same server"; on B no server dominates and pool *won* 3 times in 12, so least-RTT selected the server we were removing. |
+| A small sample is enough | At n=8 the ranking inverts and the pool set looks best. Use n≥30. |
+
+`time.apple.com` misses roughly 1 lookup in 8 (4/30 on B, 3/30 on A — a server property, since it
+reproduces on both paths). At three servers a miss degrades the median to a mean of two, which is
+tolerable; if the rate climbs, `time.nist.gov` is the drop-in (0.47 ms worse on B, never misses)
+and **both hosts switch together**.
+
+A split server list is the one configuration to avoid: A and B measuring with different sets
+reintroduces exactly the inter-host discrepancy that the 1 ms same-cell agreement rules out.
 
 > The offset drifts **seconds per day** (−14.733 → −25.595 over four days). An *estimated* offset
 > once misaligned a whole modem timeline by 2.5 s with every record count intact. Measure it per
@@ -529,6 +564,8 @@ ARM_T=$(date +%s)                                  # BEFORE launching anything
 | `pcap.sh` | RTP/RTCP header capture on the 5G interface |
 | `preflight-check.sh` | Read every instrument against a known-good cell, one named pass condition each |
 | `clock-offset.py` | Measure this host's offset from true UTC → `host_minus_utc_s` |
+| `ntp-server-check.py` | Score candidate NTP servers/estimators before changing `SERVERS`; run on BOTH hosts |
+| `ml1-ca.py` | 0xB97F → per-carrier PCI/ARFCN/BRSRP, discovering each carrier block (stride is NOT fixed) |
 | `sweep-driver.sh` | Anchored capacity-breakpoint sweep |
 | `overnight-driver.sh`, `overnight-driver2.sh`, `depal9-driver.sh`, `restart-to-driver2.sh` | Campaign drivers |
 | `s1-arm.sh`, `s2-arm.sh`, `s3-arm.sh` | Queue-location experiment arms |

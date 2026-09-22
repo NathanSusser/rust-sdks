@@ -288,14 +288,23 @@ Clocks    : modem_time = host_time - (host_minus_utc_s)
             PTP-locked to each other only, drifting ~2.8 s/day) and that offset has already
             been applied. Do not re-apply it.
 
-            PRECISION: do not read these absolute labels to better than ~30 ms. The offset
-            is measured once per capture against public NTP (5.8 ms stdev, 15.8 ms run-to-
-            run spread) and then DRIFTS DURING the capture -- at 32 us/s that is 29 ms
-            across a 900 s cell, which dominates the measurement noise. Two packages from
-            our two hosts may label the same instant ~30 ms apart; neither is wrong, they
-            bracket it. Run-relative times and Host-A-versus-Host-B comparisons are
-            unaffected and remain good to microseconds, because the hosts are PTP-locked
-            to each other even though neither is locked to UTC.
+            PRECISION: do not read these absolute labels to better than ~30 ms. Two terms,
+            of comparable size -- an earlier note here claimed drift dominated; measurement
+            shows it does not.
+              1. MEASUREMENT NOISE, ~20 ms peak-to-peak. Ten runs on one host gave a 19.2 ms
+                 run-to-run range and 5.6 ms stdev on the median. It is not spread evenly
+                 across the servers: time.google.com held a 6.4 ms range while pool.ntp.org
+                 spanned 27.8 ms, because pool resolves to a different server per lookup.
+                 A median of three is dragged whenever two of the three land the same side.
+              2. DRIFT DURING THE CAPTURE. At 32 us/s the offset moves 9.7 ms across a 300 s
+                 cell and 29 ms across a 900 s one, so the single measurement is exact at one
+                 instant and progressively wrong either side.
+            NOT a term: inter-host path asymmetry. A and B reduced the same cell 33 s apart
+            and their offsets differ by 1 ms (-23.419 vs -23.420). The same host measured
+            twice, 168 s apart, differed by 17 ms. The scatter is within-host, not between.
+            Run-relative times and Host-A-versus-Host-B comparisons are unaffected and remain
+            good to microseconds: the hosts are PTP-locked to each other even though neither
+            is locked to UTC.
 
 DISTURBED SECONDS PACKAGED HERE (relative to media start)
 $SUMMARY
