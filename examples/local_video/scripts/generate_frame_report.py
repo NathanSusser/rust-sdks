@@ -1540,6 +1540,130 @@ def draw_pipeline_timeline(
         pdf.drawString(item_x + 11, item_y, f"{index + 1}. {label}  {mean_ms:.1f} ms")
 
 
+def network_owd_ms(publisher: "LogData | None", subscriber: "LogData | None") -> list[float]:
+    """One-way network latency per frame: Host A packetize -> Host B webrtc receive.
+
+    THIS IS THE ONLY DIRECT NETWORK MEASUREMENT IN THE REPORT. Every other "network" figure
+    here is either loss attribution or a receive-side interval; `receive_to_decode_ms` in
+    particular is jitter-buffer hold plus assembly AFTER arrival, and labelling it "network"
+    (as an earlier summary of mine did) overstates the receive side and hides the path.
+
+    It is only meaningful because the two hosts are PTP-locked to each other -- servo s2,
+    sub-millisecond -- so their absolute microsecond timestamps are directly comparable. They
+    are NOT locked to UTC (both run ~27-28 s behind it), but that offset is common to both
+    ends and cancels in the difference. If PTP is not locked, this number is garbage; the
+    preflight gate refuses to start a cell in that state for exactly this reason.
+
+    Joined on frame_id, so a frame the subscriber never logged contributes nothing.
+    """
+    if publisher is None or subscriber is None:
+        return []
+    sent: dict[str, int] = {}
+    for row in publisher.rows:
+        fid = row.get("frame_id")
+        raw = row.get("webrtc_packetize_timestamp_us")
+        if not fid or raw in (None, "", "nan"):
+            continue
+        try:
+            sent[str(fid)] = int(raw)
+        except (TypeError, ValueError):
+            continue
+    out: list[float] = []
+    for row in subscriber.rows:
+        fid = row.get("frame_id")
+        raw = row.get("webrtc_receive_timestamp_us")
+        if not fid or raw in (None, "", "nan"):
+            continue
+        origin = sent.get(str(fid))
+        if origin is None:
+            continue
+        try:
+            out.append((int(raw) - origin) / 1000.0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def draw_network_page(
+    pdf: "canvas.Canvas",
+    owd: Sequence[float],
+    x: float,
+    top: float,
+    width: float,
+) -> None:
+    """One-way network latency: the numbers, the distribution, and the series over time."""
+    pdf.setFillColor(INK)
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(x, top, "One-way network latency  -  Host A packetize to Host B receive")
+    pdf.setFont("Helvetica", 8.5)
+    pdf.setFillColor(MUTED)
+    pdf.drawString(
+        x, top - 13,
+        "Joined per frame on frame_id. Valid because the hosts are PTP-locked to each other; "
+        "their common offset from UTC cancels in the difference."
+    )
+    if not owd:
+        pdf.setFillColor(INK)
+        pdf.drawString(x, top - 40, "No joinable frames - needs both --publisher and --subscriber.")
+        return
+    jit = [abs(b - a) for a, b in zip(owd, owd[1:])]
+    stats = [
+        ("p50", percentile(owd, 50)), ("p95", percentile(owd, 95)),
+        ("p99", percentile(owd, 99)), ("min", min(owd)), ("max", max(owd)),
+        ("jitter p50", percentile(jit, 50) if jit else 0.0),
+        ("jitter p95", percentile(jit, 95) if jit else 0.0),
+    ]
+    card_w = (width - 6 * 9.0) / 7.0
+    for i, (label, val) in enumerate(stats):
+        draw_card(pdf, x + i * (card_w + 9.0), top - 78, card_w, label, f"{val:.1f} ms")
+    # distribution
+    chart_top = top - 104
+    chart_h = 150.0
+    lo, hi = min(owd), percentile(owd, 99.5)
+    bins = 48
+    span = max(1e-6, hi - lo)
+    counts = [0] * bins
+    for v in owd:
+        counts[min(bins - 1, int((v - lo) / span * bins))] += 1
+    peak = max(counts) or 1
+    bw = width / bins
+    pdf.setFillColor(BLUE)
+    for i, c in enumerate(counts):
+        h = (c / peak) * chart_h
+        if h > 0:
+            pdf.rect(x + i * bw, chart_top - chart_h, max(1.0, bw - 1.0), h, stroke=0, fill=1)
+    pdf.setFillColor(MUTED)
+    pdf.setFont("Helvetica", 7.5)
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        pdf.drawCentredString(x + frac * width, chart_top - chart_h - 11, f"{lo + frac * span:.0f} ms")
+    pdf.setFillColor(INK)
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(x, chart_top + 4, f"Distribution  ({len(owd):,} frames)")
+    # series over time
+    ser_top = chart_top - chart_h - 40
+    ser_h = 150.0
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(x, ser_top + 4, "Over the cell")
+    ymax = max(1.0, percentile(owd, 99) * 1.25)
+    pdf.setStrokeColor(GRID)
+    pdf.setLineWidth(0.5)
+    for frac in (0.0, 0.5, 1.0):
+        yy = ser_top - ser_h + frac * ser_h
+        pdf.line(x, yy, x + width, yy)
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica", 7.5)
+        pdf.drawRightString(x - 4, yy - 2, f"{frac * ymax:.0f}")
+    pdf.setStrokeColor(BLUE)
+    pdf.setLineWidth(0.7)
+    n = len(owd)
+    path = pdf.beginPath()
+    for i, v in enumerate(owd):
+        px = x + (i / max(1, n - 1)) * width
+        py = ser_top - ser_h + min(1.0, v / ymax) * ser_h
+        path.moveTo(px, py) if i == 0 else path.lineTo(px, py)
+    pdf.drawPath(path, stroke=1, fill=0)
+
+
 def generate_report(
     publisher: LogData | None,
     subscriber: LogData | None,
@@ -1550,7 +1674,8 @@ def generate_report(
     modem_rates: Sequence[ModemRates] = (),
 ) -> None:
     logs = [log for log in (publisher, subscriber) if log is not None]
-    page_count = 3 if (modem_rates and subscriber is not None) else 2
+    owd = network_owd_ms(publisher, subscriber)
+    page_count = 2 + (1 if owd else 0) + (1 if (modem_rates and subscriber is not None) else 0)
     assert logs
     primary = subscriber or publisher
     assert primary is not None
@@ -1732,12 +1857,20 @@ def generate_report(
         f"Page 2 of {page_count} - stage detail",
         "Latency percentiles per log, and mean time in each pipeline stage.",
     )
+    if owd:
+        pdf.showPage()
+        draw_header(pdf, title, subtitle)
+        draw_network_page(pdf, owd, left, 500.0, usable)
+        draw_footer(
+            f"Page 3 of {page_count} - one-way network latency",
+            "Host A packetize to Host B webrtc receive, joined per frame. PTP-referenced.",
+        )
     if modem_rates and subscriber is not None:
         pdf.showPage()
         draw_header(pdf, title, subtitle)
         draw_modem_page(pdf, modem_rates, subscriber, left, usable)
         draw_footer(
-            f"Page 3 of {page_count} - modem activity",
+            f"Page {page_count} of {page_count} - modem activity",
             "Per-second DIAG record counts, not grant sizes. Decoding the records themselves needs QCAT.",
         )
     pdf.save()
