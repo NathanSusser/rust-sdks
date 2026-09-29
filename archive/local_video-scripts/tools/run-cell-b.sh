@@ -19,7 +19,9 @@ set -uo pipefail
 
 ROOM=${1:?usage: run-cell-b.sh <room> [duration_s]}
 DUR=${2:-300}
-REPO=$(cd "$(dirname "$0")/../../../.." && pwd)
+# Lives at archive/local_video-scripts/tools/ since the teleop/ restructure.
+SCRIPTS=$(cd "$(dirname "$0")/.." && pwd)
+REPO=$(cd "$SCRIPTS/../.." && pwd)
 CELL=~/teleop/cells/$ROOM
 A_HOST=${A_HOST:-nsusser@192.168.99.1}
 # NOT "\$HOME/..." -- that goes over the wire literally inside the quoted ssh string and
@@ -346,7 +348,7 @@ PYMEDIA
     say "NO publisher CSV -- modem window falls back to arming+${DUR}s+180s slack; strip may not match the media"
   fi
   say "reducing $(basename "$DLF") at offset ${OFFSET}s"
-  python3 "$REPO/examples/local_video/scripts/tools/dlf_rates.py" "$DLF" \
+  python3 "$SCRIPTS/tools/dlf_rates.py" "$DLF" \
     --probe-start-ms $((EP * 1000)) --probe-end-ms $((EPEND * 1000)) \
     --host-minus-utc "$OFFSET" --before 60 --after 60 \
     -o "$CELL/dlf-rates-hostb.csv" >> "$CELL/timeline.txt" 2>&1
@@ -469,7 +471,7 @@ args=(--subscriber "$CELL/subscriber.csv" --subscriber-log "$CELL/subscriber.log
 [ -s "$CELL/dlf-rates-hostb.csv" ] && args+=(--modem-rates-b "$CELL/dlf-rates-hostb.csv")
 
 say "generating report"
-python3 "$REPO/examples/local_video/scripts/generate_frame_report.py" "${args[@]}" \
+python3 "$SCRIPTS/generate_frame_report.py" "${args[@]}" \
   2>&1 | tee -a "$CELL/timeline.txt"
 
 # Verify the PDF actually rendered. A blank modem page has shipped from here before.
