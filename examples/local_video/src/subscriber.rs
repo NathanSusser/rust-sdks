@@ -613,6 +613,14 @@ impl LatestRenderFrameSlot {
     }
 
     fn store(&self, frame: BoxVideoFrame) {
+        // Arm the render-loop stall detector on the FIRST FRAME, not on process start.
+        // Before any frame arrives the loop is legitimately idle -- eframe is not
+        // repainting because there is nothing to paint -- and timing that idle period
+        // reports it as a stall. On cell5m-r1, where the publisher never started, this
+        // logged an 82-SECOND "stall"; an earlier cell carried a ~51.7 s phantom for
+        // the same reason. A detector that cannot report "no stall" on a cell with no
+        // frames is measuring the wrong thing.
+        RENDER_LOOP_ARMED.store(true, Ordering::Relaxed);
         let mut slot = self.frame.lock();
         // An occupied slot means the render loop has not taken the previous frame yet,
         // so this assignment drops it. Count it before it disappears.
@@ -673,6 +681,9 @@ const EXIT_TRACK_UNPUBLISHED: i32 = 4;
 /// Set when the run ended because our track went away. See STOPPED_BY_INACTIVITY.
 static TRACK_UNPUBLISHED: AtomicBool = AtomicBool::new(false);
 
+/// How long the window gets to close itself after the run ends before the process exits anyway.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Process exit status meaning "the publisher went quiet", as distinct from a clean
 /// end-of-window exit.
 ///
@@ -704,6 +715,9 @@ static STOPPED_BY_INACTIVITY: AtomicBool = AtomicBool::new(false);
 /// one subscriber per process, against threading an Arc through the paint callback.
 static FRAMES_SUPERSEDED: AtomicU64 = AtomicU64::new(0);
 
+/// Set once the first decoded frame reaches the slot. Until then the render loop is
+/// idle by design and its gaps are not stalls -- see `store`.
+static RENDER_LOOP_ARMED: AtomicBool = AtomicBool::new(false);
 /// Wall-clock microseconds at the previous render-loop iteration, 0 before the first.
 static RENDER_LOOP_LAST_US: AtomicU64 = AtomicU64::new(0);
 /// Longest gap observed between consecutive render-loop iterations, microseconds.
@@ -1580,6 +1594,7 @@ async fn handle_track_subscribed(
     let simulcast_stats = simulcast.clone();
     let shared_stats = shared.clone();
     let subscriber_timing_stats = subscriber_timing.clone();
+    let repaint_ctx_stats = repaint_ctx.clone();
     tokio::spawn(async move {
         let mut logged_initial = false;
         let mut jitter_buffer_snapshot = None;
@@ -1625,8 +1640,10 @@ async fn handle_track_subscribed(
                 if frames_arrived_stats.load(Ordering::Acquire) > 0 {
                     TRACK_UNPUBLISHED.store(true, Ordering::Release);
                     if !ctrl_c_stats.swap(true, Ordering::AcqRel) {
-                        warn!("Track unpublished after {} frames; ending the run.",
-                              frames_arrived_stats.load(Ordering::Acquire));
+                        warn!(
+                            "Track unpublished after {} frames; ending the run.",
+                            frames_arrived_stats.load(Ordering::Acquire)
+                        );
                     }
                 }
                 break;
@@ -1662,6 +1679,12 @@ async fn handle_track_subscribed(
             }
 
             interval.tick().await;
+        }
+
+        // The window only reads the stop flag when it redraws, and with the track gone no
+        // frame will ask it to. Without this the run hung until something moved the mouse.
+        if let Some(ctx) = repaint_ctx_stats.get() {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     });
 }
@@ -2034,7 +2057,12 @@ impl eframe::App for VideoApp {
         // running on its own thread, WebRTC counts the frames as delivered, and the only
         // symptom is frames quietly superseded in the slot above. Warning at the moment
         // it happens puts a timestamp in the log to correlate against.
-        {
+        if !RENDER_LOOP_ARMED.load(Ordering::Relaxed) {
+            // Not yet armed: keep LAST_US at 0 so the first gap measured after the
+            // first frame starts from that frame, not from an arbitrary earlier
+            // iteration. Without this the pre-media idle is folded into gap #1.
+            RENDER_LOOP_LAST_US.store(0, Ordering::Relaxed);
+        } else {
             let now_us = current_timestamp_us();
             let prev_us = RENDER_LOOP_LAST_US.swap(now_us, Ordering::Relaxed);
             if prev_us != 0 {
@@ -2107,11 +2135,7 @@ async fn main() -> Result<()> {
         match spawn_frame_sampler(dir.clone(), args.sample_every) {
             Ok(sampler) => {
                 let _ = FRAME_SAMPLER.set(sampler);
-                info!(
-                    "Sampling every {}th frame by ID into {}",
-                    args.sample_every,
-                    dir.display()
-                );
+                info!("Sampling every {}th frame by ID into {}", args.sample_every, dir.display());
             }
             Err(e) => anyhow::bail!("could not start frame sampler at {}: {e}", dir.display()),
         }
@@ -2304,6 +2328,24 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         diagnostics_open: Arc::new(AtomicBool::new(true)),
         diagnostics_started: Arc::new(AtomicBool::new(false)),
     };
+    // Backstop for a window that cannot redraw (minimized, occluded): once the run has ended,
+    // give the UI a few seconds to close on its own, then exit with the same status it would.
+    let ctrl_c_watchdog = ctrl_c_received.clone();
+    std::thread::spawn(move || {
+        while !ctrl_c_watchdog.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        std::thread::sleep(SHUTDOWN_GRACE);
+        warn!("Window did not close {SHUTDOWN_GRACE:?} after the run ended; exiting.");
+        if STOPPED_BY_INACTIVITY.load(Ordering::Acquire) {
+            std::process::exit(EXIT_PUBLISHER_INACTIVITY);
+        }
+        if TRACK_UNPUBLISHED.load(Ordering::Acquire) {
+            std::process::exit(EXIT_TRACK_UNPUBLISHED);
+        }
+        std::process::exit(0);
+    });
+
     let native_options = viewport_aspect::native_options(None);
     eframe::run_native(
         "LiveKit Video Subscriber",
