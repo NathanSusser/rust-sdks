@@ -572,6 +572,24 @@ def gate_decoder_b(ctx: Ctx) -> dict:
     data = {"codec": codec, "nvidia": nvidia, "nvcuvid": nvcuvid, "dav1d": dav1d}
     if codec == "av1" and not ((nvidia and nvcuvid) or dav1d):
         return result("decoder_b", False, "no AV1 decoder: need NVDEC (nvidia + libnvcuvid) or libdav1d", **data)
+    if codec == "h265":
+        # libwebrtc ships no software H.265 decoder. B decodes it through the system
+        # FFmpeg on VA-API (webrtc-sys/src/ffmpeg, "VAAPI H265 Decoder"), which needs the
+        # decoder compiled into the subscriber, a DRM render node and libva/libavcodec.
+        binary = Path(ctx.cfg["repo"]) / "target" / "release" / "subscriber"
+        try:
+            built = b"VAAPI H265 Decoder" in binary.read_bytes()
+        except OSError:
+            built = False
+        render = bool(glob.glob("/dev/dri/renderD*"))
+        libs = "libva.so" in cache and "libavcodec.so" in cache
+        data |= {"vaapi_h265_built": built, "render_node": render, "libva_libavcodec": libs}
+        if not (nvidia and nvcuvid) and not (built and render and libs):
+            missing = [n for n, ok in (("decoder in subscriber", built), ("/dev/dri/renderD*", render),
+                                        ("libva+libavcodec", libs)) if not ok]
+            return result("decoder_b", False, f"no H.265 decoder: missing {', '.join(missing)}", **data)
+        how = "NVDEC" if nvidia and nvcuvid else "VA-API via FFmpeg"
+        return result("decoder_b", True, f"h265 decodable ({how})", **data)
     how = "NVDEC" if nvidia and nvcuvid else "software"
     return result("decoder_b", True, f"{codec} decodable ({how})", **data)
 
