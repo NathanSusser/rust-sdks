@@ -455,7 +455,7 @@ pub struct Args {
     /// Destination prefix for per-frame pipeline-stage CSVs, in the `local_video` format.
     ///
     /// Writes `<prefix>.pub.csv` and `<prefix>.sub.csv`, which
-    /// `examples/local_video/scripts/generate_frame_report.py` renders to a PDF. These sit
+    /// `teleop/grid/report/cell.py` renders to a PDF. These sit
     /// alongside the JSON-lines snapshots rather than replacing them: the snapshots carry
     /// the scored metrics and the validity gates, and the CSVs carry the per-frame stage
     /// decomposition that answers where a given frame's latency went.

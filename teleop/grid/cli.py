@@ -110,6 +110,7 @@ def cmd_grid_check(a) -> int:
     me, other = cfg["role"].upper(), ("B" if cfg["role"] == "a" else "A")
     print_gates(me, ra.get("gates") or [preflight.result("agent", False, ra.get("error", "no reply"))])
     print_gates(other, rb.get("gates") or [preflight.result("agent", False, rb.get("error", "no reply"))])
+    cm = None
     if ib is not None:
         cm = preflight.code_match(ia, ib) if ia.get("ok") and ib.get("ok") else \
             preflight.result("code_match", False, f"identity: {me} {ia.get('error', 'ok')}; {other} {ib.get('error', 'ok')}")
@@ -117,7 +118,8 @@ def cmd_grid_check(a) -> int:
     else:
         print(f"  {me} identity: commit {str(ia.get('commit'))[:8]} harness {str(ia.get('harness_sha256'))[:12]} "
               f"package {str(ia.get('package_sha256'))[:12]} dirty={ia.get('teleop_dirty')}")
-    ok = ra.get("ok") and rb.get("ok")
+    # The cross-host code match is a gate like any other: a FAIL there is NOT READY.
+    ok = bool(ra.get("ok") and rb.get("ok") and (cm is None or cm.get("pass")))
     print("\nREADY" if ok else "\nNOT READY: fix the FAIL lines above before `grid run`")
     return 0 if ok else 1
 

@@ -3,7 +3,7 @@
 //! The 1 Hz snapshot path answers "how did this cell behave"; this module answers "where
 //! did a frame's latency go". They are complementary and both are written: the snapshots
 //! carry the scored metrics and the validity gates, while the CSVs here feed
-//! `examples/local_video/scripts/generate_frame_report.py` to produce a per-cell PDF.
+//! `teleop/grid/report/cell.py` to produce a per-cell PDF.
 //!
 //! Every timestamp recorded here is emitted by WebRTC itself and delivered over the SDK's
 //! [`publish_timing_events`] / [`subscribe_timing_events`] streams, rather than read from

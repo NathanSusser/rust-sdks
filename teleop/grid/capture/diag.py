@@ -49,8 +49,8 @@ if __package__ in (None, ""):   # pragma: no cover - `python3 path/to/diag.py`
 from . import (CODE_ROOT, file_size, is_qcsuper, list_procs, python_exe, read_json, spawn_detached, start_ticks,  # noqa: E402
                verify_pid, write_json_atomic)
 
-QCSUPER_REL = "archive/diag-capture/qcsuper-noroot-fast2"
-LOGOFF_REL = "archive/diag-capture/diag-log-off"
+QCSUPER_REL = "teleop/tools/diag/qcsuper-noroot-fast2"
+LOGOFF_REL = "teleop/tools/diag/diag-log-off"
 FIRST_BYTES_S = 20
 MAX_ATTEMPTS = 3
 CRC_RE = re.compile(r"(Wrong CRC).*")

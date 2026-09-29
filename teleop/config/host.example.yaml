@@ -4,9 +4,9 @@ peer: 192.168.99.2          # the other host on the PTP cable
 wwan_iface: wwan0
 ptp_iface: enp5s0
 ptp_role: master            # master on A, slave on B
-modem_index: 1              # mmcli -m <index>
+modem_index: 0              # mmcli -L lists it; on this rig both hosts show modem 0
 diag_tty: /dev/ttyUSB0
-diag_venv_python: /home/USER/code/rust-sdks/archive/diag-capture/venv/bin/python
+diag_venv_python: /home/USER/.local/share/teleop/diag-venv/bin/python   # B: wherever its qcsuper venv lives
 credentials_env: /home/USER/code/rust-sdks/.livekit-demo/.env
 tcpdump: "sudo -n /usr/bin/tcpdump"   # B: "/usr/bin/tcpdump" (setcap)
 results_root: /home/USER/teleop-runs

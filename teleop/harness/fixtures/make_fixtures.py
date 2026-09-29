@@ -6,7 +6,7 @@ be computed by hand and asserted exactly, rather than compared against whatever
 the parser happens to produce. The expected values are in test_parse_runs.py,
 derived independently of this file.
 
-Snapshot shape follows teleop-test-matrix/src/snapshot.rs exactly, including the
+Snapshot shape follows teleop/harness/src/snapshot.rs exactly, including the
 terminal `run_metadata` record — its absence is the incomplete-run signal, so one
 fixture deliberately omits it.
 

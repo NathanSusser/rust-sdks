@@ -8,7 +8,7 @@ with harness results. See README.md.
 
 Two repos, deliberately:
 
-  teleop-test-matrix/vmaf/   this wrapper and the exporter  (here)
+  teleop/harness/vmaf/   this wrapper and the exporter  (here)
   webrtc-vmaf/               LiveKit's tool, cloned separately, NOT vendored
 
 `--vmaf-repo` must point at your clone. Nothing here assumes where it lives.
