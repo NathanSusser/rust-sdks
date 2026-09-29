@@ -573,22 +573,24 @@ def gate_decoder_b(ctx: Ctx) -> dict:
     if codec == "av1" and not ((nvidia and nvcuvid) or dav1d):
         return result("decoder_b", False, "no AV1 decoder: need NVDEC (nvidia + libnvcuvid) or libdav1d", **data)
     if codec == "h265":
-        # libwebrtc ships no software H.265 decoder. B decodes it through the system
-        # FFmpeg on VA-API (webrtc-sys/src/ffmpeg, "VAAPI H265 Decoder"), which needs the
-        # decoder compiled into the subscriber, a DRM render node and libva/libavcodec.
+        # libwebrtc itself ships no H.265 decoder. B decodes it through the system FFmpeg
+        # (webrtc-sys/src/ffmpeg, "VAAPI H265 Decoder"): on VA-API when a render node and
+        # libva are present, otherwise FFmpeg's software HEVC decoder. Either needs the
+        # decoder compiled into the subscriber and libavcodec.
         binary = Path(ctx.cfg["repo"]) / "target" / "release" / "subscriber"
         try:
             built = b"VAAPI H265 Decoder" in binary.read_bytes()
         except OSError:
             built = False
-        render = bool(glob.glob("/dev/dri/renderD*"))
-        libs = "libva.so" in cache and "libavcodec.so" in cache
-        data |= {"vaapi_h265_built": built, "render_node": render, "libva_libavcodec": libs}
-        if not (nvidia and nvcuvid) and not (built and render and libs):
-            missing = [n for n, ok in (("decoder in subscriber", built), ("/dev/dri/renderD*", render),
-                                        ("libva+libavcodec", libs)) if not ok]
+        avcodec = "libavcodec.so" in cache
+        vaapi = bool(glob.glob("/dev/dri/renderD*")) and "libva.so" in cache
+        data |= {"ffmpeg_h265_built": built, "libavcodec": avcodec, "vaapi": vaapi}
+        if nvidia and nvcuvid:
+            return result("decoder_b", True, "h265 decodable (NVDEC)", **data)
+        if not (built and avcodec):
+            missing = [n for n, ok in (("FFmpeg H.265 decoder in subscriber", built), ("libavcodec", avcodec)) if not ok]
             return result("decoder_b", False, f"no H.265 decoder: missing {', '.join(missing)}", **data)
-        how = "NVDEC" if nvidia and nvcuvid else "VA-API via FFmpeg"
+        how = "FFmpeg on VA-API" if vaapi else "FFmpeg software (no VA-API render node/libva)"
         return result("decoder_b", True, f"h265 decodable ({how})", **data)
     how = "NVDEC" if nvidia and nvcuvid else "software"
     return result("decoder_b", True, f"{codec} decodable ({how})", **data)
