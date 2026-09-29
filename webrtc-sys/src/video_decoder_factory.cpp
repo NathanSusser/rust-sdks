@@ -39,6 +39,10 @@
 #include "nvidia/nvidia_decoder_factory.h"
 #endif
 
+#if defined(USE_FFMPEG_H265_DECODER)
+#include "ffmpeg/h265_decoder_impl.h"
+#endif
+
 namespace livekit_ffi {
 
 namespace {
@@ -70,7 +74,12 @@ bool IsInternalH264DecoderAvailable() {
 }  // namespace
 
 VideoDecoderFactory::VideoDecoderFactory()
-    : internal_h264_decoder_works_(IsInternalH264DecoderAvailable()) {
+    : internal_h264_decoder_works_(IsInternalH264DecoderAvailable()),
+#if defined(USE_FFMPEG_H265_DECODER)
+      ffmpeg_h265_decoder_works_(webrtc::FfmpegH265DecoderImpl::IsSupported()) {
+#else
+      ffmpeg_h265_decoder_works_(false) {
+#endif
 #ifdef __APPLE__
   factories_.push_back(livekit_ffi::CreateObjCVideoDecoderFactory());
 #endif
@@ -115,6 +124,13 @@ std::vector<webrtc::SdpVideoFormat> VideoDecoderFactory::GetSupportedFormats()
   formats.push_back(webrtc::SdpVideoFormat(
       webrtc::SdpVideoFormat::AV1Profile0(),
       webrtc::LibaomAv1EncoderSupportedScalabilityModes()));
+
+  // Fallback H265 decoder for hosts whose platform factories (e.g. NVDEC)
+  // do not already provide one.
+  const webrtc::SdpVideoFormat h265(webrtc::kH265CodecName);
+  if (ffmpeg_h265_decoder_works_ && !h265.IsCodecInList(formats)) {
+    formats.push_back(h265);
+  }
   return formats;
 }
 
@@ -176,6 +192,13 @@ std::unique_ptr<webrtc::VideoDecoder> VideoDecoderFactory::Create(
 #if defined(RTC_DAV1D_IN_INTERNAL_DECODER_FACTORY)
   if (absl::EqualsIgnoreCase(format.name, webrtc::kAv1CodecName)) {
     return webrtc::CreateDav1dDecoder();
+  }
+#endif
+
+#if defined(USE_FFMPEG_H265_DECODER)
+  if (absl::EqualsIgnoreCase(format.name, webrtc::kH265CodecName) &&
+      ffmpeg_h265_decoder_works_) {
+    return std::make_unique<webrtc::FfmpegH265DecoderImpl>();
   }
 #endif
 

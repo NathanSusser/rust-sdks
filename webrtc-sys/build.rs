@@ -310,6 +310,22 @@ fn main() {
                 }
             }
 
+            if x86 {
+                // H265 decode via the system FFmpeg (VA-API on Intel/AMD GPUs, software
+                // otherwise). Its libraries are dlopened at runtime, so only headers are
+                // needed here. -idirafter: searched last, so no other file picks them up.
+                println!("cargo:rerun-if-env-changed=LK_FFMPEG_INCLUDE_DIR");
+                if let Some(dir) = ffmpeg_include_dir() {
+                    builder
+                        .flag(format!("-idirafter{}", dir.display()))
+                        .file("src/ffmpeg/h265_decoder_impl.cpp")
+                        .flag("-DUSE_FFMPEG_H265_DECODER=1");
+                    println!("cargo:rustc-link-lib=dylib=dl");
+                } else {
+                    println!("cargo:warning=FFmpeg headers not found; building without the FFmpeg/VA-API H265 decoder (set LK_FFMPEG_INCLUDE_DIR)");
+                }
+            }
+
             builder
                 .flag("-Wno-changes-meaning")
                 .flag("-Wno-deprecated-declarations")
@@ -475,6 +491,17 @@ fn configure_android_sysroot(builder: &mut cc::Build) {
     let toolchain = webrtc_sys_build::android_ndk_toolchain().unwrap();
     let sysroot = toolchain.join("sysroot").canonicalize().unwrap();
     builder.flag(format!("-isysroot{}", sysroot.display()).as_str());
+}
+
+/// Directory holding the system FFmpeg's `libavcodec/` and `libavutil/` headers.
+fn ffmpeg_include_dir() -> Option<PathBuf> {
+    let candidates = env::var_os("LK_FFMPEG_INCLUDE_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(["/usr/include/x86_64-linux-gnu", "/usr/include"].map(PathBuf::from));
+    candidates.into_iter().find(|dir| {
+        dir.join("libavcodec/avcodec.h").exists() && dir.join("libavutil/hwcontext.h").exists()
+    })
 }
 
 fn add_lazy_load_so(builder: &mut cc::Build, name: &str, libraries: Vec<String>) {
