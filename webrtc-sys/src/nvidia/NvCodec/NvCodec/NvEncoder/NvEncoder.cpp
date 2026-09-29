@@ -718,7 +718,7 @@ bool NvEncoder::SetRates(uint32_t frameRate, uint32_t averageBitrate) {
   encodeConfig.rcParams.averageBitRate = averageBitrate;
   encodeConfig.rcParams.maxBitRate = averageBitrate;
   const uint64_t vbvBufferSize =
-      static_cast<uint64_t>(averageBitrate) * 5 / frameRate;
+      static_cast<uint64_t>(averageBitrate) * m_vbvFrames / frameRate;
   encodeConfig.rcParams.vbvBufferSize = static_cast<uint32_t>(
       std::min<uint64_t>(vbvBufferSize,
                          std::numeric_limits<uint32_t>::max()));

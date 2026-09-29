@@ -74,7 +74,29 @@ rm -f "$snap"
 # Override for a deliberate GCC-on comparison with LK_PIN_BITRATE_TO_MAX=0.
 export LK_PIN_BITRATE_TO_MAX="${LK_PIN_BITRATE_TO_MAX:-1}"
 export LK_MAX_START_BITRATE_KBPS="${LK_MAX_START_BITRATE_KBPS:-$cap}"
+
+# GEOMETRY FOLLOWS THE CAP, so every frame can be the same size: cap / 8 / fps bytes.
+# At a fixed 1600x1300 the encoder cannot make a frame smaller than ~2-5 kB even at its
+# floor quality (avg QP 50.4 of 51 at 512 kbps, 2026-09-29), so below ~2 Mbps WebRTC
+# dropped frames to stay under the pin: 512 kbps ran 8-12 fps at ~5 kB, 1000 kbps ran
+# 5 fps. Frame rate and frame size then both wandered. Holding bits-per-pixel fixed
+# instead keeps the budget reachable at every cap: 0.10 bpp is ~QP 32 on this clip
+# (8000 kbps at 1600x1300 = 0.128 bpp ran avg QP 29.6). The source's 1600:1300 shape is
+# kept, dimensions are floored to multiples of 16, and 1600x1300 is the ceiling.
+# WIDTH / HEIGHT / FPS / BPP override; setting WIDTH and HEIGHT skips the derivation.
+FPS="${FPS:-30}"
+BPP="${BPP:-0.10}"
+if [ -z "${WIDTH:-}" ] || [ -z "${HEIGHT:-}" ]; then
+  read -r WIDTH HEIGHT < <(awk -v k="$cap" -v f="$FPS" -v b="$BPP" 'BEGIN{
+    px = k*1000/(f*b); h = sqrt(px*1300/1600); w = h*1600/1300;
+    w = int(w/16)*16; h = int(h/16)*16;
+    if (w > 1600 || h > 1300) { w = 1600; h = 1300 }
+    if (w < 160) w = 160; if (h < 128) h = 128;
+    print w, h }')
+fi
+frame_kb=$(awk -v k="$cap" -v f="$FPS" 'BEGIN{printf "%.2f", k/8/f}')
 {
+  echo "geometry: ${WIDTH}x${HEIGHT}@${FPS} target ${frame_kb} kB/frame (cap ${cap}k / 8 / ${FPS} fps, bpp ${BPP})"
   echo "gcc-overrides: LK_PIN_BITRATE_TO_MAX=$LK_PIN_BITRATE_TO_MAX LK_MAX_START_BITRATE_KBPS=$LK_MAX_START_BITRATE_KBPS degradation=$DEGRADATION"
   echo "source: clip=$CLIP cap=${cap}k codec=$codec duration=${DURATION:-150}s"
   echo "sfu: url=$URL"   # read back from the variable actually passed to --url, never a literal
@@ -84,7 +106,7 @@ teleop-test-matrix/scripts/at-epoch.sh "$epoch" \
   env RUST_LOG="${RUST_LOG:-warn}" ./target/release/teleop-harness \
     --url "$URL" --room-name "$room" \
     --duration-s "${DURATION:-150}" --warmup-s 5 --codec "$codec" --encoder nvenc \
-    --width 1600 --height 1300 --fps 30 --max-bitrate $((cap * 1000)) \
+    --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --max-bitrate $((cap * 1000)) \
     --degradation "$DEGRADATION" \
     --camera-source "$CLIP" \
     --attach-timestamp --attach-frame-id --buffering-mode zero_jitter \

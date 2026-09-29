@@ -122,6 +122,14 @@ class NvEncoder {
   bool SetRates(uint32_t frameRate, uint32_t averageBitrate);
 
   /**
+   *  @brief  Sets how many frames of bitrate SetRates() sizes the VBV buffer
+   *  to. The VBV is the per-frame size cap under CBR: 1 holds every frame
+   *  near its own budget, N lets one frame spend N frames' worth. Takes
+   *  effect on the next SetRates(); 0 is treated as 1.
+   */
+  void SetVbvFrames(uint32_t frames) { m_vbvFrames = frames == 0 ? 1 : frames; }
+
+  /**
    *  @brief  This function is used to get the next available input buffer.
    *  Applications must call this function to obtain a pointer to the next
    *  input buffer. The application must copy the uncompressed data to the
@@ -495,6 +503,7 @@ class NvEncoder {
   void* m_hEncoder = nullptr;
   NV_ENCODE_API_FUNCTION_LIST m_nvenc;
   NV_ENC_INITIALIZE_PARAMS m_initializeParams = {};
+  uint32_t m_vbvFrames = 5;
   std::vector<NvEncInputFrame> m_vInputFrames;
   std::vector<NV_ENC_REGISTERED_PTR> m_vRegisteredResources;
   std::vector<NvEncInputFrame> m_vReferenceFrames;

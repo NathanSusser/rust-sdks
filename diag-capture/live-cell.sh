@@ -28,6 +28,14 @@ codec=${3:?codec required}
 DUR=${4:-300}
 LEAD=${5:-60}
 
+# publish-cell.sh falls back to the RETIRED h265 SFU and the robot clip when LK_URL and
+# CLIP are unset. On 2026-09-26 00:48Z that hostname no longer resolved and the cell died
+# before going live; on earlier nights it silently published the wrong clip to the wrong
+# SFU. paired-cell.sh passes both explicitly for exactly this reason. Same here: the
+# known-good values are the default, and whatever is used is printed below.
+export LK_URL="${LK_URL:-wss://livekit-figure-ai.apps.oai01.stc.edgeai.t-mobile.com}"
+export CLIP="${CLIP:-/home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4}"
+
 DIAG=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$DIAG/.." && pwd)
 D="$REPO/results/$label"

@@ -88,6 +88,7 @@ class NvidiaH264EncoderImpl : public VideoEncoder {
   void ReportError();
   bool has_reported_init_ = false;
   bool has_reported_error_ = false;
+  bool filler_ = false;
   webrtc::H264BitstreamParser h264_bitstream_parser_;
   const SdpVideoFormat format_;
   H264Profile profile_ = H264Profile::kProfileConstrainedBaseline;

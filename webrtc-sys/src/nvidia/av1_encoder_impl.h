@@ -83,6 +83,7 @@ class NvidiaAV1EncoderImpl : public VideoEncoder {
   void ReportError();
   bool has_reported_init_ = false;
   bool has_reported_error_ = false;
+  bool padding_ = false;
   bool sent_decodable_keyframe_ = false;
   std::vector<uint8_t> cached_sequence_header_obu_;
   ScalableVideoControllerNoLayering svc_controller_;

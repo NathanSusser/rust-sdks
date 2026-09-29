@@ -189,15 +189,28 @@ int32_t NvidiaAV1EncoderImpl::InitEncode(
   nv_encode_config_.rcParams.version = NV_ENC_RC_PARAMS_VER;
   nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
   nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
+  // Same frame-size controls as the H.264 path; see nvenc_rate_control.h.
+  const uint32_t vbv_frames = ReadNvencVbvFramesFromEnv();
+  encoder_->SetVbvFrames(vbv_frames);
   const uint64_t vbv_buffer_size =
       (static_cast<uint64_t>(nv_encode_config_.rcParams.averageBitRate) *
        nv_initialize_params_.frameRateDen /
        nv_initialize_params_.frameRateNum) *
-      5;
+      vbv_frames;
   nv_encode_config_.rcParams.vbvBufferSize =
       ClampToUint32(vbv_buffer_size);
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+  nv_encode_config_.rcParams.lowDelayKeyFrameScale = 1;
+  // AV1's counterpart of H.264 filler NALs is bitstream padding: pads each frame up to
+  // its CBR budget so frame size on the wire is constant.
+  padding_ = ReadNvencFillerFromEnv();
+  nv_encode_config_.encodeCodecConfig.av1Config.enableBitstreamPadding =
+      padding_ ? 1 : 0;
+  RTC_LOG(LS_INFO) << "NVENC AV1 frame-size cap: VBV " << vbv_frames
+                   << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
+                   << " bits, padding " << (padding_ ? "on" : "off")
+                   << ", keyframe scale 1";
 
   // See kNvencTargetQualityEnv. The target is on the 0-51 QP scale for every
   // codec -- NVENC maps it internally -- so it is NOT the AV1 qindex, and an
@@ -209,6 +222,8 @@ int32_t NvidiaAV1EncoderImpl::InitEncode(
     nv_encode_config_.rcParams.targetQuality = target_quality;
     nv_encode_config_.rcParams.targetQualityLSB = 0;
     nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
+    padding_ = false;
+    nv_encode_config_.encodeCodecConfig.av1Config.enableBitstreamPadding = 0;
     RTC_LOG(LS_INFO) << "NVENC AV1 rate control: VBR at target quality "
                      << static_cast<int>(target_quality) << " (QP scale), "
                      << "capped at " << configuration_.target_bps << " bps";
@@ -447,6 +462,9 @@ VideoEncoder::EncoderInfo NvidiaAV1EncoderImpl::GetEncoderInfo() const {
   info.implementation_name = "NVIDIA AV1 Encoder";
   info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
   info.is_hardware_accelerated = true;
+  // See the H.264 encoder: NVENC CBR holds frames to budget, so WebRTC's frame dropper
+  // would only discard frames ahead of the encoder.
+  info.has_trusted_rate_controller = true;
   info.supports_simulcast = false;
   info.preferred_pixel_formats = {VideoFrameBuffer::Type::kI420};
   return info;

@@ -226,13 +226,43 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   nv_encode_config_.rcParams.version = NV_ENC_RC_PARAMS_VER;
   nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
   nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
+  // See kNvencVbvFramesEnv. The VBV is the per-frame size cap; NvEncoder keeps
+  // the same depth so SetRates() does not silently restore a deeper buffer.
+  const uint32_t vbv_frames = ReadNvencVbvFramesFromEnv();
+  encoder_->SetVbvFrames(vbv_frames);
   nv_encode_config_.rcParams.vbvBufferSize =
       (nv_encode_config_.rcParams.averageBitRate *
        nv_initialize_params_.frameRateDen /
        nv_initialize_params_.frameRateNum) *
-      5;
+      vbv_frames;
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+  // Low-latency tuning defaults this to 2, letting an I frame take twice a P
+  // frame's bits even inside a single-frame VBV. Hold it at 1 so a keyframe
+  // is bounded like any other frame.
+  nv_encode_config_.rcParams.lowDelayKeyFrameScale = 1;
+
+  // See kNvencFillerEnv. Only meaningful under CBR; the quality-target VBR arm below
+  // lets size float on purpose, so filler is left off there.
+  filler_ = ReadNvencFillerFromEnv();
+  nv_encode_config_.encodeCodecConfig.h264Config.enableFillerDataInsertion =
+      filler_ ? 1 : 0;
+
+  // See kNvencIntraRefreshEnv.
+  const uint32_t intra_refresh = ReadNvencIntraRefreshFromEnv();
+  if (intra_refresh > 0) {
+    nv_encode_config_.encodeCodecConfig.h264Config.enableIntraRefresh = 1;
+    nv_encode_config_.encodeCodecConfig.h264Config.intraRefreshPeriod =
+        intra_refresh;
+    nv_encode_config_.encodeCodecConfig.h264Config.intraRefreshCnt =
+        std::max<uint32_t>(1, intra_refresh / 2);
+  }
+  RTC_LOG(LS_INFO) << "NVENC H264 frame-size cap: VBV " << vbv_frames
+                   << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
+                   << " bits, filler " << (filler_ ? "on" : "off")
+                   << ", keyframe scale 1, intra refresh "
+                   << (intra_refresh > 0 ? std::to_string(intra_refresh) + " frames"
+                                         : std::string("off"));
 
   // See kNvencTargetQualityEnv. VBR lets the bitrate float toward what the
   // target quantiser costs; maxBitRate keeps it inside the granted bitrate, and
@@ -243,6 +273,8 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
     nv_encode_config_.rcParams.targetQuality = target_quality;
     nv_encode_config_.rcParams.targetQualityLSB = 0;
     nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
+    filler_ = false;
+    nv_encode_config_.encodeCodecConfig.h264Config.enableFillerDataInsertion = 0;
     RTC_LOG(LS_INFO) << "NVENC H264 rate control: VBR at target quality "
                      << static_cast<int>(target_quality) << " (QP scale), "
                      << "capped at " << configuration_.target_bps << " bps";
@@ -426,6 +458,14 @@ VideoEncoder::EncoderInfo NvidiaH264EncoderImpl::GetEncoderInfo() const {
   info.implementation_name = "NVIDIA H264 Encoder";
   info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
   info.is_hardware_accelerated = true;
+  // NVENC's CBR holds every frame to its VBV budget, so WebRTC's own frame dropper has
+  // nothing to correct. Left untrusted, the dropper discarded frames BEFORE they reached
+  // the encoder whenever the budget sat below what the resolution could reach: 512 kbps
+  // at 1600x1300 encoded at avg QP 50.4 and still sent only 8-12 of 30 fps, with
+  // frames_encoded == frames_sent (nothing lost after encode). Trusted, the frame rate
+  // holds and a too-small budget shows up as oversized frames instead of missing ones --
+  // publish-cell.sh sizes the geometry to the cap so that does not happen.
+  info.has_trusted_rate_controller = true;
   info.supports_simulcast = false;
   info.preferred_pixel_formats = {VideoFrameBuffer::Type::kI420};
   return info;
