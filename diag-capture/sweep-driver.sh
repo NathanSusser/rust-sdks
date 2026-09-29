@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Anchored capacity-breakpoint sweep: find the bitrate where this link starts having issues.
 #
 # Operator's purpose, verbatim: "I want to pin it so I know when the network has issues at
@@ -92,7 +94,7 @@ DIAG_DIR=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$DIAG_DIR/.." && pwd)
 # deployment the ping and TTL rows would measure a host that is NOT in the media path and
 # report a perfectly healthy RTT while the actual SFU struggled. Set them with the URL or
 # treat those rows as void.
-SFU_HOST=${LK_SFU_HOST:-livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com}
+SFU_HOST=${LK_SFU_HOST:-${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}}
 SFU_MEDIA_IP=${LK_SFU_MEDIA_IP:-10.1.20.16}
 SFU_INGRESS_IP=${LK_SFU_INGRESS_IP:-10.1.20.21}
 ROOT="$REPO/results/$RUN"; mkdir -p "$ROOT"

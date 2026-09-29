@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Host B receive side for the overnight bitrate/codec sweep.
 #
 # Cells are addressed by EPOCH, and the room name is DISCOVERED at each epoch rather
@@ -10,7 +12,7 @@ set -uo pipefail
 cd /home/nsusser/code/rust-sdks
 set -a; . ./.livekit-demo/.env; set +a
 export SSL_CERT_FILE="$PWD/.livekit-demo/corp-ca.pem"
-LIVEKIT_URL="wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com"
+LIVEKIT_URL="wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}"
 export RUST_LOG=info
 
 # The subscriber writes one CSV row per GPU-RENDERED frame, so with no display it decodes

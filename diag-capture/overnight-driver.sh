@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Overnight bottleneck loop: repeated cells until END, every hop recorded on both hosts,
 # attributed per cycle, so the morning has an answer to "where is the bottleneck".
 #
@@ -25,7 +27,7 @@ night=$1; END_EPOCH=$2; CELL=${3:-600}; CAP=${4:-2000}
 H265_EVERY=${H265_EVERY:-3}; DIAG_EVERY=${DIAG_EVERY:-3}; MAX_FAILS=${MAX_FAILS:-3}; MIN_FREE_GB=${MIN_FREE_GB:-40}
 B=${B_HOST:-192.168.99.2}
 DIAG_DIR=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$DIAG_DIR/.." && pwd)
-SFU_HOST=livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com
+SFU_HOST=${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}
 ROOT="$REPO/results/24-overnight/$night"; mkdir -p "$ROOT"
 SUMMARY="$ROOT/summary.csv"
 [ -f "$SUMMARY" ] || echo "cycle,label,codec,diag,epoch,a_rc,b_done,pulled,collapse_s,b_frames_missing,b_pkts_lost,first_hops,a_probe_parallel_mbps,a_probe_single_mbps,b_probe_mbps,host_minus_utc_ms,qdisc_backlog_max,qdisc_backlog_s,dlf_records,note" > "$SUMMARY"

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # S2: which classifier before hop 3 lets ICMP skip the uplink queue that holds UDP?
 #
 # Pinned 2 Mbps H.264 (no backoff: the queue must grow or drop), a bigger dose (N parallel
@@ -13,7 +15,7 @@ set -uo pipefail
 [ $# -ge 3 ] || { echo "usage: $0 <label> <epoch> <duration_s>" >&2; exit 2; }
 label=$1 epoch=$2 dur=$3; N=${N:-12}
 DIAG_DIR=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$DIAG_DIR/.." && pwd)
-SFU_HOST=livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com
+SFU_HOST=${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}
 MEDIA=10.1.20.16
 out="$REPO/results/25-s2/$label"; mkdir -p "$out"; rm -f "$out/DONE"
 now=$(date -u +%s)

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Host B: run one instrumented cell and produce the paired PDF, in one command.
 #
 #   run-cell-b.sh <room> [duration_s]
@@ -26,7 +28,7 @@ A_RESULTS=${A_RESULTS:-}
 # Deployment. NOT defaulted to $LIVEKIT_URL: joining a different deployment with the same
 # room name succeeds SILENTLY and receives nothing, which is indistinguishable from a real
 # failure. Switching is an explicit act -- and Host A must be switched to match.
-URL=${LK_URL:-wss://livekit-figure-ai.apps.oai01.stc.edgeai.t-mobile.com}
+URL=${LK_URL:-wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}}
 
 # Capture windows must OUTLAST the cell. Sized from DUR rather than fixed, because a cell
 # that outruns its DIAG window leaves the last minute with no modem log and the report

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # The nine-cell codec x bitrate matrix on the new high-motion depal clip.
 #
 # 2 / 5 / 8 Mbps  x  H.264 / AV1 / H.265, nvenc, published A -> B, DIAG on BOTH hosts.
@@ -63,7 +65,7 @@ CLIP=${CLIP:-/home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-low
 export CLIP                       # publish-cell.sh reads this; long-run.sh only forwards the env
 
 DIAG_DIR=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$DIAG_DIR/.." && pwd)
-SFU_HOST=livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com
+SFU_HOST=${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}
 ROOT="$REPO/results/$RUN"; mkdir -p "$ROOT"
 SUMMARY="$ROOT/summary.csv"
 [ -f "$SUMMARY" ] || echo "n,label,codec,cap_kbps,diag,epoch,a_rc,b_done,pulled,pushed,dlf_records,host_minus_utc_ms,note" > "$SUMMARY"

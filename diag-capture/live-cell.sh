@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Run one live cell with the full instrument stack, and make the reduction anchor
 # IMPOSSIBLE to get wrong.
 #
@@ -33,7 +35,7 @@ LEAD=${5:-60}
 # before going live; on earlier nights it silently published the wrong clip to the wrong
 # SFU. paired-cell.sh passes both explicitly for exactly this reason. Same here: the
 # known-good values are the default, and whatever is used is printed below.
-export LK_URL="${LK_URL:-wss://livekit-figure-ai.apps.oai01.stc.edgeai.t-mobile.com}"
+export LK_URL="${LK_URL:-wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}}"
 export CLIP="${CLIP:-/home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4}"
 
 DIAG=$(cd "$(dirname "$0")" && pwd)

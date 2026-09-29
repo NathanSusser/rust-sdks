@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Publish one cell at an absolute epoch, with the environment loaded and a
 # liveness assertion on the other side of startup.
 #
@@ -33,7 +35,7 @@ REPO=/home/nsusser/code/rust-sdks
 # and is indistinguishable from a total-loss cell. Switching deployments must be an explicit
 # act by whoever runs the cell, so the default stays the one every campaign has used.
 #   LK_URL="$LIVEKIT_URL" publish-cell.sh ...
-URL="${LK_URL:-wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com}"
+URL="${LK_URL:-wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}}"
 # Source clip. Overridable per run: results depend on content as much as on bitrate --
 # the 2026-09-04 depal face-lower capture has 12.6x the frame-to-frame motion of the
 # default clip and wants ~2.8x the bitrate for the same quality, so every run logs which

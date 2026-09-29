@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # Host B half of a joint modem-DIAG test: capture Host B's modem log AROUND a
 # subscriber that receives Host A's cell, so both modem logs and both media logs
 # cover the same wall-clock window and can be joined afterwards.
@@ -76,7 +78,7 @@ outdir=${4:-$REPO/examples/local_video/scripts/results/diag-$room}
 #     LK_URL="$LIVEKIT_URL" receive-around-cell.sh ...
 # Host A must be switched to the SAME deployment in the same run, or both sides sit in
 # same-named rooms on different servers and every frame count is meaningless.
-URL="${LK_URL:-wss://livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com}"
+URL="${LK_URL:-wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}}"
 # Ping target, for the path RTT alongside the cell. Tied to the deployment: 10.1.20.21 is
 # an -h265 node, so it must be overridden whenever URL is, or the ping measures a host
 # that is not in the media path at all.

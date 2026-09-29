@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # S1: reproduce the 10 Sep spike with the queue located.
 #
 # Unpinned publisher (as on 10 Sep), the original uplink probe fired at epoch+120, and
@@ -12,7 +14,7 @@ set -uo pipefail
 [ $# -ge 3 ] || { echo "usage: $0 <label> <epoch> <duration_s>" >&2; exit 2; }
 label=$1 epoch=$2 dur=$3
 DIAG_DIR=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$DIAG_DIR/.." && pwd)
-SFU_HOST=livekit-release-livekit-server-figure-ai-h265.apps.oai01.stc.edgeai.t-mobile.com
+SFU_HOST=${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}
 out="$REPO/results/23-s1/$label"; mkdir -p "$out"; rm -f "$out/DONE"
 now=$(date -u +%s)
 [ "$epoch" -gt $((now + 45)) ] || { echo "epoch must be >= now+45" >&2; exit 2; }

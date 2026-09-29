@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SFU hostname lives outside the repo (public): ~/.config/teleop/sfu.env sets TELEOP_SFU_HOST.
+[ -f "$HOME/.config/teleop/sfu.env" ] && . "$HOME/.config/teleop/sfu.env"
 # ONE COMMAND: run a paired A/B cell with every instrument on both hosts, pull Host B's data
 # back, and verify the two sides describe the same cell.
 #
@@ -48,7 +50,7 @@ B=${B_HOST:-192.168.99.2}
 DIAG=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$DIAG/.." && pwd)
 D="$REPO/results/$label"
-URL="${LK_URL:-wss://livekit-figure-ai.apps.oai01.stc.edgeai.t-mobile.com}"
+URL="${LK_URL:-wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.config/teleop/sfu.env}}"
 CLIP="${CLIP:-/home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4}"
 B_REPO=${B_REPO:-'~/code/rust-sdks'}
 span=$(( LEAD + DUR + 25 ))
