@@ -207,10 +207,10 @@ int32_t NvidiaAV1EncoderImpl::InitEncode(
   padding_ = ReadNvencFillerFromEnv();
   nv_encode_config_.encodeCodecConfig.av1Config.enableBitstreamPadding =
       padding_ ? 1 : 0;
-  RTC_LOG(LS_INFO) << "NVENC AV1 frame-size cap: VBV " << vbv_frames
-                   << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
-                   << " bits, padding " << (padding_ ? "on" : "off")
-                   << ", keyframe scale 1";
+  RTC_LOG(LS_WARNING) << "NVENC AV1 frame-size cap: VBV " << vbv_frames
+                      << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
+                      << " bits, padding " << (padding_ ? "on" : "off")
+                      << ", keyframe scale 1";
 
   // See kNvencTargetQualityEnv. The target is on the 0-51 QP scale for every
   // codec -- NVENC maps it internally -- so it is NOT the AV1 qindex, and an
@@ -224,9 +224,9 @@ int32_t NvidiaAV1EncoderImpl::InitEncode(
     nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
     padding_ = false;
     nv_encode_config_.encodeCodecConfig.av1Config.enableBitstreamPadding = 0;
-    RTC_LOG(LS_INFO) << "NVENC AV1 rate control: VBR at target quality "
-                     << static_cast<int>(target_quality) << " (QP scale), "
-                     << "capped at " << configuration_.target_bps << " bps";
+    RTC_LOG(LS_WARNING) << "NVENC AV1 rate control: VBR at target quality "
+                        << static_cast<int>(target_quality) << " (QP scale), "
+                        << "capped at " << configuration_.target_bps << " bps";
   }
 
   try {

@@ -25,6 +25,7 @@ pub mod keyframe;
 pub mod probe;
 pub mod rtsp;
 pub mod run;
+pub mod run_json;
 pub mod sampler;
 pub mod session;
 pub mod snapshot;

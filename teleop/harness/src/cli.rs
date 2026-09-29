@@ -472,6 +472,17 @@ pub struct Args {
     #[arg(long = "publisher-seq-log")]
     pub publisher_seq_log: Option<std::path::PathBuf>,
 
+    // The cell manifest is filled from this file rather than from the requested
+    // parameters, because the two have disagreed: a run on 2026-09-29 was labelled
+    // 512 kbps but ran at 2500. See `crate::run_json` for when it is (re)written.
+    /// Destination for `run.json`: the encoder, geometry, frame rate, bitrate cap and codec
+    /// this run actually published with.
+    ///
+    /// Written atomically when the video track is published, with `encoder_implementation`
+    /// null if WebRTC has not reported it yet, and rewritten once a stats poll names it.
+    #[arg(long = "run-json")]
+    pub run_json: Option<std::path::PathBuf>,
+
     /// Publish only: do not open a second, local subscriber connection.
     ///
     /// The harness normally connects twice from one host, once to publish and once to

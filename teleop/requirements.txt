@@ -1,0 +1,4 @@
+# Host A only (reports and reduction). Host B needs nothing beyond the standard library.
+pyyaml==6.0.2
+numpy==1.26.4
+matplotlib==3.8.4

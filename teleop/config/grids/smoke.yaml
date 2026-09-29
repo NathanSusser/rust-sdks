@@ -1,0 +1,15 @@
+# One short cell: proves both hosts, captures, mirror, reduce and report end to end.
+id: smoke
+description: single 60 s H.264 cell at 2500 kbps
+defaults:
+  duration_s: 60
+  repeats: 1
+  lead_s: 45
+  cooldown_s: 10
+  clip: /home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4
+axes:
+  codec: [h264]
+  kbps: [2500]
+order: sequential
+expect:
+  band: n41

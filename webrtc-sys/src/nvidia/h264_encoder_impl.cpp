@@ -257,12 +257,12 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
     nv_encode_config_.encodeCodecConfig.h264Config.intraRefreshCnt =
         std::max<uint32_t>(1, intra_refresh / 2);
   }
-  RTC_LOG(LS_INFO) << "NVENC H264 frame-size cap: VBV " << vbv_frames
-                   << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
-                   << " bits, filler " << (filler_ ? "on" : "off")
-                   << ", keyframe scale 1, intra refresh "
-                   << (intra_refresh > 0 ? std::to_string(intra_refresh) + " frames"
-                                         : std::string("off"));
+  RTC_LOG(LS_WARNING) << "NVENC H264 frame-size cap: VBV " << vbv_frames
+                      << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
+                      << " bits, filler " << (filler_ ? "on" : "off")
+                      << ", keyframe scale 1, intra refresh "
+                      << (intra_refresh > 0 ? std::to_string(intra_refresh) + " frames"
+                                            : std::string("off"));
 
   // See kNvencTargetQualityEnv. VBR lets the bitrate float toward what the
   // target quantiser costs; maxBitRate keeps it inside the granted bitrate, and
@@ -275,9 +275,9 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
     nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
     filler_ = false;
     nv_encode_config_.encodeCodecConfig.h264Config.enableFillerDataInsertion = 0;
-    RTC_LOG(LS_INFO) << "NVENC H264 rate control: VBR at target quality "
-                     << static_cast<int>(target_quality) << " (QP scale), "
-                     << "capped at " << configuration_.target_bps << " bps";
+    RTC_LOG(LS_WARNING) << "NVENC H264 rate control: VBR at target quality "
+                        << static_cast<int>(target_quality) << " (QP scale), "
+                        << "capped at " << configuration_.target_bps << " bps";
   }
 
   try {

@@ -1,0 +1,39 @@
+# Pre-flight thresholds. Each gate in preflight.py reads its entry here.
+code_match:
+  require_same_commit: true
+  require_same_harness_sha256: true
+  require_same_requirements_sha256: true
+ptp_b:
+  carrier_up: true
+  link_speed_mbps: 1000
+  ptp4l_state: SLAVE
+  min_servo_lines_30s: 20
+  max_offset_ns: 10000
+ptp_a:
+  ptp4l_state: MASTER
+clock_offset:
+  warn_change_s: 1.0
+  min_servers: 2
+  max_spread_ms: 25
+diag_port:
+  lock_file_must_be_absent: true
+capture_leftovers:
+  processes: [tcpdump, qcsuper-noroot, hop-recorder, teleop-harness, subscriber]
+disk:
+  min_free_multiple_of_cell: 3
+  cell_bytes_estimate_per_s: 7000000     # ~2 GB per 300 s host-side
+modem:
+  require_attached: true
+  require_nr5g: true
+  band_must_match_expect: true
+sfu:
+  resolve: true
+  https_probe_timeout_s: 8
+room:
+  fail_on_stale_participant: true
+encoder:
+  require_nvenc: true
+decoder_b:
+  check_codec: true
+link_mtu:
+  min_path_mtu: 1280

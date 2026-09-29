@@ -1,0 +1,14 @@
+# Copy to ~/.config/teleop/host.yaml on each host and fill in. Never committed.
+role: a                     # a = publisher/orchestrator, b = subscriber
+peer: 192.168.99.2          # the other host on the PTP cable
+wwan_iface: wwan0
+ptp_iface: enp5s0
+ptp_role: master            # master on A, slave on B
+modem_index: 1              # mmcli -m <index>
+diag_tty: /dev/ttyUSB0
+diag_venv_python: /home/USER/code/rust-sdks/archive/diag-capture/venv/bin/python
+credentials_env: /home/USER/code/rust-sdks/.livekit-demo/.env
+tcpdump: "sudo -n /usr/bin/tcpdump"   # B: "/usr/bin/tcpdump" (setcap)
+results_root: /home/USER/teleop-runs
+display: ":0"               # B only: the subscriber renders here
+repo: /home/USER/code/rust-sdks

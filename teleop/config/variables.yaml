@@ -1,0 +1,77 @@
+# Every variable a grid may set. A grid file that names anything else is rejected.
+# `applies` says how the value reaches the run, so a label can only describe what ran.
+codec:
+  type: enum
+  values: [h264, av1, h265]
+  applies: harness --codec
+  note: h265 is admitted but its NVENC path has not been given the frame-size cap or padding
+kbps:
+  type: int
+  min: 128
+  max: 20000
+  applies: harness --max-bitrate (x1000) and LK_MAX_START_BITRATE_KBPS
+fps:
+  type: int
+  values: [30, 15, 12, 10]
+  applies: harness --fps
+geometry:
+  type: geometry            # "auto" or "WxH"
+  default: auto
+  applies: harness --width --height ; auto derives from kbps/fps/bpp (grid.derive_geometry)
+bpp:
+  type: float
+  min: 0.02
+  max: 0.5
+  default: 0.10
+  applies: geometry derivation only
+vbv_frames:
+  type: int
+  min: 1
+  max: 30
+  default: 1
+  applies: env LK_NVENC_VBV_FRAMES
+padding:
+  type: bool
+  default: true
+  applies: env LK_NVENC_FILLER (1/0)
+target_quality:
+  type: int_or_off          # off, or QP 1..51
+  default: off
+  applies: env LK_NVENC_TARGET_QUALITY (unset when off)
+intra_refresh:
+  type: int
+  min: 0
+  max: 600
+  default: 0
+  applies: env LK_NVENC_INTRA_REFRESH_FRAMES
+pin_bitrate:
+  type: bool
+  default: true
+  applies: env LK_PIN_BITRATE_TO_MAX (1/0)
+duration_s:
+  type: int
+  min: 30
+  max: 3600
+  default: 300
+  applies: harness --duration-s ; capture span = lead_s + duration_s + 30
+repeats:
+  type: int
+  min: 1
+  max: 20
+  default: 3
+  applies: grid expansion
+clip:
+  type: path
+  applies: harness --camera-source
+lead_s:
+  type: int
+  min: 20
+  max: 300
+  default: 60
+  applies: seconds between arming and the publish epoch
+cooldown_s:
+  type: int
+  min: 0
+  max: 600
+  default: 30
+  applies: gap after a cell closes before the next pre-flight

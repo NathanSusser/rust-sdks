@@ -38,9 +38,17 @@ lazy_static! {
 fn ensure_log_sink() {
     let mut log_sink = LOG_SINK.lock();
     if log_sink.is_none() {
-        *log_sink = Some(sys_rtc::ffi::new_log_sink(|msg, _| {
+        *log_sink = Some(sys_rtc::ffi::new_log_sink(|msg, severity| {
             let msg = msg.strip_suffix("\r\n").or(msg.strip_suffix('\n')).unwrap_or(&msg);
-            log::debug!(target: "libwebrtc", "{}", msg);
+            // Warnings and errors keep their severity so they survive `RUST_LOG=warn`;
+            // everything below that stays at debug, as libwebrtc's info output is verbose.
+            if severity == sys_rtc::ffi::LoggingSeverity::Error {
+                log::error!(target: "libwebrtc", "{}", msg);
+            } else if severity == sys_rtc::ffi::LoggingSeverity::Warning {
+                log::warn!(target: "libwebrtc", "{}", msg);
+            } else {
+                log::debug!(target: "libwebrtc", "{}", msg);
+            }
         }));
     }
 }

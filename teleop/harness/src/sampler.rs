@@ -196,6 +196,10 @@ pub struct StatsSampler {
     audio_track: Option<LocalAudioTrack>,
     subscriber_room: Option<Arc<Room>>,
     shutdown: Arc<AtomicBool>,
+    /// Completed from the first poll that names the encoder. Held here rather than in a
+    /// task of its own because this is the one place that already reads the outbound
+    /// stats, and it is off the media path.
+    run_json: Option<crate::run_json::RunJsonWriter>,
 }
 
 impl StatsSampler {
@@ -222,11 +226,18 @@ impl StatsSampler {
             audio_track,
             subscriber_room,
             shutdown,
+            run_json: None,
         }
     }
 
+    /// Hands the sampler the `run.json` writer to complete once the encoder is reported.
+    pub fn with_run_json(mut self, run_json: Option<crate::run_json::RunJsonWriter>) -> Self {
+        self.run_json = run_json;
+        self
+    }
+
     /// Samples until the run duration elapses.
-    pub async fn run(self) -> SamplerResult {
+    pub async fn run(mut self) -> SamplerResult {
         let mut budget =
             PollBudget::new(self.args.stats_interval(), self.args.poll_overbudget_multiplier);
         let mut video_budget =
@@ -263,8 +274,11 @@ impl StatsSampler {
             if snapshot.video_in.is_some() {
                 result.saw_subscription = true;
             }
-            if snapshot.video_out.is_some() {
+            if let Some(out) = snapshot.video_out.as_ref() {
                 result.saw_outbound_video = true;
+                if let Some(run_json) = self.run_json.as_mut().filter(|w| w.is_pending()) {
+                    run_json.observe(out);
+                }
             }
 
             match snapshot.to_jsonl() {

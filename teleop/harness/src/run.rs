@@ -398,6 +398,24 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
     let video_source = VideoSourceRecord::of(&source);
     let (width, height) = (source.width(), source.height());
     let mut video = session::publish_video(&pub_room, &args, width, height).await?;
+    // Written the moment the track is published, before any frame is fed, so it costs the
+    // media path nothing and still exists if the run dies before its first stats poll.
+    let run_json = args.run_json.clone().map(|path| {
+        crate::run_json::RunJsonWriter::start(
+            path,
+            crate::run_json::RunJson {
+                encoder_implementation: None,
+                width: video.width,
+                height: video.height,
+                fps: args.fps,
+                max_bitrate_bps: args.max_bitrate,
+                codec: args.codec.as_str().to_owned(),
+                started_at: crate::clock::unix_micros() as f64 / 1e6,
+                room: args.room_name.clone(),
+                identity: publisher_identity.clone(),
+            },
+        )
+    });
     let audio =
         if args.audio { Some(session::publish_audio(&pub_room, &args).await?) } else { None };
 
@@ -521,7 +539,8 @@ pub async fn execute(args: Args) -> Result<RunOutcome, RunError> {
         audio.as_ref().map(|a| a.track.clone()),
         sub_room.clone(),
         Arc::clone(&shutdown),
-    );
+    )
+    .with_run_json(run_json);
     let sampler_result = sampler.run().await;
 
     shutdown.store(true, Ordering::Release);
