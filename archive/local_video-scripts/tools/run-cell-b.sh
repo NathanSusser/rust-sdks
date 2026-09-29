@@ -166,9 +166,32 @@ on_interrupt() {
   trap '' INT TERM HUP
   say "interrupted -- stopping DIAG, hops-b and the pcap wrapper (tcpdump runs to its deadline)"
   stop_diag; release_pcap_lock; kill -TERM "${HOP_PID:-}" 2>/dev/null
+  sleep 6   # let DIAG close its file before it is shipped
+  ship
   exit 130
 }
 trap on_interrupt INT TERM HUP
+
+# Operator policy since 2026-09-29: Host A stores everything, B keeps nothing after a run.
+# Hands this cell's directory and this run's capture files to ship-to-a.sh, detached: it
+# waits for tcpdump to close the pcap, copies to A, verifies every sha256, then deletes
+# B's copy. On any failure B's copy stays and ~/teleop/ship.log says FAILED.
+ship() {
+  local dest=${A_RESULTS:-} f t extra=()
+  [ -n "$dest" ] || dest=$(timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 "$A_HOST" \
+                             "echo \$HOME/code/rust-sdks/results/$ROOM" 2>/dev/null)
+  if [ -z "$dest" ]; then
+    say "SHIP FAILED: Host A unreachable -- data stays on B in $CELL"; return
+  fi
+  for f in "$HOME"/diag-logs/"$ROOM"-* "$HOME"/pcap-logs/"$ROOM"-*; do
+    [ -f "$f" ] || continue
+    # Birth time, same clock as ARM_T (the name stamps are true UTC now, not host time).
+    t=$(stat -c %W "$f" 2>/dev/null); [ "${t:-0}" -ge "$ARM_T" ] && extra+=("$f")
+  done
+  say "shipping to $A_HOST:$dest/hostb -- B's copy is deleted once every file verifies (log: ~/teleop/ship.log)"
+  setsid nohup "$SCRIPTS/tools/ship-to-a.sh" "$ROOM" "$CELL" "$A_HOST" "$dest/hostb" "${extra[@]}" \
+    >/dev/null 2>&1 </dev/null &
+}
 # Host B's receive-side recorder: qdisc, driver counters, PER-SOCKET UDP drops, and the radio
 # (rsrp/rsrq/snr via mmcli, unprivileged). Until 2026-09-22 Host B recorded NO radio metrics at
 # all, so cell5m-a's +8 dB step on Host A could not be checked against this host -- a one-host
@@ -263,6 +286,8 @@ if [ "$armed" != 1 ]; then
   if [ "${FORCE:-0}" != 1 ]; then
     trap - INT TERM HUP
     stop_diag; release_pcap_lock; kill -TERM "$HOP_PID" 2>/dev/null
+    sleep 6
+    ship
     exit 1
   fi
 fi
@@ -482,10 +507,7 @@ d=open('$PDF','rb').read()
 print(len(re.findall(rb'/Type\s*/Page[^s]', d)))" 2>/dev/null)
   rows=$(( $(wc -l < "$CELL/subscriber.csv" 2>/dev/null || echo 1) - 1 ))
   say "REPORT: $PDF ($(stat -c %s "$PDF") bytes, ${pages} pages, ${rows} frames)"
-  ln -sfn "$CELL" ~/teleop/latest-cell
-  echo
-  echo "  ==> $PDF"
-  echo "  ==> also at ~/teleop/latest-cell/"
 else
-  say "REPORT FAILED -- artefacts are in $CELL"
+  say "REPORT FAILED"
 fi
+ship
