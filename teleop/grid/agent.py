@@ -115,18 +115,22 @@ class Agent:
 
     # ------------------------------------------------------------ identity
     def identity(self, args: dict) -> dict:
-        def git(*a):
+        def git(where: Path, *a):
             try:
-                r = subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True, text=True, timeout=10)
+                r = subprocess.run(["git", "-C", str(where), *a], capture_output=True, text=True, timeout=10)
                 return r.stdout.strip() if r.returncode == 0 else None
             except (OSError, subprocess.TimeoutExpired):
                 return None
         import yaml  # noqa: PLC0415
         rel = self.repo / "target" / "release"
+        # `commit` identifies the code this agent is running -- the checkout this
+        # module lives in, which on Host B may be a worktree separate from
+        # cfg["repo"], where the subscriber binary and credentials live.
         return {
             "ok": True, "role": self.role,
-            "commit": git("rev-parse", "HEAD"),
-            "teleop_dirty": bool(git("status", "--porcelain", "--", "teleop")),
+            "commit": git(TELEOP_DIR, "rev-parse", "HEAD"),
+            "binaries_repo_commit": git(self.repo, "rev-parse", "HEAD"),
+            "teleop_dirty": bool(git(TELEOP_DIR, "status", "--porcelain", "--", str(TELEOP_DIR))),
             "harness_sha256": sha256_or_none(rel / "teleop-harness"),
             "subscriber_sha256": sha256_or_none(rel / "subscriber"),
             "requirements_sha256": sha256_or_none(TELEOP_DIR / "requirements.txt"),

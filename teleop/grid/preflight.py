@@ -650,7 +650,12 @@ def code_match(a: dict, b: dict, gates: dict | None = None) -> dict:
               ("harness_sha256", g.get("require_same_harness_sha256", True)),
               ("requirements_sha256", g.get("require_same_requirements_sha256", True)),
               ("package_sha256", True)]
+    # The harness binary exists only on the publisher; B runs the subscriber. Compare the
+    # harness hash only when both hosts report one, so the gate checks code identity
+    # (commit, package, requirements) rather than demanding a binary B never builds.
     diffs = [f"{k}: A {str(a.get(k))[:12]} != B {str(b.get(k))[:12]}" for k, req in checks
-             if req and (a.get(k) != b.get(k) or not a.get(k))]
+             if req and not (k == "harness_sha256" and (a.get(k) is None or b.get(k) is None))
+             and (a.get(k) != b.get(k) or not a.get(k))]
     return result("code_match", not diffs, "; ".join(diffs) if diffs else
-                  f"commit {str(a.get('commit'))[:8]}, harness, requirements and package identical")
+                  f"commit {str(a.get('commit'))[:8]}, package and requirements identical"
+                  + ("" if a.get("harness_sha256") and b.get("harness_sha256") else " (harness on A only)"))
