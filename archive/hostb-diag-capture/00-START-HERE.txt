@@ -1,0 +1,33 @@
+TELEOP 5G VIDEO TESTING - START HERE                      Host B (subscriber side)
+
+  reports/      EVERY report in one place. All paired PDFs (publisher + subscriber
+                merged, one per run) and the two HTML summary pages. Filenames are
+                <campaign>__<run>.pdf, so sorting by name groups them by date.
+                  - the two HTML pages are the readable summaries; open these first
+                  - *-paired.pdf is a single run: latency chart, stage table, funnel
+
+  archive/      All results, organised one folder per campaign, date first:
+                  2026-09-08_phase-a-codec-and-vbr     codec/VBR comparison
+                  2026-09-10_overnight-ladder          the bitrate ladder + the joint
+                                                       10 Sep run (uploads caused the spikes)
+                  2026-09-10_vbr-and-motion            VBR modes and the motion clip
+                  2026-09-15_s1-s3-queue-experiments   where the latency spike queue lives
+                  2026-09-15_overnight-53-cycles       the overnight loop, 53 cycles
+                  2026-09-15_live-watch-2mbps          watched live, 2 Mbps
+                  2026-09-15_bitrate-10mbps            10 Mbps: more bitrate, fewer hitches
+                  2026-09-16_depal-8mbps-new-clip      8 Mbps, high-motion clip
+                  modem-logs-dlf/                      capture logs (raw captures deleted 16 Sep)
+                  reports-and-shared/                  the partner-facing bundle
+                  misc-early-bringup/                  early bring-up runs
+                archive/00-INDEX.txt describes every folder: dates, what was tested,
+                and what was deleted on 2026-09-16 with the consequences.
+
+  new-runs/     Live drop point. New runs write here and Host A pushes its publisher
+                files to new-runs/<label>/hosta/. Runs move into archive/ once both
+                hosts have pulled.
+
+  latest-run/   The most recent run (currently the 8 Mbps high-motion cell, 16 Sep).
+
+  source-clips/ The video clips published in the tests.
+
+Host A mirrors this layout at the same paths.

@@ -1,0 +1,53 @@
+#!/home/nsusser/diag-capture/venv/bin/python
+# Run QCSuper as the invoking user (needs `dialout` for /dev/ttyUSB*).
+#
+# QCSuper scans /proc for ModemManager and re-executes itself via pkexec/sudo
+# when it cannot read MM's fd table (MM runs as root). Under a desktop session
+# that means a hidden graphical password prompt and a silent hang. On this host
+# MM already ignores the DIAG port (`mmcli -m 0` shows "ttyUSB0 (ignored)"), so
+# the scan is skipped. Check that before using this on another host.
+import os
+import sys
+
+os.environ.pop('DISPLAY', None)  # any residual escalation goes to sudo and fails fast
+
+from qcsuper.inputs.usb_modem_pyserial import UsbModemPyserialConnector
+from qcsuper.main import main
+
+UsbModemPyserialConnector.detect_diag_interference = lambda self, *a, **k: None
+
+# This firmware emits log traffic under DIAG opcode 158, which QCSuper does not
+# know. It falls through to dispatch_diag_response, and if QCSuper is waiting on a
+# command reply at that moment (startup mask setup, shutdown mask clear) it reports
+# "unmatched response received: 158" and exits -- killing the capture at startup
+# (seen 3 of ~12 starts on 2026-09-15). These frames never reached the DLF anyway,
+# so dropping them loses nothing; count them so the loss stays visible.
+import atexit
+from qcsuper.inputs._base_input import BaseInput
+
+_dispatch_response = BaseInput.dispatch_diag_response
+_dropped_158 = [0]
+
+
+def _dispatch_response_skip_158(self, unframed_diag_packet):
+    if unframed_diag_packet and unframed_diag_packet[0] == 158:
+        _dropped_158[0] += 1
+        return
+    return _dispatch_response(self, unframed_diag_packet)
+
+
+BaseInput.dispatch_diag_response = _dispatch_response_skip_158
+
+# QCSuper clears the log mask on shutdown one log type at a time, each a send_recv
+# that waits 5 s x 4 tries for a reply. Under full-mask load the reader is CPU-bound
+# and the replies are lost, so shutdown outlasts capture.sh's 30 s grace and gets
+# SIGKILLed (S1, 2026-09-15). Before the 158 hook a stray frame aborted that wait by
+# accident. capture.sh always runs diag-log-off, which clears the mask with a drain
+# and verifies silence, so skip QCSuper's attempt and exit promptly.
+from qcsuper.modules._enable_log_mixin import EnableLogMixin
+
+EnableLogMixin.on_deinit = lambda self: None
+atexit.register(lambda: print(f'qcsuper-noroot: dropped {_dropped_158[0]} opcode-158 frames', file=sys.stderr))
+
+if __name__ == '__main__':
+    sys.exit(main())

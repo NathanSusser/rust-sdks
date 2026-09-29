@@ -1,0 +1,86 @@
+#!/home/nsusser/diag-capture/venv/bin/python
+# PROTOTYPE -- not used by capture.sh. Same as qcsuper-noroot, but instead of
+# dropping DIAG opcode-158 frames it tries to decode them as wrapped log records
+# and writes the ones that validate to a SEPARATE DLF ($QCSUPER_158_DLF), so they
+# can be compared against the main DLF before anyone trusts them.
+#
+# Observed opcode-158 layout on RM520NGLAAR03A04M4G (payload after the opcode):
+#   01 c2 00 01 00 00 00 | 01 01 00 00 | seq (4) | 00 00 00 00 | inner log record
+# where the inner record is the usual DLF record: uint16 len, uint16 code,
+# uint64 timestamp, payload. Unverified beyond a handful of frames, hence the
+# strict length check and the side file.
+import atexit
+import os
+import sys
+from struct import unpack_from
+
+os.environ.pop('DISPLAY', None)
+
+from qcsuper.inputs._base_input import BaseInput
+from qcsuper.inputs.usb_modem_pyserial import UsbModemPyserialConnector
+from qcsuper.main import main
+
+UsbModemPyserialConnector.detect_diag_interference = lambda self, *a, **k: None
+
+INNER_OFFSET = 19
+side_path = os.environ.get('QCSUPER_158_DLF')
+side = open(side_path, 'ab') if side_path else None
+stats = {'frames': 0, 'decoded': 0, 'short': 0, 'bad_len': 0, 'bad_code': 0, 'dumped': 0}
+codes = {}
+
+_dispatch_response = BaseInput.dispatch_diag_response
+
+
+def _dispatch_response_158(self, pkt):
+    if not pkt or pkt[0] != 158:
+        return _dispatch_response(self, pkt)
+    stats['frames'] += 1
+    payload = pkt[1:]
+    if stats['dumped'] < 5:
+        stats['dumped'] += 1
+        print(f'op158 raw[{len(payload)}]: {payload[:48].hex(" ")}', file=sys.stderr)
+    inner = payload[INNER_OFFSET:]
+    if len(inner) < 12:
+        stats['short'] += 1
+        return
+    # A frame may carry several records back to back (Host A: 25% of failed
+    # frames were longer than their first record). Walk them; stop at the first
+    # record whose length does not fit, and never write a partial one.
+    off = n = 0
+    while off + 12 <= len(inner):
+        ln, code = unpack_from('<HH', inner, off)
+        if ln < 12 or off + ln > len(inner):
+            stats['bad_len'] += 1
+            break
+        if not 0x1000 <= code <= 0xFFFF:
+            stats['bad_code'] += 1
+            break
+        stats['decoded'] += 1
+        codes[code] = codes.get(code, 0) + 1
+        if side:
+            side.write(inner[off:off + ln])
+        off += ln
+        n += 1
+    stats['multi'] = stats.get('multi', 0) + (n > 1)
+    if off != len(inner):
+        stats['trailing_bytes'] = stats.get('trailing_bytes', 0) + (len(inner) - off)
+
+
+BaseInput.dispatch_diag_response = _dispatch_response_158
+
+# Same shutdown fix as qcsuper-noroot: diag-log-off clears the mask afterwards.
+from qcsuper.modules._enable_log_mixin import EnableLogMixin
+
+EnableLogMixin.on_deinit = lambda self: None
+
+
+@atexit.register
+def _report():
+    if side:
+        side.close()
+    top = ' '.join(f'{c:#06x}:{n}' for c, n in sorted(codes.items(), key=lambda kv: -kv[1])[:15])
+    print(f'qcsuper-noroot-158dlf: {stats}; top codes: {top}', file=sys.stderr)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

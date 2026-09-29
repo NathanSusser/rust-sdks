@@ -86,3 +86,10 @@ overnight-2026-09-10/**
 # Runtime flock for the DIAG serial port, created per cell by hop-recorder.sh,
 # capture-around-cell.sh and test-qcsuper-build.sh. Zero-byte lock state, not source.
 /diag-capture/.ttyUSB0.lock
+
+# Python venvs (the DIAG toolchain venv moved with archive/diag-capture)
+**/venv/
+# runtime leftovers of the archived DIAG toolchain
+archive/diag-capture/.ttyUSB0.lock
+archive/diag-capture/logs/
+archive/diag-capture/*.bin

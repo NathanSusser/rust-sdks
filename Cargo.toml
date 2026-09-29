@@ -21,7 +21,7 @@ members = [
     "device-info",
     "webrtc-sys",
     "webrtc-sys/build",
-    "teleop-test-matrix",
+    "teleop/harness",
 
     "examples/agent_dispatch",
     "examples/api",

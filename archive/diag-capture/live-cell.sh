@@ -66,7 +66,7 @@ kill -0 "$rec" 2>/dev/null || { echo "recorder died before the cell started:" >&
 # never passed it on, so a cell requested as 300 s recorded for 380 s and PUBLISHED for 150,
 # and the only sign was "duration=150s" in a log line nobody reads until afterwards. The
 # recorder span and the cell length must come from the same variable or they drift apart.
-DURATION="$DUR" "$REPO/teleop-test-matrix/scripts/publish-cell.sh" "$epoch" "$label" "$cap" "$codec" "$D" || {
+DURATION="$DUR" "$REPO/archive/teleop-test-matrix-scripts/publish-cell.sh" "$epoch" "$label" "$cap" "$codec" "$D" || {
   echo "cell did not go LIVE" >&2; kill -TERM "$rec" 2>/dev/null; exit 1; }
 
 echo "== cell live; waiting for recorder to finish its ${span}s span =="

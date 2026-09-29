@@ -104,7 +104,7 @@ frame_kb=$(awk -v k="$cap" -v f="$FPS" 'BEGIN{printf "%.2f", k/8/f}')
   echo "sfu: url=$URL"   # read back from the variable actually passed to --url, never a literal
 } > "$log"
 
-teleop-test-matrix/scripts/at-epoch.sh "$epoch" \
+archive/teleop-test-matrix-scripts/at-epoch.sh "$epoch" \
   env RUST_LOG="${RUST_LOG:-warn}" ./target/release/teleop-harness \
     --url "$URL" --room-name "$room" \
     --duration-s "${DURATION:-150}" --warmup-s 5 --codec "$codec" --encoder nvenc \

@@ -1,0 +1,162 @@
+#!/home/nsusser/diag-capture/venv/bin/python
+# CANDIDATE replacement for qcsuper-noroot (not used by capture.sh until measured).
+#
+# Everything qcsuper-noroot does (rootless, no DISPLAY, prompt shutdown), plus:
+#  1. READER SPEED. QCSuper reads the serial port ONE BYTE per call and grows the
+#     frame with bytes +=, pinning a core at full mask (99.7% even on an idle
+#     link) and losing ~30% of frames to truncation. Read whatever is waiting and
+#     split on 0x7e instead. Also drop the eager repr()/debug formatting done for
+#     every bad frame and every log record.
+#  2. OPCODE 158. This firmware sends a disjoint half of the NR5G log set wrapped
+#     in opcode 158 (inner record at payload offset 19). Decode it and hand each
+#     record to the normal log path, so it lands in the DLF like any other.
+#  3. DLF RECORD SPLITTING. One DIAG_LOG_F frame can carry records back to back;
+#     QCSuper wrote them as ONE record under the first record's length
+#     ("Dismissing log type ... indicating size X instead of Y"), leaving
+#     misaligned bytes in the DLF. Split on declared lengths; never write a
+#     record whose length does not fit.
+#  4. QCSUPER_NR5G_ONLY=1 limits the log mask to codes 0xB800-0xB9FF.
+import atexit
+import os
+import sys
+from logging import error, warning
+from struct import pack, unpack_from
+from time import time
+
+os.environ.pop('DISPLAY', None)
+
+from qcsuper.inputs._base_input import BaseInput
+from qcsuper.inputs._hdlc_mixin import HdlcMixin
+from qcsuper.inputs.usb_modem_pyserial import UsbModemPyserialConnector
+from qcsuper.modules._enable_log_mixin import EnableLogMixin
+from qcsuper.modules.dlf_dump import DlfDumper
+from qcsuper.main import main
+
+UsbModemPyserialConnector.detect_diag_interference = lambda self, *a, **k: None
+
+# diag-log-off clears the mask after every capture; QCSuper's own per-type clear
+# waits 5 s x 4 per log type for replies lost under load.
+EnableLogMixin.on_deinit = lambda self: None
+
+stats = {'frames': 0, 'bad_crc': 0, 'op158_frames': 0, 'op158_records': 0, 'op158_bad': 0,
+         'dlf_records': 0, 'dlf_split_frames': 0, 'dlf_dropped_bytes': 0}
+
+TRAILER = 0x7E
+ESC_TRAILER = b'\x7d\x5e'
+ESC_ESC = b'\x7d\x5d'
+
+
+def _hdlc_decapsulate(self, payload):
+    if len(payload) < 3:
+        raise self.InvalidFrameError
+    payload = payload[:-1]
+    if 0x7D in payload:
+        payload = payload.replace(ESC_TRAILER, b'\x7e').replace(ESC_ESC, b'\x7d')
+    if payload[-2:] != pack('<H', self.ccitt_crc16(payload[:-2])):
+        stats['bad_crc'] += 1
+        warning('Ignoring (partial?) frame: Wrong CRC')
+        raise self.InvalidFrameError
+    return payload[:-2]
+
+
+HdlcMixin.hdlc_decapsulate = _hdlc_decapsulate
+
+
+def _read_loop(self):
+    ser = self.serial
+    buf = bytearray()
+    while True:
+        try:
+            chunk = ser.read(ser.in_waiting or 1)
+            assert chunk
+        except Exception:
+            error('\nThe serial port was closed or preempted by another process.')
+            exit()
+        buf += chunk
+        start = 0
+        while True:
+            end = buf.find(TRAILER, start)
+            if end < 0:
+                break
+            raw = bytes(buf[start:end + 1])
+            start = end + 1
+            if len(raw) == 1:  # empty frame between two trailers
+                continue
+            stats['frames'] += 1
+            try:
+                msg = self.hdlc_decapsulate(payload=raw)
+            except self.InvalidFrameError:
+                continue
+            finally:
+                self.received_first_packet = True
+            self.dispatch_received_diag_packet(msg)
+        if start:
+            del buf[:start]
+
+
+UsbModemPyserialConnector.read_loop = _read_loop
+
+
+def _dispatch_diag_log(self, log_type, log_payload, log_header, timestamp):
+    for module in self.modules:
+        on_log = getattr(module, 'on_log', None)
+        if on_log:
+            on_log(log_type, log_payload, log_header, timestamp)
+
+
+BaseInput.dispatch_diag_log = _dispatch_diag_log
+
+_dispatch_response = BaseInput.dispatch_diag_response
+OP158_INNER = 19
+
+
+def _dispatch_response_158(self, pkt):
+    if not pkt or pkt[0] != 158:
+        return _dispatch_response(self, pkt)
+    stats['op158_frames'] += 1
+    inner = pkt[1 + OP158_INNER:]
+    off = 0
+    while off + 12 <= len(inner):
+        ln, code = unpack_from('<HH', inner, off)
+        if ln < 12 or off + ln > len(inner) or code < 0x1000:
+            stats['op158_bad'] += 1
+            break
+        stats['op158_records'] += 1
+        self.dispatch_diag_log(code, inner[off + 12:off + ln], inner[off:off + 12], time())
+        off += ln
+
+
+BaseInput.dispatch_diag_response = _dispatch_response_158
+
+
+def _dlf_on_log(self, log_type, log_payload, log_header, timestamp=0):
+    rec = log_header + log_payload
+    off = 0
+    n = 0
+    while off + 12 <= len(rec):
+        ln = unpack_from('<H', rec, off)[0]
+        if ln < 12 or off + ln > len(rec):
+            break
+        self.dlf_file.write(rec[off:off + ln])
+        stats['dlf_records'] += 1
+        off += ln
+        n += 1
+    if n > 1:
+        stats['dlf_split_frames'] += 1
+    if off != len(rec):
+        stats['dlf_dropped_bytes'] += len(rec) - off
+
+
+DlfDumper.on_log = _dlf_on_log
+
+if os.environ.get('QCSUPER_NR5G_ONLY') == '1':
+    DlfDumper.limit_registered_logs = frozenset(range(0xB800, 0xBA00))
+
+
+@atexit.register
+def _report():
+    print(f'qcsuper-noroot-fast: {stats}', file=sys.stderr)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

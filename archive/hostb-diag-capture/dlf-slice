@@ -1,0 +1,82 @@
+#!/home/nsusser/diag-capture/venv/bin/python
+"""Cut a time window (and optionally a set of log codes) out of a DLF, on record
+boundaries only, into a new DLF. Non-destructive: the source is only read.
+
+Record acceptance is dlf-check's rule (length fits, plausible code, next record
+parses; otherwise resync), so a slice never starts or ends mid-record and never
+carries misaligned bytes.
+
+Time is the record's modem timestamp, converted as dlf_timeline.py does:
+    t = (ts >> 16) * 1.25 ms + (ts & 0xFFFF) / 32768 * 1.25 ms + GPS epoch
+This is DLF (modem/network) time, NOT host time. Map host time to it with the
+capture's measured offset (e.g. S2 on Host B: dlf = host + 4.64 s).
+
+Usage: dlf-slice SRC.dlf OUT.dlf T_START T_END [CODE ...]
+       T_* are unix seconds in DLF time; CODEs like 0xB873.
+"""
+import collections
+import mmap
+import os
+import struct
+import sys
+
+GPS_EPOCH = 315964800
+TICK_S = 0.00125
+
+src, out, t0, t1 = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+codes = {int(c, 16) for c in sys.argv[5:]}
+
+N = os.path.getsize(src)
+f = open(src, 'rb')
+d = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+hdr = struct.Struct('<HHQ').unpack_from
+lc = struct.Struct('<HH').unpack_from
+
+
+def plausible_code(code):
+    return 0x1000 <= code <= 0x1FFF or 0xB000 <= code <= 0xB9FF
+
+
+def rec_ok(i):
+    if i + 12 > N:
+        return False
+    ln, code = lc(d, i)
+    return ln >= 12 and i + ln <= N and plausible_code(code)
+
+
+def accept(i):
+    if not rec_ok(i):
+        return False
+    j = i + lc(d, i)[0]
+    return j == N or rec_ok(j)
+
+
+kept = collections.Counter()
+per_sec = collections.defaultdict(collections.Counter)
+i = scanned = resyncs = 0
+with open(out, 'wb') as o:
+    while i + 12 <= N:
+        if not accept(i):
+            j = i + 1
+            while j + 12 <= N and not accept(j):
+                j += 1
+            resyncs += 1
+            i = j
+            continue
+        ln, code, ts = hdr(d, i)
+        scanned += 1
+        if not codes or code in codes:
+            t = (ts >> 16) * TICK_S + (ts & 0xFFFF) / 32768 * TICK_S + GPS_EPOCH
+            if t0 <= t <= t1:
+                o.write(d[i:i + ln])
+                kept[code] += 1
+                per_sec[int(t)][code] += 1
+        i += ln
+
+print(f'{src}: scanned {scanned} records, {resyncs} resyncs; kept {sum(kept.values())} -> {out}')
+print('kept by code:', ' '.join(f'{c:#06x}:{k}' for c, k in sorted(kept.items())))
+if codes:
+    cols = sorted(codes)
+    print('per DLF-second:', 'sec', *[f'{c:#06x}' for c in cols])
+    for s in sorted(per_sec):
+        print(' ', s, *[per_sec[s][c] for c in cols])

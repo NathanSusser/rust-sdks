@@ -1,0 +1,42 @@
+#!/home/nsusser/diag-capture/venv/bin/python
+# Turn off all DIAG logging on the modem (DIAG_LOG_CONFIG_F, op=DISABLE), then
+# confirm the port has gone quiet.
+#
+# QCSuper clears the log mask on exit, but under full-mask load the reply is
+# lost in the log stream ("unmatched response received") and the modem keeps
+# streaming at full mask with nobody reading.
+import struct
+import sys
+import time
+
+import crcmod
+import serial
+
+PORT = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyUSB0'
+crc = crcmod.predefined.mkCrcFun('x-25')
+
+
+def frame(payload):
+    c = crc(payload)
+    out = bytearray()
+    for b in payload + bytes([c & 0xff, c >> 8 & 0xff]):
+        out.extend([0x7d, b ^ 0x20] if b in (0x7d, 0x7e) else [b])
+    out.append(0x7e)
+    return bytes(out)
+
+
+def bytes_in(s, secs):
+    end, n = time.time() + secs, 0
+    while time.time() < end:
+        n += len(s.read(65536))
+    return n
+
+
+s = serial.Serial(PORT, 115200, timeout=0.2, rtscts=True, dsrdtr=True)
+for _ in range(3):
+    s.write(frame(struct.pack('<B3xI', 0x73, 0)))
+    time.sleep(1)
+bytes_in(s, 5)  # drain backlog
+residual = bytes_in(s, 4)
+print(f'diag-log-off: {residual} bytes in 4 s after disable')
+sys.exit(0 if residual == 0 else 1)
