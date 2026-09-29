@@ -1,4 +1,4 @@
-#!/home/nsusser/diag-capture/venv/bin/python
+#!/usr/bin/env python3
 """Strict DLF walk: count records, detect misalignment, resync.
 
 A record is accepted only if its length fits AND its log code is plausible AND

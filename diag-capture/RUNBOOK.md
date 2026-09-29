@@ -5,7 +5,7 @@ Qualcomm DIAG port at `/dev/ttyUSB0`, PTP-synced to each other.
 
 | | Host A | Host B |
 |---|---|---|
-| Hostname | `matt-dedonato-CORSAIR-ONE-i500` | `MZ0126SD` |
+| Identify by | PTP cable address `192.168.99.1` (run `hostname` locally; not recorded here) | PTP cable address `192.168.99.2` |
 | Role | publisher | subscriber |
 | Tooling root | `~/code/rust-sdks/diag-capture/` | `~/diag-capture/` |
 | tcpdump privilege | scoped NOPASSWD sudo | file capabilities |
@@ -162,6 +162,24 @@ PYTHONUNBUFFERED=1 timeout -s INT -k 30 "$left" \
 `qcsuper-noroot` is a **symlink** (both hosts) currently to `qcsuper-noroot-fast2`,
 sha256 `1be99b70e92c32dbf464dd7f1d276239cbf0008113827b2c720dce95ba0f2ea1`.
 Switch builds atomically with `ln -sfn` + `mv -T`; `QCSUPER_BIN=<path>` overrides for testing.
+
+### Open question: why stdin-at-EOF kills QCSuper on A but never on B
+
+Not a finding. Recorded so the next person sees the asymmetry was **noticed, not explained**.
+
+Backgrounded with stdin at EOF, QCSuper exits after ~4 s with no error on Host A (hit for
+real 2026-09-14, hence `sleep infinity |`). Host B was structurally exposed to exactly the
+same thing — launched `</dev/null`, no stdin holder — and it has **never once fired**: zero
+early exits across every capture log B has written, including a retry loop built for this
+symptom that has never triggered.
+
+Best hypothesis: B runs QCSuper under `timeout`, which execs its child with its own stdin,
+so what QCSuper inherits may differ between the two invocation shapes. Establishing it would
+need a deliberate A/B, and neither host needs the answer now that both hold stdin open.
+
+**Why it is written down anyway:** an unexplained difference in behaviour between two hosts
+running byte-identical firmware is where the next bug hides. If something else in this
+toolchain ever behaves differently on the two rigs, start here.
 
 ### One reader per port
 
@@ -404,10 +422,34 @@ were enough to screen 19 cycles for disturbed seconds afterwards. But it has nev
 as a step or automated, so it is a **proposal**, not current practice.
 
 ```bash
-# the reduction that makes a raw DLF discardable for screening purposes
+# the reduction that makes a raw DLF discardable FOR SCREENING PURPOSES ONLY
 python3 diag-capture/dlf-rates.py <dlf> <probe_start_s> <probe_end_s> <host_minus_utc_s> <out.csv> [margin_s]
 # ~1 MB per cell, against 3–10 GB of raw
 ```
+
+**GATE ON WHAT THE REDUCTION CANNOT CARRY, NOT ON WHETHER ONE EXISTS.** "It has a CSV, so the
+raw is discardable" is the wrong rule and it was used to tier a cleanup audit on 2026-09-22
+before being corrected. `dlf-rates.csv` is a **per-second** count. It cannot carry:
+
+| Lost on reduction | Why it matters |
+|---|---|
+| **Sub-second scheduling cadence** — 0xB883 inter-arrival | needs raw records; the only view of whether the scheduler stalled *within* a second |
+| **Per-beam / per-carrier ML1 fields** — SSB index, per-Rx-path BRSRP | the 2026-09-18 "no beam switch" result came from raw bytes; a CSV could not have produced it |
+| **Anything a decoder we have not written yet would read** | SCAT was installed for weeks before anyone ran it on a DLF, and it renamed half the structure in one afternoon |
+
+That last row is the argument that generalises. The reduction preserves what the statistic we
+*currently* use needs. It cannot preserve what a tool we have not run yet would need, and the
+single most valuable result of this campaign came from re-reading raw records we already had.
+
+So the retention gate is: **a cell that failed, or a cell whose radio behaviour is still in
+question, keeps its raw DLF regardless of whether it has been reduced.** `sweep-driver.sh`
+already encodes exactly this — it refuses to delete a collapsed cell even with
+`REDUCE_DELETE=1` set, and that flag is set nowhere in the repo or the environment.
+
+**Deletion is the operator's decision, always.** Audited 2026-09-22: `sweep-driver.sh` holds the
+only automatic DLF deletion in either host's tooling, gated behind an unset flag and refusing on
+collapsed or unpaired cells. Host B has no deletion path at all. Nothing else in either toolchain
+removes a DLF, pcap or CSV.
 
 ---
 
@@ -496,6 +538,7 @@ ARM_T=$(date +%s)                                  # BEFORE launching anything
 | ns vs µs pcap magic | delays ~1000 s wrong | read the magic per file |
 | mapper alias in diskstats | every disk column zero | resolve to `dm-N` |
 | Estimated clock offset | timeline 2.5 s out, counts fine | measure per cell |
+| **A warning nothing is obliged to read is not a warning** | a partial capture reports clean and exits 0; a fired retry leaves no marker | put the marker where an audit will trip over it — in the FILENAME (`-PARTIAL`) and the exit code, not on stderr. Both hosts had this: A fell through a mid-cell death into its normal summary, B logged a retry into a file no consumer opened |
 | **DLF timestamps are true UTC; the HOSTS are wrong** | a series 15-25 s out of register; conclusions invert | convert with `host_minus_utc_s` before comparing to anything host-clocked |
 | **A `...Z` filename we wrote is not Z** | an external reader opens the file and the records are 25 s away | label shipped artefacts in true UTC, and say the offset has been applied |
 | A claim with an unstated filter | "first sample above X" that had a hidden time guard | state the selection, or give two windows and a difference |

@@ -11,7 +11,7 @@ Two machines:
 | | Host A | Host B |
 |---|---|---|
 | Role | publisher | subscriber |
-| Hostname | `matt-dedonato-CORSAIR-ONE-i500` | `MZ0126SD` |
+| Identify by | PTP cable address `192.168.99.1` (run `hostname` locally; not recorded here) | PTP cable address `192.168.99.2` |
 | PTP link | `192.168.99.1` | `192.168.99.2` |
 | PTP role | grandmaster | slave |
 | PTP timestamping | software (NIC reports no PHC) | hardware (`PTP Hardware Clock: 0`) |

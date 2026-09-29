@@ -1,4 +1,4 @@
-#!/home/nsusser/diag-capture/venv/bin/python
+#!/usr/bin/env python3
 """Cut a time window (and optionally a set of log codes) out of a DLF, on record
 boundaries only, into a new DLF. Non-destructive: the source is only read.
 

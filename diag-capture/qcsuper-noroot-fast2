@@ -1,4 +1,8 @@
-#!/home/nsusser/diag-capture/venv/bin/python
+#!/usr/bin/env python3
+# The shebang is deliberately generic: this file imports `qcsuper`, so it MUST be run
+# with the venv interpreter (callers pass it explicitly as "$PY"). Run directly and you
+# get a legible ImportError naming qcsuper, instead of the old 'bad interpreter' error
+# naming a venv path that no longer exists.
 # CANDIDATE replacement for qcsuper-noroot (not used by capture.sh until measured).
 #
 # Everything qcsuper-noroot does (rootless, no DISPLAY, prompt shutdown), plus:
@@ -165,6 +169,45 @@ def _dlf_on_log(self, log_type, log_payload, log_header, timestamp=0):
 
 DlfDumper.on_log = _dlf_on_log
 
+# ---------------------------------------------------------------------------
+# WHAT THIS CAPTURE CAN AND CANNOT CONTAIN -- measured 2026-09-22, so nobody spends
+# another afternoon trying to widen it.
+#
+# DIAG has three streams. A full QXDM session carries all three; this carries ONE,
+# and that is a limit of QCSuper's architecture, not of our mask settings.
+#
+#   log packets  0x73   ENABLED AND ALREADY FULL. dlf_dump does NOT set
+#                       limit_registered_logs -- only pcap_dump, json_geo_dump and
+#                       decoded_sibs_dump do -- so with --dlf-dump alone the mask is
+#                       all-ones over every equip ID. Confirmed on cell5m-a: 239
+#                       distinct codes, 118 of them outside 0xB800-0xB9FF. There is
+#                       nothing to gain here; it is already at parity.
+#
+#   ext msgs     0x7D   UNREACHABLE, two independent reasons. _base_input sends
+#                       SET_ALL_RT_MASKS(5)/MSG_LVL_NONE(0) at startup, so the modem
+#                       is told to send none -- AND no module in QCSuper implements
+#                       on_message, so dispatch_diag_message delivers to nobody.
+#                       Flipping the mask alone just spends DIAG bandwidth and raises
+#                       the buffer-overrun risk for zero output. Tried; reverted.
+#
+#   events  0x60/0x82   UNREACHABLE for the same second reason, and the mask is never
+#                       sent either. SCAT's diagcmd.py -- named as the mask source of
+#                       truth -- ships builders for logs and ext msgs but NONE for
+#                       events, only the bare constants.
+#
+# And the DLF itself is only a concatenation of log records: on_log writes
+# log_header + log_payload raw, which is why it is walked by length. An F3 message or
+# event has a different DIAG envelope, so there is no correct place to put one in
+# this file even if it were captured. Widening the mask without also inventing a
+# container would produce a DLF whose length walk breaks in QCAT.
+#
+# THE REAL ROUTE TO ALL THREE STREAMS IS PATH A: diag_mdlog with a QXDM-exported
+# .cfg mask, on a target that has /dev/diag. Relevant to the robot; not available on
+# this host.
+#
+# ALSO: NEVER ADD --pcap-dump ALONGSIDE --dlf-dump. pcap_dump sets
+# limit_registered_logs for the whole session, so asking for a pcap silently NARROWS
+# the log mask and the DLF comes out WORSE than --dlf-dump alone.
 if os.environ.get('QCSUPER_NR5G_ONLY') == '1':
     DlfDumper.limit_registered_logs = frozenset(range(0xB800, 0xBA00))
 

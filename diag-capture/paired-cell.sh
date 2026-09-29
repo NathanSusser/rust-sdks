@@ -44,7 +44,7 @@ label=${1:?usage: paired-cell.sh <label> <cap_kbps> <codec> [duration_s] [lead_s
 cap=${2:?cap_kbps required}
 codec=${3:?codec required}
 DUR=${4:-300}
-LEAD=${5:-75}
+LEAD=${5:-180}      # 75 was not enough: arming measured 117 s on 2026-09-23
 
 B=${B_HOST:-192.168.99.2}
 DIAG=$(cd "$(dirname "$0")" && pwd)
@@ -62,6 +62,45 @@ say() { printf '%s\n' "$*"; }
 say "=== paired cell: $label  ${cap}k  $codec  ${DUR}s  (lead ${LEAD}s, recorders ${span}s) ==="
 say "    sfu  : $URL"
 say "    clip : $CLIP"
+
+# ---------------------------------------------------------------- CPU governor, BOTH hosts
+# ASSERT THE GOVERNOR BEFORE THE RUN, NOT AFTER. On 2026-09-24 Host B's subscriber printed a
+# powersave warning, the operator fixed B, and Host A was left in powersave -- because the
+# warning came from B's wrapper and A's publisher prints no equivalent. A runs the ENCODER, so
+# a half-corrected pair is arguably worse than neither: it looks corrected.
+#
+# Why it matters at a pinned rate: encode timing sits inside what we are measuring. A throttled
+# encoder and a queueing link produce similar-looking latency in the paired split, and if A is
+# slow we cannot tell them apart -- which is the decomposition this tooling exists to provide.
+# Host A's cores idle at 800 MHz under powersave; forking tools have measured 4-5x too slow.
+#
+# cpufrequtils persists the GOVERNOR across reboots but NOT EPP -- that is an intel_pstate knob
+# outside its scope -- so both need re-checking after any reboot. Warn rather than refuse: a
+# throttled cell is still a cell, and the operator may be deliberately measuring the throttled
+# case. Set GOV_STRICT=1 to make it fatal.
+say
+say "--- CPU governor ---"
+gov_bad=0
+a_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
+a_epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null || echo unknown)
+b_ge=$(ssh_b 'echo "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown) $(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null || echo unknown)"' 20)
+b_gov=${b_ge%% *}; b_epp=${b_ge##* }
+say "    A: governor=$a_gov epp=$a_epp        (publisher -- ENCODE timing)"
+say "    B: governor=${b_gov:-?} epp=${b_epp:-?}        (subscriber -- DECODE/RENDER timing)"
+for pair in "A:$a_gov:$a_epp" "B:${b_gov:-unknown}:${b_epp:-unknown}"; do
+  h=${pair%%:*}; rest=${pair#*:}; g=${rest%%:*}; e=${rest##*:}
+  if [ "$g" != performance ] || [ "$e" != performance ]; then
+    say "    WARNING: Host $h is not at performance/performance."
+    say "             Its timings will be INFLATED and are not comparable to performance runs."
+    say "             Fix on Host $h:  echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+    say "                              echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference"
+    gov_bad=1
+  fi
+done
+[ "$gov_bad" = 0 ] && say "    both hosts at performance/performance"
+if [ "$gov_bad" = 1 ] && [ "${GOV_STRICT:-0}" = 1 ]; then
+  echo "REFUSING: GOV_STRICT=1 and a host is not at performance." >&2; exit 1
+fi
 
 # ---------------------------------------------------------------- collision guard
 say
@@ -94,7 +133,22 @@ say "--- epoch $epoch = $(date -u -d @"$epoch" +%H:%M:%SZ) (written once, to $D/
 say
 say "--- arming Host B ---"
 ssh_b "mkdir -p ~/teleop-runs/$label" 20
-ssh_b "cd ~/diag-capture && setsid nohup ./capture.sh $span $label > ~/teleop-runs/$label/capture.out 2>&1 < /dev/null &" 25
+# B_DIAG=0 runs the cell with NO modem log on Host B. Host B has ~90 GB against this host's
+# ~560 GB and DIAG costs ~30 GB/hour per host, so B's disk -- not the night -- is what ends a
+# long campaign. Turning B's DIAG off is the only way to extend one WITHOUT DELETING ANYTHING,
+# which is the operator's standing instruction.
+#
+# What that costs: nothing for the event hunt. The signature lives in A's modem log, and
+# 2026-09-22's work established that nothing on B's radio layer moved at the event -- not a
+# level, not a validity flag. B still contributes the thing the trigger actually needs, which
+# is packets_lost from subscriber.csv, plus its pcap and hop counters. Those are ~60 MB/cell.
+# Set B_DIAG=1 to restore lockstep capture when B has the room for it.
+B_DIAG=${B_DIAG:-1}
+if [ "$B_DIAG" = 1 ]; then
+  ssh_b "cd ~/diag-capture && setsid nohup ./capture.sh $span $label > ~/teleop-runs/$label/capture.out 2>&1 < /dev/null &" 25
+else
+  say "    B_DIAG=0: no modem log on Host B this cell (disk budget; A still captures)"
+fi
 ssh_b "cd ~/diag-capture && setsid nohup ./pcap.sh $span $label > ~/teleop-runs/$label/pcap.out 2>&1 < /dev/null &" 25
 ssh_b "cd ~/diag-capture && setsid nohup ./hop-recorder-b.sh $label $span ~/teleop-runs/$label > ~/teleop-runs/$label/hops.out 2>&1 < /dev/null &" 25
 # B sources its OWN credentials and CA. Nothing secret travels over this connection.
@@ -113,10 +167,13 @@ for i in $(seq 12); do
     [ -s ~/teleop-runs/$label/$label.hops-b.csv ] && h=1
     echo \"\$d \$s \$p \$h\"" 20)
   read -r d s p h <<<"$st"
-  [ "${d:-0}" = 1 ] && [ "${s:-0}" = 1 ] && [ "${p:-0}" = 1 ] && [ "${h:-0}" = 1 ] && { ok=0; break; }
+  # Do not require the flag for something we deliberately did not start: with B_DIAG=0 the
+  # DIAG check would never pass and every cell would refuse. Require it only when armed.
+  want_d=$B_DIAG
+  [ "${d:-0}" = "$want_d" ] && [ "${s:-0}" = 1 ] && [ "${p:-0}" = 1 ] && [ "${h:-0}" = 1 ] && { ok=0; break; }
   sleep 3
 done
-say "    B diag=$d subscriber=$s tcpdump=$p hops=$h"
+say "    B diag=$d (wanted $B_DIAG) subscriber=$s tcpdump=$p hops=$h"
 [ "$ok" -eq 0 ] || { echo "REFUSING: Host B did not come up fully (see flags above)." >&2
                      ssh_b "tail -5 ~/teleop-runs/$label/subscriber.out 2>/dev/null" 20 >&2; exit 1; }
 say "    B armed and verified"
@@ -130,8 +187,77 @@ sleep 8
 kill -0 "$rec" 2>/dev/null || { echo "A recorder died:" >&2; cat "$D/recorder.out" >&2; exit 1; }
 say "    A recorder live"
 
-DURATION="$DUR" "$REPO/teleop-test-matrix/scripts/publish-cell.sh" "$epoch" "$label" "$cap" "$codec" "$D" \
+# DO NOT WALK INTO at-epoch's REFUSAL. On 2026-09-23 arming both hosts took 117 s against a
+# 75 s lead, so the epoch was 42 s past and the publisher refused -- correctly, but only
+# after both hosts had armed and B had written 1.4 GB. Check it here, where the failure is
+# still cheap, and print the MEASURED arming time so the next run uses a number instead of
+# another guess.
+now=$(date -u +%s)
+remain=$(( epoch - now ))
+armed_for=$(( LEAD - remain ))
+say "    arming took ${armed_for}s of the ${LEAD}s lead; ${remain}s left before epoch"
+if [ "$remain" -lt 15 ]; then
+  say "ABORT: only ${remain}s before the epoch -- at-epoch would refuse to start late."
+  say "       Arming took ${armed_for}s. Re-run with a lead of at least $(( armed_for + 60 )):"
+  say "         ./diag-capture/paired-cell.sh $label $cap $codec $DUR $(( armed_for + 60 ))"
+  kill -TERM "$rec" 2>/dev/null
+  exit 1
+fi
+
+# PASS THE SFU AND THE CLIP EXPLICITLY, THEN CHECK WHAT WAS ACTUALLY USED.
+# 2026-09-23: this line passed ONLY DURATION. URL and CLIP above are plain shell vars, so
+# publish-cell.sh never saw them and fell back to its own defaults -- the OLD h265
+# deployment and the 30-minute robot clip. TWO separate faults: CLIP had the right name but
+# was unexported, and URL is the WRONG NAME (publish-cell.sh reads LK_URL), so exporting it
+# would not have helped either. Host B was on livekit-figure-ai while the publisher would
+# have gone to livekit-release-...-h265 -- same room name, different server, so they could
+# never meet. Only at-epoch's refusal stopped it becoming data compared against cell5m-a.
+# The header above already says "DURATION MUST BE EXPORTED": the lesson was learned for one
+# variable and never generalised to the other two.
+#
+# Then VERIFY THE PRODUCT instead of trusting the assignment -- the rule the capture-file
+# selection in this codebase already follows, because every heuristic has failed once.
+pub_out="$D/publish-cell.out"
+DURATION="$DUR" LK_URL="$URL" CLIP="$CLIP" \
+  "$REPO/teleop-test-matrix/scripts/publish-cell.sh" "$epoch" "$label" "$cap" "$codec" "$D" 2>&1 \
+  | tee "$pub_out"
+[ "${PIPESTATUS[0]}" = 0 ] \
   || { echo "cell did not go LIVE" >&2; kill -TERM "$rec" 2>/dev/null; exit 1; }
+
+# LOOK IN THE RIGHT FILE, AND FAIL IF THE VALUE IS ABSENT.
+# publish-cell.sh writes only its LIVE line to stdout; the "source:" and "sfu:" lines go to the
+# CELL LOG. The first version of this check read stdout, found nothing, and -- because the
+# comparison was guarded by [ -n "$used_url" ] -- passed silently, printing "<not printed>".
+# A guard that skips itself when its input is missing is a guard that can only pass. Search
+# both files, and treat a missing value as a FAILURE rather than a pass.
+for src in "$D/$label.log" "$pub_out"; do
+  [ -s "$src" ] || continue
+  [ -n "${used_url:-}" ]  || used_url=$(sed -n 's/^sfu: *url=\([^ ]*\).*/\1/p' "$src" | head -1)
+  [ -n "${used_clip:-}" ] || used_clip=$(sed -n 's/^source: *clip=\([^ ]*\).*/\1/p' "$src" | head -1)
+done
+vpid=$(sed -n 's/^LIVE .* pid=\([0-9]*\) .*/\1/p' "$pub_out" | head -1)
+bad=0
+if [ -z "${used_url:-}" ] || [ -z "${used_clip:-}" ]; then
+  say "CANNOT VERIFY: publisher did not report its sfu/clip where this check looks."
+  say "               url='${used_url:-<absent>}'  clip='${used_clip:-<absent>}'"
+  say "               Refusing rather than assuming they were right -- an unverifiable cell is"
+  say "               not a verified one, and this check silently passed on absent output once."
+  bad=1
+fi
+if [ -n "${used_url:-}" ] && [ "$used_url" != "$URL" ]; then
+  say "WRONG SFU : asked $URL"; say "            used  $used_url"; bad=1
+fi
+if [ -n "${used_clip:-}" ] && [ "$used_clip" != "$CLIP" ]; then
+  say "WRONG CLIP: asked $CLIP"; say "            used  $used_clip"; bad=1
+fi
+if [ "$bad" = 1 ]; then
+  say "ABORTING: this cell would not be comparable to the others."
+  [ -n "$vpid" ] && kill -TERM "$vpid" 2>/dev/null
+  kill -TERM "$rec" 2>/dev/null
+  exit 1
+fi
+say "    verified sfu : ${used_url:-<not printed>}"
+say "    verified clip: $(basename "${used_clip:-<not printed>}")"
 
 say
 say "--- cell running; waiting out the ${span}s recorder span ---"

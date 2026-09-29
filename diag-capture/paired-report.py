@@ -84,9 +84,20 @@ def main(celldir, out):
     sub = os.path.join(celldir, "hostb", "subscriber.csv")
     a_dlf = os.path.join(celldir, "dlf-rates.csv")
     b_dlf = os.path.join(celldir, "hostb", "dlf-rates.csv")
-    for p in (pub, sub, a_dlf, b_dlf):
+    # B's MODEM REDUCTION IS OPTIONAL. B_DIAG=0 is a supported configuration, not a broken run:
+    # Host B has ~83 GB against A's ~560 and DIAG costs ~30 GB/hour per host, so B's modem log
+    # is switched off for long hunting campaigns. Refusing to render then loses the whole report
+    # for a file we deliberately did not create. A/B video, A's modem log and B's 1 Hz QMI radio
+    # are all still present, which is everything except B's per-second DIAG code rate.
+    #
+    # The other three ARE required: without them there is no paired measurement to report.
+    for p in (pub, sub, a_dlf):
         if not os.path.exists(p):
-            raise SystemExit(f"missing input: {p}")
+            raise SystemExit(f"missing required input: {p}")
+    b_dlf_present = os.path.exists(b_dlf)
+    if not b_dlf_present:
+        print(f"note: no Host B modem reduction ({b_dlf}) -- rendering one-sided on the modem "
+              f"page and SAYING SO on it, rather than drawing a blank panel as though B were quiet")
 
     arows = list(csv.DictReader(open(pub)))
     brows = list(csv.DictReader(open(sub)))
@@ -102,7 +113,9 @@ def main(celldir, out):
     XLIM = (0, t1 - t0)                       # computed ONCE; every page uses it
 
     a_start, a_mod = modem_series(a_dlf)
-    b_start, b_mod = modem_series(b_dlf)
+    # Empty, not absent: an empty series must render as "not captured" wherever it is drawn,
+    # never as a flat line at zero that reads like a quiet baseband.
+    b_start, b_mod = modem_series(b_dlf) if b_dlf_present else (None, {})
 
     secs = sorted(set(a_fps) | set(b_fps))
     x = [s - t0 for s in secs]
@@ -112,9 +125,9 @@ def main(celldir, out):
     e95 = [sorted(b_e2e[s])[int(len(b_e2e[s]) * 0.95)] if len(b_e2e.get(s, [])) > 3 else float("nan")
            for s in secs]
 
-    lost = [int(r["packets_lost"]) for r in brows if r.get("packets_lost", "").strip().isdigit()]
+    lost = [int(r["packets_lost"]) for r in brows if (r.get("packets_lost") or "").strip().isdigit()]
     e2e_all = [float(r["e2e_to_gpu_complete_ms"]) for r in brows
-               if r.get("e2e_to_gpu_complete_ms", "").strip() not in ("", "nan")]
+               if (r.get("e2e_to_gpu_complete_ms") or "").strip() not in ("", "nan")]
 
     with PdfPages(out) as pdf:
         # ---------- page 1: delivery and latency ----------
@@ -175,9 +188,18 @@ def main(celldir, out):
             axis.set_xlim(*XLIM)
         ax[-1].set_xlabel("seconds into the cell -- SAME axis as page 1")
         # Defect 3: make the anchors visible on the page itself.
+        # The anchor caption must not claim a Host B anchor that does not exist. With B_DIAG=0
+        # there is no B modem reduction and therefore no B probe_start; printing a blank or a
+        # zero there would read as "B anchored at the same instant", which is the opposite of
+        # true. Say it is absent.
+        if b_start is not None:
+            anchors = (f"anchors: Host A probe_start={a_start:.0f}   Host B probe_start={b_start:.0f}   "
+                       f"(delta {b_start - a_start:+.0f} s)")
+        else:
+            anchors = (f"anchors: Host A probe_start={a_start:.0f}   "
+                       f"Host B modem log NOT CAPTURED (B_DIAG=0) -- no B anchor, no B code rate")
         fig.text(0.5, 0.015,
-                 f"anchors: Host A probe_start={a_start:.0f}   Host B probe_start={b_start:.0f}   "
-                 f"(delta {b_start - a_start:+.0f} s)   media window {t0:.0f}..{t1:.0f}   "
+                 anchors + f"   media window {t0:.0f}..{t1:.0f}   "
                  f"joined on ABSOLUTE epoch, not on the relative second index",
                  ha="center", fontsize=7.5, color="#555555")
         pdf.savefig(fig); plt.close(fig)
@@ -204,11 +226,12 @@ def main(celldir, out):
                  "",
                  "stage medians (Host B):"]
         for key, nm in stages:
-            v = [float(r[key]) for r in brows if r.get(key, "").strip() not in ("", "nan")]
+            v = [float(r[key]) for r in brows if (r.get(key) or "").strip() not in ("", "nan")]
             if v:
                 lines.append(f"  {nm:22s} {statistics.median(v):.1f} ms")
         lines += ["", f"Host A modem anchor      {a_start:.0f}",
-                  f"Host B modem anchor      {b_start:.0f}",
+                  (f"Host B modem anchor      {b_start:.0f}" if b_start is not None
+                   else "Host B modem anchor      NOT CAPTURED (B_DIAG=0)"),
                   f"media window             {t1 - t0:.0f} s"]
         ax[1].axis("off")
         ax[1].text(0.0, 1.0, "\n".join(l for l in lines if l is not None),
@@ -218,7 +241,10 @@ def main(celldir, out):
 
     print(f"wrote {out}")
     print(f"  media window   {t1 - t0:.0f} s, axis {XLIM[0]}..{XLIM[1]:.0f} on every page")
-    print(f"  A anchor {a_start:.0f}   B anchor {b_start:.0f}   delta {b_start - a_start:+.0f} s")
+    if b_start is not None:
+        print(f"  A anchor {a_start:.0f}   B anchor {b_start:.0f}   delta {b_start - a_start:+.0f} s")
+    else:
+        print(f"  A anchor {a_start:.0f}   B anchor: none (B_DIAG=0, no Host B modem log)")
     print(f"  frames A {len(arows):,}  B {len(brows):,}  e2e p50 {statistics.median(e2e_all):.1f} ms")
 
 if __name__ == "__main__":
