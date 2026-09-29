@@ -77,7 +77,24 @@ fi
 # lost to this. Xwayland is not throttled the same way, so unsetting
 # WAYLAND_DISPLAY restores logging without unlocking the screen.
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${ALLOW_LOCKED_WAYLAND:-}" ]; then
-  locked="$(loginctl show-session "$(loginctl list-sessions --no-legend 2>/dev/null     | awk '$NF ~ /ago/ || $0 ~ /seat/ {print $1; exit}')" -p LockedHint --value 2>/dev/null || true)"
+  # Pick OUR graphical session explicitly. The previous selector took the first row
+  # matching /seat/ or /ago/, which is ordering-dependent: ssh logins, a greeter and
+  # background sessions all appear in `loginctl list-sessions`, and on 2026-09-23 this
+  # box listed five (three closing tty sessions, the wayland session, a background one).
+  # Picking the wrong row makes the check answer about a session nobody is watching --
+  # in either direction. Select on what actually matters: this user, graphical type,
+  # active. If no graphical session is found we do NOT guess -- an empty result skips
+  # the lock check rather than asserting "not locked", since a false clear here is what
+  # produces a header-only CSV that reads as a successful run.
+  _gsess=""
+  for _s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+    [ "$(loginctl show-session "$_s" -p Name   --value 2>/dev/null)" = "$(id -un)" ] || continue
+    case "$(loginctl show-session "$_s" -p Type --value 2>/dev/null)" in wayland|x11) ;; *) continue;; esac
+    [ "$(loginctl show-session "$_s" -p Active --value 2>/dev/null)" = "yes" ] || continue
+    _gsess="$_s"; break
+  done
+  locked=""
+  [ -n "$_gsess" ] && locked="$(loginctl show-session "$_gsess" -p LockedHint --value 2>/dev/null || true)"
   if [ "$locked" = "yes" ]; then
     echo "ERROR: the Wayland session is LOCKED (LockedHint=yes)." >&2
     echo "Video will arrive and decode normally, but the compositor will not present" >&2
@@ -115,7 +132,18 @@ TIMING_FLAG=()
 # except by the row count. That cost a full paired run once. PARTICIPANT= (empty)
 # omits the flag entirely and takes whatever publishes, which is the safe choice
 # when the publisher's identity is not known for certain.
-PARTICIPANT="${PARTICIPANT-cam-1}"
+# DEFAULT CHANGED 2026-09-23 from "cam-1" to empty (= no filter). The publisher's
+# identity is `format!("{room}-{suffix}-{}", process::id())` -- teleop-test-matrix/
+# src/session.rs:368 -- so it contains the PID and CANNOT be known before the
+# publisher starts, which is after this subscriber is armed. There is no value the
+# two hosts can agree on in advance, so a default of "cam-1" is not a safe guess:
+# it was right only while the publisher happened to use that identity, and silently
+# discarded every frame of cell5m-r2 once the harness went per-run.
+#
+# Empty is safe HERE because paired-cell.sh refuses to start if any publisher,
+# subscriber or DIAG capture is already live on either host, so exactly one
+# publisher exists per cell. On a shared room, set PARTICIPANT explicitly.
+PARTICIPANT="${PARTICIPANT-}"
 PARTICIPANT_FLAG=()
 [ -n "$PARTICIPANT" ] && PARTICIPANT_FLAG=(--participant "$PARTICIPANT")
 

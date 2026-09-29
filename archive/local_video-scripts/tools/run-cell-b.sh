@@ -36,8 +36,12 @@ URL=${LK_URL:-wss://${TELEOP_SFU_HOST:?TELEOP_SFU_HOST unset -- put it in ~/.con
 # LEAD is the allowance for the operator-driven handshake between B arming and A
 # publishing. Observed: 81 s on 2026-09-19. A capture that outlasts the cell measured
 # from OUR start must carry the handshake too, or the tail is lost.
-LEAD=${LEAD:-120}
-PCAP_S=$(( DUR + LEAD + 120 ))
+# DIAG is stopped TAIL seconds after the subscriber exits, so its window is only a cap.
+# pcap cannot be stopped (see pcap.sh), so its window is the whole budget: a publisher
+# that starts more than LEAD s after arming loses the pcap tail. Raise LEAD for slow handshakes.
+LEAD=${LEAD:-60}
+TAIL=${TAIL:-15}
+PCAP_S=$(( DUR + LEAD + 30 ))
 DIAG_S=$(( DUR + LEAD + 90 ))
 
 mkdir -p "$CELL"
@@ -54,7 +58,30 @@ if [ "$servo" != "s2" ]; then
   echo "Wait for s2 before arming, or set FORCE=1 to override." >&2
   [ "${FORCE:-0}" = 1 ] || exit 1
 fi
-say "pre-flight: PTP servo $servo"
+# phc2sys s2 is NOT proof of cross-host lock. phc2sys only syncs CLOCK_REALTIME to B's
+# own PHC; if ptp4l has lost Host A that PHC is free-running and phc2sys still reports
+# s2 with nanosecond offsets. On 2026-09-26 the PTP cable was down 00:30-01:24Z, this
+# check printed "PTP servo s2" at 01:11:45, and vbv1-test1-8mbps ran with B's clock
+# untethered. Require what proves B is disciplined to A: carrier on the PTP port, and
+# ptp4l emitting servo (rms) lines, which it only does while it has a master.
+PTP_IF=${PTP_IF:-eno2}
+carrier=$(cat /sys/class/net/$PTP_IF/carrier 2>/dev/null || echo 0)
+p4l=$(journalctl --since "-30 sec" --no-pager 2>/dev/null | grep -cE "ptp4l\[[0-9]+\]: .* rms ")
+if [ "$carrier" != 1 ] || [ "${p4l:-0}" -lt 5 ]; then
+  echo "PTP NOT locked to Host A: $PTP_IF carrier=$carrier, ptp4l servo lines in 30 s=${p4l:-0}." >&2
+  echo "phc2sys may still say s2 -- it is tracking a free-running PHC. Check the PTP cable." >&2
+  echo "Set FORCE=1 to run anyway (cross-host latency will be untrustworthy)." >&2
+  [ "${FORCE:-0}" = 1 ] || exit 1
+fi
+say "pre-flight: PTP servo $servo, $PTP_IF carrier up, ptp4l locked to A ($p4l servo lines/30 s)"
+
+# 5G must be up BEFORE arming. On 2026-09-29 a cell was launched mid modem re-registration:
+# tcpdump refused ("wwan0: That device is not up"), DIAG started anyway, and the abort left
+# DIAG holding the port lock for its full window, blocking the rerun.
+if ! ip -4 -o addr show dev wwan0 2>/dev/null | grep -q inet || ! ip route show default dev wwan0 2>/dev/null | grep -q .; then
+  echo "5G NOT UP: wwan0 has no IPv4 address or default route (modem registering?). Wait and retry." >&2
+  exit 1
+fi
 
 # Wait for the capture locks to clear. NOTE: `flock -n 9 9>f` only TESTS the lock --
 # the redirection is scoped to the flock command, so the lock is released the instant
@@ -91,10 +118,26 @@ for h in ("time.google.com", "pool.ntp.org", "time.cloudflare.com"):
         v.append(((t0 + t1) / 2) - (u[10] - 2208988800 + u[11] / 2**32))
     except Exception:
         pass
-print(f"{statistics.median(v):.3f}" if v else "0")
+print(f"{statistics.median(v):.3f}" if v else "")
 PY
 )
-say "clock offset measured: ${OFFSET}s local-UTC"
+# No answer from any server used to print 0, and the captures then stamped the host clock
+# as true UTC. Unknown is not zero.
+OFFSET_MEASURED=
+if [ -z "$OFFSET" ]; then
+  echo "Clock offset UNMEASURED: no NTP server answered over 5G." >&2
+  [ "${FORCE:-0}" = 1 ] || exit 1
+  OFFSET=0
+  say "clock offset UNMEASURED -- capture stamps end in h, modem alignment assumes 0"
+else
+  OFFSET_MEASURED=1
+  say "clock offset measured: ${OFFSET}s local-UTC"
+fi
+# Hand it to the capture wrappers. Without this they stamp filenames from the HOST clock
+# and label them `Z`, which this box free-runs ~15.8 s behind -- so the name claims a UTC
+# it does not have and any cross-host join by filename inherits the error. With it set
+# they stamp true UTC; without it they end the stamp in `h` rather than lie.
+[ -n "$OFFSET_MEASURED" ] && export HOST_MINUS_UTC="$OFFSET"
 
 # ---- arm -------------------------------------------------------------------------
 # ARM_T gates every freshness check below. A capture file older than this belongs to a
@@ -102,8 +145,28 @@ say "clock offset measured: ${OFFSET}s local-UTC"
 ARM_T=$(date +%s)
 say "arming pcap ${PCAP_S}s and DIAG ${DIAG_S}s for room $ROOM"
 setsid nohup ~/diag-capture/pcap.sh "$PCAP_S" "$ROOM" wwan0 > "$CELL/pcap.out" 2>&1 </dev/null &
+PCAP_PID=$!
 sleep 4
 setsid nohup ~/diag-capture/capture.sh "$DIAG_S" "$ROOM" > "$CELL/capture.out" 2>&1 </dev/null &
+DIAG_PID=$!
+# TERM, not INT: a background job of a non-interactive shell starts with SIGINT ignored, and
+# bash cannot trap a signal ignored at entry -- so INT was silently dropped and DIAG ran its
+# full window (2026-09-29). capture.sh traps TERM the same way: one SIGINT to QCSuper, then
+# diag-log-off.
+stop_diag() { kill -TERM "$DIAG_PID" 2>/dev/null; }
+# The pcap LOCK is held by the pcap.sh wrapper (it closes fd 9 for tcpdump), so stopping the
+# wrapper frees the lock. tcpdump itself cannot be signalled and runs on to its -G deadline,
+# still writing THIS room's file -- which may then pick up the next cell's first packets.
+release_pcap_lock() { kill -TERM "$PCAP_PID" 2>/dev/null; }
+# Ctrl-C or a closed terminal used to orphan every capture: setsid detaches them, so they ran
+# their full windows and held both locks, blocking the next cell for up to 7 min (2026-09-29).
+on_interrupt() {
+  trap '' INT TERM HUP
+  say "interrupted -- stopping DIAG, hops-b and the pcap wrapper (tcpdump runs to its deadline)"
+  stop_diag; release_pcap_lock; kill -TERM "${HOP_PID:-}" 2>/dev/null
+  exit 130
+}
+trap on_interrupt INT TERM HUP
 # Host B's receive-side recorder: qdisc, driver counters, PER-SOCKET UDP drops, and the radio
 # (rsrp/rsrq/snr via mmcli, unprivileged). Until 2026-09-22 Host B recorded NO radio metrics at
 # all, so cell5m-a's +8 dB step on Host A could not be checked against this host -- a one-host
@@ -112,6 +175,7 @@ setsid nohup ~/diag-capture/capture.sh "$DIAG_S" "$ROOM" > "$CELL/capture.out" 2
 # have, and would return them silently empty.
 setsid nohup ~/diag-capture/hop-recorder-b.sh "$ROOM" "$(( DUR + LEAD + 60 ))" "$CELL" \
   > "$CELL/hops-b.out" 2>&1 </dev/null &
+HOP_PID=$!
 sleep 8
 
 # Verify by POSITIVE OBSERVATION, not by exit code. An ssh/launch exit status says
@@ -140,7 +204,8 @@ running() {
 # the authority and works everywhere.
 born() {                       # born <path> -> creation epoch, or 0
   local f=$1 stamp b
-  stamp=$(printf '%s' "${f##*/}" | grep -oE '[0-9]{8}T[0-9]{6}Z' | tail -1)
+  # Z = stamped in true UTC (capture.sh had HOST_MINUS_UTC); h = host clock, offset unknown.
+  stamp=$(printf '%s' "${f##*/}" | grep -oE '[0-9]{8}T[0-9]{6}[Zh]' | tail -1)
   if [ -n "$stamp" ]; then
     b=$(date -u -d "${stamp:0:4}-${stamp:4:2}-${stamp:6:2} ${stamp:9:2}:${stamp:11:2}:${stamp:13:2}" +%s 2>/dev/null)
     [ -n "$b" ] && { printf '%s' "$b"; return; }
@@ -167,10 +232,10 @@ growing() {                    # growing <file> -> 0 if it gained bytes over 3 s
 PCAP_F=$(fresh "$HOME/pcap-logs/$ROOM-*.pcap")
 DIAG_F=$(fresh "$HOME/diag-logs/$ROOM-*.dlf")
 armed=1
-if [ -n "$PCAP_F" ] && running tcpdump "$ROOM" && growing "$PCAP_F"; then
+if [ -n "$PCAP_F" ] && running tcpdump "$ROOM"; then
   say "pcap: RUNNING -> $(basename "$PCAP_F")"
 else
-  say "pcap: NOT RUNNING -- no capture file newer than arming, or it is not growing"; armed=0
+  say "pcap: NOT RUNNING -- no capture file newer than arming, or tcpdump is not alive"; armed=0
 fi
 if [ -n "$DIAG_F" ] && running qcsuper-noroot "$ROOM" && growing "$DIAG_F"; then
   say "DIAG: RUNNING -> $(basename "$DIAG_F")"
@@ -193,7 +258,11 @@ fi
 if [ "$armed" != 1 ]; then
   say "ABORTING before the subscriber starts -- a cell with no captures is 5 wasted minutes"
   echo "See $CELL/pcap.out and $CELL/capture.out. Set FORCE=1 to run anyway." >&2
-  [ "${FORCE:-0}" = 1 ] || exit 1
+  if [ "${FORCE:-0}" != 1 ]; then
+    trap - INT TERM HUP
+    stop_diag; release_pcap_lock; kill -TERM "$HOP_PID" 2>/dev/null
+    exit 1
+  fi
 fi
 
 # ---- the cell --------------------------------------------------------------------
@@ -208,10 +277,14 @@ env -u WAYLAND_DISPLAY DISPLAY="${DISPLAY:-:0}" RUST_LOG=info \
 say "subscriber exited"
 
 # ---- collect ---------------------------------------------------------------------
-say "waiting for captures to close (diag-log-off must run)"
+say "stopping DIAG in ${TAIL}s (pcap closes itself ${PCAP_S}s after arming; nothing below reads it)"
+sleep "$TAIL"
+trap - INT TERM HUP
+stop_diag
+release_pcap_lock
 for _ in $(seq 1 60); do
-  running tcpdump "$ROOM" || running qcsuper-noroot "$ROOM" || break
-  sleep 5
+  running qcsuper-noroot "$ROOM" || break
+  sleep 2
 done
 
 # Host A's artefacts, if the cable answers. Absence is reported, not fatal.
@@ -366,6 +439,24 @@ missing=""
 # short of near-total coverage is named in the title rather than quietly rendered.
 if [ -s "$CELL/dlf-rates-hostb.csv" ] && [ "${PCT:-100}" -lt 95 ]; then
   missing="$missing modem-B-only-${PCT}%"
+fi
+# capture.sh retries QCSuper if it exits early, appending to the same DLF. That
+# recovery is the problem: it turns a loud failure into a slightly-short capture
+# nobody examines, and capture.sh is launched with setsid/& so its exit 3 is never
+# read. Host A declined to mirror the retry for exactly this reason. Keep it, but
+# make a fired retry a VISIBLE event -- a DLF assembled across a gap is not the
+# same artefact as one written straight through, whatever its size says.
+# Read the marker off the ARTEFACT, not only off the run log. Host A's point: a glob
+# consumer SURVIVES a "-PARTIAL" suffix, which means it happily reduces the partial
+# capture as though it were whole -- the marker helps only if something downstream
+# refuses it. "$ROOM-*.dlf" matches "-PARTIAL" files, so this is that refusal. It also
+# catches a DLF reduced outside this script, where capture.out is not present at all.
+case "${DLF:-}" in
+  *-PARTIAL.dlf) missing="$missing modem-B-capture-PARTIAL" ;;
+esac
+if [ -s "$CELL/capture.out" ] && grep -q 'QCSuper exited after' "$CELL/capture.out" 2>/dev/null; then
+  n=$(grep -c 'QCSuper exited after' "$CELL/capture.out"); n=${n:-0}
+  missing="$missing modem-B-capture-restarted-x${n}"
 fi
 [ -n "$missing" ] && TITLE="$ROOM  [INCOMPLETE:$missing ]"
 [ -n "$missing" ] && say "REPORT IS INCOMPLETE --$missing"
