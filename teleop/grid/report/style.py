@@ -79,6 +79,33 @@ def slot(i: int) -> str:
     return SLOTS[i] if 0 <= i < len(SLOTS) else OTHER
 
 
+def _fix_pdf_indexed_images() -> None:
+    """matplotlib < 3.7 writes a rasterized region with <= 16 colours (a single-colour scatter or
+    line: every per-frame series we draw) as a 1/2/4-bit indexed image, but leaves BitsPerComponent
+    out of its PNG-predictor DecodeParms, so PDF viewers decode each row at the wrong stride and
+    the image shears (white diagonal seams through dense scatters). Upstream fixed it in 3.7 by
+    adding the key; this adds it the same way and changes nothing when it is already there."""
+    try:
+        from matplotlib.backends import backend_pdf as bp  # noqa: PLC0415
+    except ImportError:
+        return
+    if getattr(bp.PdfFile.beginStream, "_teleop_bpc_fix", False):
+        return
+    orig = bp.PdfFile.beginStream
+
+    def beginStream(self, id, len, extra=None, png=None):  # noqa: A002 -- matplotlib's signature
+        bpc = (extra or {}).get("BitsPerComponent")
+        if png is not None and isinstance(bpc, int) and bpc < 8 and "BitsPerComponent" not in png:
+            png = dict(png, BitsPerComponent=bpc)
+        return orig(self, id, len, extra, png)
+
+    beginStream._teleop_bpc_fix = True
+    bp.PdfFile.beginStream = beginStream
+
+
+_fix_pdf_indexed_images()
+
+
 def apply_rc() -> None:
     """Matplotlib defaults shared by every figure: recessive grid, no top/right spine."""
     matplotlib.rcParams.update({

@@ -345,6 +345,99 @@ def gate_disk(ctx: Ctx, statvfs=os.statvfs) -> dict:
                   free_bytes=free, need_bytes=need)
 
 
+# ---------------------------------------------------------------- whole-grid disk (Host A)
+#
+# Host A keeps every byte of every cell (its own captures and B's, pulled), so before the first
+# cell the orchestrator projects the whole grid against A's free space (CONTRACT.md, control
+# plane v2):
+#   per cell  = (A DLF + B DLF) x span x 1.1  +  both hosts' pcaps
+#   grid      = sum over the cells still to run, x 0.75 when compress_raw is on
+#   refuse if grid > free - 20 GB
+# The DLF rate dominates (4.5 MB/s per host whatever the video does); the pcaps are header-only.
+
+DLF_BYTES_PER_S = 4.5e6          # per host: the modem DIAG log rate measured on this rig
+DISK_MARGIN = 1.1                # on the DLF bytes: its rate varies, and logs/reduced/reports ride on it
+DISK_HEADROOM_BYTES = 20e9       # the plan never fills the disk: the budget is free - 20 GB
+COMPRESSED_FACTOR = 0.75         # zstd -3 on DLF + pcap (measured 1.37x on DLFs, 1.5x on pcaps)
+PCAP_RECORD_BYTES = 16 + 128     # pcap record header + capture/pcap.py's 128-byte snaplen
+PCAP_PAYLOAD_BYTES = 1100        # a typical RTP video payload per packet
+PCAP_OTHER_PPS = 500             # control 200 Hz each way, probes, RTCP, other UDP: a generous floor
+
+
+def _cell_values(cell) -> dict:
+    """A Cell's values, or a Cell.to_dict()'s variables (a dict has a .values method too)."""
+    return (cell.get("variables") or {}) if isinstance(cell, dict) else cell.values
+
+
+def _cell_repeat(cell) -> int:
+    return int((cell.get("repeat") if isinstance(cell, dict) else cell.repeat) or 1)
+
+
+def cell_span_s(cell) -> int:
+    v = _cell_values(cell)
+    return int(v["lead_s"]) + int(v["duration_s"]) + 30
+
+
+def pcap_bytes_estimate(cell) -> float:
+    """One host's header-only pcap for one cell: every UDP packet over the capture span, 144
+    bytes a record -- video packets from the cell's kbps, plus a floor for everything else."""
+    pps = int(_cell_values(cell)["kbps"]) * 1000 / 8 / PCAP_PAYLOAD_BYTES + PCAP_OTHER_PPS
+    return pps * PCAP_RECORD_BYTES * cell_span_s(cell)
+
+
+def grid_disk_projection(cells, compress_raw: bool = True) -> dict:
+    """Bytes the cells will leave on Host A (Cell objects or Cell.to_dict()s)."""
+    cells = list(cells)
+    dlf = sum(2 * DLF_BYTES_PER_S * cell_span_s(c) * DISK_MARGIN for c in cells)
+    pcap = sum(2 * pcap_bytes_estimate(c) for c in cells)
+    unc = dlf + pcap
+    factor = COMPRESSED_FACTOR if compress_raw else 1.0
+    per_cell = [(2 * DLF_BYTES_PER_S * cell_span_s(c) * DISK_MARGIN + 2 * pcap_bytes_estimate(c)) * factor
+                for c in cells]
+    reps = [_cell_repeat(c) for c in cells]
+    last = max(reps) if reps else 0
+    return {"cells": len(cells), "dlf_bytes": dlf, "pcap_bytes": pcap, "uncompressed_bytes": unc,
+            "compress_raw": bool(compress_raw), "factor": factor, "projected_bytes": unc * factor,
+            "last_repeat_round_bytes": sum(b for b, r in zip(per_cell, reps) if r == last and last > 1),
+            "lead_10s_bytes": sum(2 * DLF_BYTES_PER_S * 10 * DISK_MARGIN * factor for _ in cells)}
+
+
+def _free_bytes(root, statvfs=os.statvfs) -> tuple[int, Path]:
+    p = Path(root).expanduser()
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    st = statvfs(str(p))
+    return st.f_bavail * st.f_frsize, p
+
+
+def gate_grid_disk(cells, results_root, compress_raw: bool = True, statvfs=os.statvfs) -> dict:
+    """The whole-grid gate: refuse to start when the projection exceeds free - 20 GB, saying by
+    how much and what to change."""
+    proj = grid_disk_projection(cells, compress_raw)
+    free, where = _free_bytes(results_root, statvfs)
+    budget = free - DISK_HEADROOM_BYTES
+    gb = 1e9
+    ok = proj["projected_bytes"] <= budget
+    detail = (f"{proj['cells']} cells project {proj['projected_bytes'] / gb:.1f} GB on Host A "
+              f"({'zstd x' + str(COMPRESSED_FACTOR) + ' of ' if compress_raw else 'compress_raw off, '}"
+              f"{proj['uncompressed_bytes'] / gb:.1f} GB uncompressed: DLF {proj['dlf_bytes'] / gb:.1f} + pcap "
+              f"{proj['pcap_bytes'] / gb:.1f}); free {free / gb:.1f} GB under {where}, budget free - "
+              f"{DISK_HEADROOM_BYTES / gb:.0f} GB = {budget / gb:.1f} GB")
+    advice = ""
+    if not ok:
+        short = proj["projected_bytes"] - budget
+        opts = []
+        if proj["last_repeat_round_bytes"]:
+            opts.append(f"fewer repeats (one repeat round is {proj['last_repeat_round_bytes'] / gb:.1f} GB)")
+        opts.append(f"shorter lead_s (every 10 s of lead is {proj['lead_10s_bytes'] / gb:.1f} GB over the grid)")
+        if not compress_raw:
+            opts.append(f"compress_raw: true (x{COMPRESSED_FACTOR})")
+        opts.append(f"free space under {where}")
+        advice = f"; SHORT by {short / gb:.1f} GB: " + ", or ".join(opts)
+    return result("grid_disk", ok, detail + advice, free_bytes=free, budget_bytes=budget, path=str(where),
+                  headroom_bytes=DISK_HEADROOM_BYTES, **proj)
+
+
 # ---------------------------------------------------------------- modem
 
 RF_BAND_RE = re.compile(r"Active Band Class:\s*'([^']+)'")
@@ -678,4 +771,5 @@ def code_match(a: dict, b: dict, gates: dict | None = None) -> dict:
              and (a.get(k) != b.get(k) or not a.get(k))]
     return result("code_match", not diffs, "; ".join(diffs) if diffs else
                   f"commit {str(a.get('commit'))[:8]}, package and requirements identical"
-                  + ("" if a.get("harness_sha256") and b.get("harness_sha256") else " (harness on A only)"))
+                  + ("" if g.get("require_same_harness_sha256", True) and a.get("harness_sha256")
+                     and b.get("harness_sha256") else " (binaries are built per host; not compared)"))

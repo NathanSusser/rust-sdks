@@ -37,7 +37,11 @@ OPTIONAL = {
     # added by control-plane (CONTRACT.md): where the checkout lives on the PEER, when it
     # differs from this host's `repo`. Defaults to `repo`.
     "peer_repo": str,
+    # added by control plane v2: read on A (the orchestrator). true = do not purge B's copy of
+    # a cell after A has pulled and verified it. Default false: Host B keeps nothing.
+    "b_keep_after_pull": bool,
 }
+OPTIONAL_DEFAULTS = {"b_keep_after_pull": False}
 PATH_KEYS = ("diag_venv_python", "credentials_env", "results_root", "repo", "peer_repo")
 
 
@@ -68,8 +72,15 @@ def validate(raw: dict, source: str = "host.yaml") -> dict:
             continue
         v = raw[k]
         if v is None:
-            v = ""
-        if typ is int:
+            v = OPTIONAL_DEFAULTS.get(k, "")
+        if typ is bool:
+            if isinstance(v, str) and v.strip().lower() in ("true", "yes", "on", "1", "false", "no", "off", "0"):
+                v = v.strip().lower() in ("true", "yes", "on", "1")
+            if isinstance(v, int) and not isinstance(v, bool) and v in (0, 1):
+                v = bool(v)
+            if not isinstance(v, bool):
+                raise HostConfigError(f"{source}: {k} must be true or false, got {v!r}")
+        elif typ is int:
             if isinstance(v, bool) or not isinstance(v, int):
                 try:
                     v = int(str(v))
@@ -94,6 +105,8 @@ def validate(raw: dict, source: str = "host.yaml") -> dict:
         if k in cfg and cfg[k]:
             cfg[k] = str(Path(cfg[k]).expanduser())
     cfg.setdefault("peer_repo", cfg["repo"])
+    for k, v in OPTIONAL_DEFAULTS.items():
+        cfg.setdefault(k, v)
     return cfg
 
 

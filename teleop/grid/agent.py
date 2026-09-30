@@ -2,7 +2,7 @@
 
     python3 -m teleop.grid.agent <cmd> [--cell-dir DIR] [--label LABEL] [--json <base64 json>]
 
-cmds: identity | preflight | arm | status | publish | close | checksums | stop | pull
+cmds: identity | preflight | arm | status | publish | close | checksums | stop | pull | purge
 
 It acts only on its own machine. Long-running processes (captures, publisher, subscriber) are
 started detached with their pid, kernel start time and a cmdline signature recorded in
@@ -22,6 +22,13 @@ Rules from the shell this replaces, kept:
   the log FROM THE VARIABLES PASSED TO argv, and read back from the harness's own record at close.
 * Every inherited LK_* variable is removed before the cell's own are applied, AFTER sourcing
   credentials too, so "target_quality off" really is unset.
+
+STORAGE (layout v2). Host A keeps everything, Host B keeps nothing: A pulls hostb/, verifies
+every file against B's SHA256SUMS, and only then asks B to `purge` that one cell directory,
+passing the sha256 of the SHA256SUMS it verified. purge recomputes it here and refuses on any
+difference, on a path outside <results_root>/<grid-id>/, on a symlink, on a live process, and
+on any file that is not exactly what SHA256SUMS lists -- a stale or partial pull can never
+trigger a delete.
 """
 from __future__ import annotations
 
@@ -35,14 +42,16 @@ import json
 import os
 import platform
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import capture, hostcfg
 from .capture import Captures, read_json, spawn_detached, start_ticks, verify_pid, write_json_atomic
+from .grid import ID_RE
 
 TELEOP_DIR = Path(__file__).resolve().parent.parent
 LIVENESS_S = 25
@@ -99,9 +108,13 @@ class Agent:
     def need_cell(self):
         if not self.cell_dir or not self.label:
             raise AgentError("--cell-dir and --label are required for this command")
-        if self.cell_dir.name != self.label:
-            raise AgentError(f"cell dir {self.cell_dir.name} does not match label {self.label}")
+        check_cell_dir(self.cell_dir, self.label)
         self.host_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def grid_dir(self) -> Path | None:
+        """<results_root>/<grid-id>: two levels above the cell (<combo>/r<n>, controls/x<NN>)."""
+        return self.cell_dir.parent.parent if self.cell_dir else None
 
     @property
     def run_json(self) -> Path:
@@ -233,13 +246,16 @@ class Agent:
         hargs = list(args["harness_args"])
         henv = dict(args["harness_env"])
         if any(a in hargs for a in ("--url", "--room-name", "--snapshots-out", "--frame-csv-out", "--api-key",
-                                    "--api-secret")):
+                                    "--api-secret", "--run-json", "--publisher-seq-log")):
             raise AgentError("harness_args must not carry url/room/outputs/credentials; the agent adds them")
         log = self.host_dir / f"{self.label}.log"
+        # --publisher-seq-log: every control seq published, the control_delivered_pct denominator
+        # (the harness has had the flag since the matrix days, so it is not probed).
         argv = [str(harness), "--url", url, "--room-name", self.label, *hargs,
                 "--snapshots-out", str(self.host_dir / f"{self.label}.jsonl"),
-                "--frame-csv-out", str(self.host_dir / self.label)]
-        if harness_supports(harness, "--run-json"):
+                "--frame-csv-out", str(self.host_dir / self.label),
+                "--publisher-seq-log", str(self.host_dir / CONTROL_PUB_LOG)]
+        if harness_supports(harness, "--run-json", self.grid_dir):
             argv += ["--run-json", str(self.run_json)]
         clip = hargs[hargs.index("--camera-source") + 1] if "--camera-source" in hargs else ""
 
@@ -279,7 +295,15 @@ class Agent:
         csv = self.host_dir / "subscriber.csv"
         if csv.exists():
             raise AgentError("subscriber.csv already exists for this cell")
-        envs, argv = subscriber_command(sub, url, self.label, self.role, self.host_dir, self.cfg["display"], args)
+        # The control log exists only in a subscriber built after 2026-09-30: ask THIS binary
+        # (its --help, cached per grid run and binary) instead of assuming. The receive depth
+        # rides with it, and only when the same --help lists that flag too.
+        control_log = harness_supports(sub, "--control-log", self.grid_dir)
+        rx = args.get("control_rx_buffer")
+        rx_frames = int(rx) if control_log and rx is not None and \
+            harness_supports(sub, "--control-buffer-frames", self.grid_dir) else None
+        envs, argv = subscriber_command(sub, url, self.label, self.role, self.host_dir, self.cfg["display"], args,
+                                        control_log=control_log, control_buffer_frames=rx_frames)
         base = self._base_env()
         ca = self.repo / ".livekit-demo" / "corp-ca.pem"
         if "SSL_CERT_FILE" not in base and ca.is_file():
@@ -291,6 +315,8 @@ class Agent:
         b64 = base64.b64encode(json.dumps(launch).encode()).decode()
         largv = [sys.executable, "-m", "teleop.grid.agent", "_launch", "--label", self.label, "--json", b64]
         proc = {"pid": None, "kind": "subscriber", "fired_at": None, "argv": argv,
+                "control_log": control_log, "control_buffer_frames": rx_frames,
+                "cell": {k: v for k, v in args.items() if k != "cell_dir"},
                 "signature": [["teleop.grid.agent", "_launch", self.label], ["--room-name", self.label]]}
         pid = spawn_detached(largv, log, env=base, cwd=capture.CODE_ROOT)
         proc.update(pid=pid, start_ticks=start_ticks(pid), spawned_at=time.time())
@@ -298,7 +324,8 @@ class Agent:
         # Positive evidence: still alive a few seconds later (a bad CA dies in ~1 s).
         time.sleep(4)
         alive = verify_pid(proc)[0]
-        return {"ok": alive, "process": proc, "alive": alive,
+        return {"ok": alive, "process": proc, "alive": alive, "control_log": control_log,
+                "control_buffer_frames": rx_frames,
                 **({} if alive else {"error": "subscriber exited within 4 s", "log_tail": self._tail(log)})}
 
     @staticmethod
@@ -396,32 +423,179 @@ class Agent:
         if r.returncode != 0:
             return {"ok": False, "error": f"rsync rc {r.returncode}: {r.stderr.strip()[-300:]}"}
         v = capture.verify_checksums(local)
-        return {"ok": v["ok"], "verified": v, "dir": str(local)}
+        out = {"ok": v["ok"], "verified": v, "dir": str(local)}
+        if v["ok"]:
+            # What the orchestrator hands to B's purge: the identity of the checksum file that
+            # every pulled file was just verified against (sha256 AND size, every file).
+            out["sums_sha256"] = capture.sha256_file(local / capture.SUMS_NAME)
+        return out
+
+    # ------------------------------------------------------------ purge (Host B only)
+    def purge(self, args: dict) -> dict:
+        """Delete ONE cell directory on Host B after Host A pulled and verified it.
+
+        args: {rel: "<grid-id>/<combo>/r<n>" | "<grid-id>/controls/x<NN>" (relative to
+        results_root), sums_sha256: sha256 of the hostb/SHA256SUMS that A verified}.
+        Refuses -- and so keeps B's copy -- unless every one of these holds: this is Host B;
+        rel resolves inside <results_root>/<grid-id>/ without a symlink; the SHA256SUMS here
+        hashes to exactly sums_sha256; no recorded subscriber or capture is alive; and the files
+        here are exactly what SHA256SUMS lists, at the listed sizes (nothing added or grown after
+        A's pull). Idempotent: an already-absent directory is reported, not an error."""
+        if self.role != "b":
+            raise AgentError("purge runs on Host B only; Host A keeps everything")
+        rel = str(args.get("rel") or "").strip()
+        want = str(args.get("sums_sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", want):
+            raise AgentError("sums_sha256 missing or not a sha256: nothing is deleted without the checksum "
+                             "file A verified")
+        target, grid_root = resolve_purge_target(self.cfg["results_root"], rel)
+        if self.cell_dir is not None and self.cell_dir.resolve() != target:
+            raise AgentError(f"--cell-dir {self.cell_dir} and rel {rel} name different directories")
+        if not target.exists():
+            return {"ok": True, "rel": rel, "deleted": None, "already_absent": True}
+        if not target.is_dir():
+            raise AgentError(f"{rel} is not a directory")
+        host = target / hostcfg.host_dir_name("b")
+        sums = host / capture.SUMS_NAME
+        if not sums.is_file():
+            raise AgentError(f"{rel}/hostb/{capture.SUMS_NAME} missing: refusing to delete what was never "
+                             "checksummed; B's copy kept")
+        have = capture.sha256_file(sums)
+        if have != want:
+            raise AgentError(f"hostb/{capture.SUMS_NAME} here hashes to {have[:16]}, A verified {want[:16]}: "
+                             "not the checksum file A verified (stale or partial pull?); B's copy kept")
+        live = []
+        proc = read_json(host / "process.json", {}) or {}
+        if proc.get("pid") and verify_pid(proc)[0]:
+            live.append(f"{proc.get('kind') or 'process'} pid {proc['pid']}")
+        live += [f"capture pid {pid}" for pid in Captures(self.cfg, target, self.label or "").live_pids()]
+        if live:
+            raise AgentError(f"still running in {rel}: {', '.join(live)}; B's copy kept")
+        problems = unverified_files(target, host)
+        if problems:
+            raise AgentError(f"B's copy is not exactly what {capture.SUMS_NAME} lists ({'; '.join(problems[:5])}"
+                             f"{' ...' if len(problems) > 5 else ''}); B's copy kept")
+        files = sorted(q for q in target.rglob("*") if q.is_file() or q.is_symlink())
+        listing = [q.relative_to(target).as_posix() for q in files]
+        nbytes = sum(q.lstat().st_size for q in files)
+        shutil.rmtree(target)
+        pruned = []
+        # the combination directory, once its last repeat is gone (never the grid directory)
+        parent = target.parent
+        if parent != grid_root.resolve() and parent.is_relative_to(grid_root.resolve()):
+            try:
+                parent.rmdir()
+                pruned.append(parent.relative_to(grid_root.resolve().parent).as_posix())
+            except OSError:
+                pass
+        return {"ok": True, "rel": rel,
+                "deleted": {"path": str(target), "files": len(listing), "bytes": nbytes, "listing": listing},
+                "pruned": pruned}
+
+
+# ---------------------------------------------------------------- layout v2 paths
+
+CELL_LEAF_RE = re.compile(r"^(r\d+|x\d+)$")
+
+
+def check_cell_dir(cell_dir: Path, label: str) -> None:
+    """The cell directory must belong to the label. Layout v2: <grid-id>/<combo>/r<n> (r<n> is
+    the label's last field) or <grid-id>/controls/x<NN> (x<NN> its run-order field), under a
+    directory named for the label's grid id. Before v2 the directory was the label itself."""
+    name = Path(cell_dir).name
+    if name == label:
+        return
+    fields = label.split("-")
+    ok = (name.startswith("r") and name == fields[-1]) or \
+        (name.startswith("x") and len(fields) > 1 and name == fields[1])
+    if not (CELL_LEAF_RE.match(name) and ok):
+        raise AgentError(f"cell dir {name} does not belong to label {label} (want r<n> = its last field, "
+                         "or x<NN> = its run-order field)")
+    parts = Path(cell_dir).parts
+    if len(parts) < 3 or parts[-3] != fields[0]:
+        raise AgentError(f"cell dir {cell_dir} is not <grid {fields[0]}>/<combo>/{name}")
+
+
+def resolve_purge_target(results_root: str, rel: str) -> tuple[Path, Path]:
+    """(cell directory, grid directory) for a purge, or AgentError. `rel` is relative to
+    results_root and is exactly <grid-id>/<combo>/r<n> or <grid-id>/controls/x<NN>; it must
+    resolve inside <results_root>/<grid-id>/ and must not pass through a symlink."""
+    p = PurePosixPath(rel)
+    parts = p.parts
+    if not rel or p.is_absolute() or len(parts) != 3 or any(x in ("", ".", "..") for x in parts):
+        raise AgentError(f"purge: rel {rel!r} must be <grid-id>/<combo>/r<n> or <grid-id>/controls/x<NN>")
+    grid_id, combo, leaf = parts
+    if not ID_RE.match(grid_id) or not CELL_LEAF_RE.match(leaf) or combo.startswith("."):
+        raise AgentError(f"purge: rel {rel!r} is not a cell directory of layout v2")
+    root = Path(results_root).expanduser().resolve()
+    grid_root = root / grid_id
+    lexical = root.joinpath(*parts)
+    target = lexical.resolve()
+    if target != lexical:
+        raise AgentError(f"purge: {rel} passes through a symlink ({lexical} -> {target}); refusing")
+    if not target.is_relative_to(grid_root) or target == grid_root:
+        raise AgentError(f"purge: {rel} does not resolve inside {grid_root}; refusing")
+    return target, grid_root
+
+
+def unverified_files(cell: Path, host: Path) -> list[str]:
+    """Why B's cell directory is not exactly what hostb/SHA256SUMS lists: a listed file missing
+    or at another size, an unlisted file in hostb/ (bar *.tmp, which the pull excludes and the
+    checksum skips), or any file outside hostb/ (never pulled). Sizes, not hashes: A has just
+    hashed every pulled file against this same SHA256SUMS; this catches a file that changed
+    or appeared on B after the pull."""
+    problems, listed = [], set()
+    for line in (host / capture.SUMS_NAME).read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            _digest, size, rel = line.split("  ", 2)
+            size = int(size)
+        except ValueError:
+            problems.append(f"bad {capture.SUMS_NAME} line: {line[:60]}")
+            continue
+        listed.add(rel)
+        f = host / rel
+        if not f.is_file():
+            problems.append(f"missing: hostb/{rel}")
+        elif f.stat().st_size != size:
+            problems.append(f"size changed: hostb/{rel} ({f.stat().st_size} != {size})")
+    for f in cell.rglob("*"):
+        if not (f.is_file() or f.is_symlink()):
+            continue
+        if not f.is_relative_to(host):
+            problems.append(f"outside hostb/, never pulled: {f.relative_to(cell).as_posix()}")
+            continue
+        r = f.relative_to(host).as_posix()
+        if r == capture.SUMS_NAME or r in listed or f.name.endswith(".tmp"):
+            continue
+        problems.append(f"not in {capture.SUMS_NAME}: hostb/{r}")
+    return problems
 
 
 # ---------------------------------------------------------------- the subscriber's command line
 
+CONTROL_PUB_LOG = "control-pub.jsonl"     # hosta/: the harness's --publisher-seq-log
+CONTROL_SUB_LOG = "control.csv"           # hostb/: the subscriber's --control-log
+
+
 def subscriber_command(sub: Path, url: str, label: str, role: str, host_dir: Path, display: str,
-                       args: dict) -> tuple[dict, list[str]]:
+                       args: dict, *, control_log: bool = False,
+                       control_buffer_frames: int | None = None) -> tuple[dict, list[str]]:
     """(env, argv) for B's subscriber. The decoder's per-frame log (LK_DECODER_FRAME_LOG,
     hostb/frames-qp.csv) is ALWAYS requested: a subscriber built before it existed ignores the
-    variable, and reduce treats the file as optional. Frame sampling (raw I420 into
-    hostb/frames/, every sample_every-th frame ID) only when the cell asks for screenshots --
-    at ~3 MB a frame it is not free on disk or in the mirror."""
+    variable, and reduce treats the file as optional. The control log (hostb/control.csv) is
+    requested only when `control_log` -- the caller has seen --control-log in THIS binary's
+    --help -- because an unknown flag makes clap refuse to start at all; likewise
+    --control-buffer-frames (the grid's control_rx_buffer), and only together with the log."""
     env = {"DISPLAY": display, "RUST_LOG": "info",
            "LK_DECODER_FRAME_LOG": str(Path(host_dir) / "frames-qp.csv")}
     argv = [str(sub), "--url", url, "--room-name", label, "--identity", f"host-{role}-{label}",
             "--low-latency", "--display-timestamp", "--log-csv", str(Path(host_dir) / "subscriber.csv")]
-    shots = int(args.get("screenshots") or 0)
-    if shots > 0:
-        every = args.get("sample_every")
-        if not every:
-            # an orchestrator older than sample_every: derive it the way grid.sample_every does
-            fps, dur = args.get("fps"), args.get("duration_s")
-            if not (fps and dur):
-                raise AgentError("screenshots > 0 but neither sample_every nor fps/duration_s given")
-            every = max(1, int(fps) * int(dur) // shots)
-        argv += ["--sample-frames-dir", str(Path(host_dir) / "frames"), "--sample-every", str(int(every))]
+    if control_log:
+        argv += ["--control-log", str(Path(host_dir) / CONTROL_SUB_LOG)]
+        if control_buffer_frames is not None:
+            argv += ["--control-buffer-frames", str(int(control_buffer_frames))]
     return env, argv
 
 
@@ -501,13 +675,43 @@ def derive_run_json(host_dir: Path, label: str, proc: dict) -> dict:
     }
 
 
-def harness_supports(harness: Path, flag: str) -> bool:
-    """Does THIS binary accept `flag`? (--help only: no network, no credentials.)"""
+HELP_CACHE = ".binary-help.json"
+
+
+def binary_help(binary: Path, cache_dir: Path | None = None) -> str:
+    """`<binary> --help` (no network, no credentials). An agent is one process per command, so
+    the once-per-run cache lives on disk: <cache_dir>/.binary-help.json, where cache_dir is the
+    grid's directory on this host (a new grid asks again), keyed by the binary's path, size and
+    mtime (a rebuilt binary is asked again). A failed --help is never cached."""
+    binary = Path(binary)
     try:
-        r = subprocess.run([str(harness), "--help"], capture_output=True, text=True, timeout=15)
+        st = binary.stat()
+    except OSError:
+        return ""
+    key = f"{binary}|{st.st_size}|{st.st_mtime_ns}"
+    cache_path = Path(cache_dir) / HELP_CACHE if cache_dir else None
+    cache = (read_json(cache_path, {}) or {}) if cache_path else {}
+    if not isinstance(cache, dict):
+        cache = {}
+    if isinstance(cache.get(key), str):
+        return cache[key]
+    try:
+        r = subprocess.run([str(binary), "--help"], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return flag in r.stdout
+        return ""
+    text = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0 and cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(cache_path, {**cache, key: text})
+        except OSError:
+            pass
+    return text
+
+
+def harness_supports(harness: Path, flag: str, cache_dir: Path | None = None) -> bool:
+    """Does THIS binary (harness or subscriber) accept `flag`? From its --help, see binary_help."""
+    return flag in binary_help(harness, cache_dir)
 
 
 # ---------------------------------------------------------------- the detached launcher
@@ -535,7 +739,7 @@ def launch(args: dict) -> int:
 
 # ---------------------------------------------------------------- CLI
 
-COMMANDS = ("identity", "preflight", "arm", "status", "publish", "close", "checksums", "stop", "pull")
+COMMANDS = ("identity", "preflight", "arm", "status", "publish", "close", "checksums", "stop", "pull", "purge")
 
 
 def main(argv=None) -> int:

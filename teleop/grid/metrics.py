@@ -3,7 +3,9 @@
     build(cell_dir) -> dict      # also writes <cell>/metrics.json
 
 Every distribution is stats.summ(); absent data gives nulls (Summary with n=0), and no key is
-ever omitted. Keys beyond the base schema are listed in CONTRACT.md "added by reduce".
+ever omitted. Keys beyond the base schema are listed in CONTRACT.md "added by reduce" and
+"Added by reports v2" (the `control` group). Reads only reduced/*, reduce.json and the manifest;
+never a raw capture (a reduction older than reduce.json["qp_log"] is the one fallback).
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import math
 import re
 from pathlib import Path
 
-from .reduce import frames as F, screens
+from .reduce import control as CTL, frames as F, qp as QP
 from .reduce.segjoin import SEGMENTS
 from .stats import sd, summ
 
@@ -106,7 +108,6 @@ def build(cell_dir) -> dict:
         "encoder_is_nvenc": (("nvidia" in impl.lower() or "nvenc" in impl.lower()) if impl else None),
         "encoder_implementation": impl, "label": manifest.get("label"), "grid_id": manifest.get("grid_id"),
         "status": manifest.get("status"),
-        "screenshots": len(_rows(red_dir / "screens.csv")),
     }
 
     # ---------------- frame
@@ -146,10 +147,10 @@ def build(cell_dir) -> dict:
     # ---------------- encoder
     ql = enc.get("quality_limitation_s") or {}
     # qp is per second from A's stats (unchanged); qp_per_frame is every frame B's decoder
-    # logged (hostb/frames-qp.csv). Absent log (older subscriber) or empty qp (h265) -> n=0.
-    qlog = screens.read_qp_log(cell / "hostb" / screens.QP_LOG)
+    # logged (hostb/frames-qp.csv), summarised by reduce in its one read of the log. Absent log
+    # (older subscriber) or empty qp (a decoder that does not expose it) -> n=0.
     encoder = {
-        "qp": summ(_col(cs, "qp")), "qp_per_frame": summ(qlog.qps() if qlog else []),
+        "qp": summ(_col(cs, "qp")), "qp_per_frame": _qp_per_frame(cell, red),
         "encode_ms": summ(_col(fr, "encode_ms")),
         "quality_limitation_s": {k: ql.get(k) for k in ("none", "bandwidth", "cpu", "other")},
         "implementation": impl,
@@ -239,9 +240,88 @@ def build(cell_dir) -> dict:
     }
 
     out = {"config": config, "frame": frame, "rate": rate, "encoder": encoder, "latency": latency, "jitter": jitter,
-           "tail": tail, "network": network, "modem": modem_, "integrity": integrity}
+           "tail": tail, "network": network, "control": control(red_dir, red, dur, variables), "modem": modem_,
+           "integrity": integrity}
     (cell / "metrics.json").write_text(json.dumps(_clean(out), indent=1))
     return out
+
+
+def _qp_per_frame(cell: Path, red: dict) -> dict:
+    """encoder.qp_per_frame from reduce.json["qp_log"]; a reduction that predates that key falls
+    back to reading hostb/frames-qp.csv here (the only raw read metrics ever makes)."""
+    if "qp_log" in red:
+        q = red.get("qp_log") or {}
+        s = q.get("qp")
+        return s if isinstance(s, dict) and "n" in s else dict(SUMMARY_NULL)
+    qlog = QP.read_qp_log(cell / "hostb" / QP.QP_LOG)
+    return summ(qlog.qps() if qlog else [])
+
+
+def control(red_dir: Path, red: dict, dur: float | None, variables: dict) -> dict:
+    """metrics.json `control` (CONTRACT.md "Layout v2 ... Control path" + "Added by reports v2").
+
+    Every statistic is over one window: the publisher's span minus 2 s at each end
+    (reduce/control.py), a sample belonging to it by its send time. delivered_pct =
+    distinct received / published seq in the window; a gap = a maximal run of consecutive
+    published seq B never received. owd / jitter_sd_ms / interarrival from B's first arrivals;
+    rtt from the probe round trips A's harness reported inside the window."""
+    info = red.get("control")
+    rows = _rows(red_dir / "control.csv")
+    probes = _rows(red_dir / "probes.csv")
+    reasons = []
+    if info is None:
+        reasons.append("reduce.json has no control block (reduce has not run, or predates the control path)")
+        info = {}
+    elif info.get("reason"):
+        reasons.append(str(info["reason"]))
+    win = [r for r in rows if r.get("in_window") == 1]
+    pub_log, recv_log = bool(info.get("pub_log")), bool(info.get("recv_log"))
+    delivered = None
+    gaps = {"count": None, "max_consecutive_lost": None}
+    published = received = None
+    if pub_log:
+        sent = [r for r in win if r.get("sent") == 1]
+        published = len(sent)
+        if recv_log:
+            received = sum(1 for r in sent if r.get("received") == 1)
+            if published:
+                delivered = 100.0 * received / published
+                runs, run = [], 0
+                for r in sent:                 # control.csv is in seq order
+                    if r.get("received") == 1:
+                        if run:
+                            runs.append(run)
+                        run = 0
+                    else:
+                        run += 1
+                if run:
+                    runs.append(run)
+                gaps = {"count": len(runs), "max_consecutive_lost": max(runs) if runs else 0}
+            else:
+                reasons.append("no published control sample inside the window")
+    elif recv_log:
+        received = sum(1 for r in win if r.get("received") == 1)
+    owd = _col(win, "owd_ms", lambda r: r.get("received") == 1)
+    w = info.get("window_s")
+    if w:
+        lo, hi = w
+    elif dur:
+        lo, hi = CTL.EDGE_S, dur - CTL.EDGE_S
+    else:
+        lo, hi = float("-inf"), float("inf")
+    rtt = _col(probes, "rtt_ms", lambda r: r.get("t") is not None and lo <= r["t"] <= hi)
+    if not info.get("probe_section") and not probes:
+        reasons.append("no probe section in A's stats jsonl: no round trips")
+    elif not rtt:
+        reasons.append("A's harness reported no probe round trip inside the window (does the subscriber echo "
+                       "on teleop-probe-echo?)")
+    return {
+        "delivered_pct": delivered, "gaps": gaps, "owd": summ(owd), "jitter_sd_ms": sd(owd),
+        "interarrival": summ(_col(win, "ia_ms")), "rtt": summ(rtt),
+        "transport": info.get("transport") or variables.get("control_transport"),
+        "published": published, "received": received, "duplicates": info.get("duplicates"),
+        "window_s": w, "reason": "; ".join(reasons) or None,
+    }
 
 
 def _clean(o):

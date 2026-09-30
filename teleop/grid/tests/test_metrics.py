@@ -42,6 +42,7 @@ SCHEMA = {
                 "path_mtu"),
     "modem": ("a", "b"),
     "integrity": ("captures_complete", "mirror_verified", "reduce_resyncs", "ptp_locked", "excluded", "reasons"),
+    "control": ("delivered_pct", "gaps", "owd", "jitter_sd_ms", "interarrival", "rtt", "transport", "reason"),
 }
 SUMMARIES = {
     "frame": ("size_kb", "packets_per_frame"),
@@ -50,6 +51,7 @@ SUMMARIES = {
     "latency": SCHEMA["latency"],
     "jitter": ("interarrival_rfc3550_ms", "frame_interval_b_ms"),
     "network": ("in_flight_packets",),
+    "control": ("owd", "interarrival", "rtt"),
 }
 MODEM_KEYS = ("activity_index", "x19ef_records", "kernel_queue_max_bytes", "rsrp_dbm", "snr_db")
 
@@ -70,6 +72,8 @@ def check_schema(tc: unittest.TestCase, m: dict) -> None:
     tc.assertEqual(set(m["encoder"]["quality_limitation_s"]), {"none", "bandwidth", "cpu", "other"})
     for k in ("owd_over_100", "owd_over_150", "e2e_over_100", "e2e_over_150"):
         tc.assertEqual(set(m["tail"][k]), {"count", "share"})
+    tc.assertEqual(set(m["control"]["gaps"]), {"count", "max_consecutive_lost"})
+    tc.assertNotIn("screenshots", m["config"])          # screenshots are gone (CONTRACT.md layout v2)
 
 
 def write_synthetic_cell(cell: Path, n: int = 90, lost_at: int | None = 60) -> None:
@@ -143,6 +147,10 @@ class SyntheticCellTest(unittest.TestCase):
             self.assertIsNone(m["modem"]["a"]["x19ef_records"])
             self.assertIsNone(m["config"]["band"]["a"])
             self.assertEqual(m["modem"]["a"]["activity_index"]["n"], 0)
+            # no control logs in this cell: every control metric null, with the reason
+            self.assertIsNone(m["control"]["delivered_pct"])
+            self.assertEqual(m["control"]["owd"]["n"], 0)
+            self.assertIn("control-pub.jsonl absent", m["control"]["reason"])
 
     def test_empty_reduced_dir_still_full_schema(self):
         with tempfile.TemporaryDirectory() as d:
@@ -152,6 +160,7 @@ class SyntheticCellTest(unittest.TestCase):
             m = metrics.build(cell)
             check_schema(self, m)
             self.assertFalse(m["integrity"]["captures_complete"])
+            self.assertIn("reduce.json has no control block", m["control"]["reason"])
 
 
 def legacy(name: str) -> Path | None:

@@ -188,23 +188,33 @@ def read_json(path: Path, default=None):
 
 
 SUMS_NAME = "SHA256SUMS"
+# Written on A beside SHA256SUMS when the raw captures are compressed (layout v2): the same
+# format, listing the *.zst files. SHA256SUMS itself is kept as written, for the originals.
+ZST_SUMS_NAME = "SHA256SUMS.zst"
+
+
+def write_sums_file(host_dir: Path, files, name: str) -> dict:
+    """`sha256  bytes  relative-path` for `files` (under host_dir), sorted by path, written
+    atomically to host_dir/name."""
+    host_dir = Path(host_dir)
+    lines, total = [], 0
+    for p in sorted(Path(f) for f in files):
+        rel = p.relative_to(host_dir).as_posix()
+        size = p.stat().st_size
+        lines.append(f"{sha256_file(p)}  {size}  {rel}")
+        total += size
+    tmp = host_dir / (name + ".tmp")
+    tmp.write_text("\n".join(lines) + ("\n" if lines else ""))
+    os.replace(tmp, host_dir / name)
+    return {"files": len(lines), "bytes": total, "path": str(host_dir / name)}
 
 
 def write_checksums(host_dir: Path) -> dict:
     """`sha256  bytes  relative-path` for every file under host_dir, sorted by path."""
     host_dir = Path(host_dir)
-    lines, total = [], 0
-    for p in sorted(host_dir.rglob("*")):
-        if not p.is_file() or p.name == SUMS_NAME or p.name.endswith(".tmp"):
-            continue
-        rel = p.relative_to(host_dir).as_posix()
-        size = p.stat().st_size
-        lines.append(f"{sha256_file(p)}  {size}  {rel}")
-        total += size
-    tmp = host_dir / (SUMS_NAME + ".tmp")
-    tmp.write_text("\n".join(lines) + ("\n" if lines else ""))
-    os.replace(tmp, host_dir / SUMS_NAME)
-    return {"files": len(lines), "bytes": total, "path": str(host_dir / SUMS_NAME)}
+    files = [p for p in host_dir.rglob("*")
+             if p.is_file() and p.name not in (SUMS_NAME, ZST_SUMS_NAME) and not p.name.endswith(".tmp")]
+    return write_sums_file(host_dir, files, SUMS_NAME)
 
 
 def verify_checksums(host_dir: Path) -> dict:
@@ -212,22 +222,25 @@ def verify_checksums(host_dir: Path) -> dict:
     host_dir = Path(host_dir)
     sums = host_dir / SUMS_NAME
     if not sums.is_file():
-        return {"ok": False, "problems": [f"{SUMS_NAME} missing"], "files": 0}
-    problems, listed = [], set()
+        return {"ok": False, "problems": [f"{SUMS_NAME} missing"], "files": 0, "bytes": 0}
+    problems, listed, total = [], set(), 0
     for line in sums.read_text().splitlines():
         if not line.strip():
             continue
         try:
             digest, size, rel = line.split("  ", 2)
+            size = int(size)
         except ValueError:
             problems.append(f"bad line: {line[:80]}")
             continue
         listed.add(rel)
+        total += size
         p = host_dir / rel
         if not p.is_file():
             problems.append(f"missing: {rel}")
             continue
-        if p.stat().st_size != int(size):
+        # every file: its size AND its sha256 (a size mismatch is already a failure)
+        if p.stat().st_size != size:
             problems.append(f"size differs: {rel} ({p.stat().st_size} != {size})")
             continue
         if sha256_file(p) != digest:
@@ -237,7 +250,7 @@ def verify_checksums(host_dir: Path) -> dict:
             rel = p.relative_to(host_dir).as_posix()
             if rel not in listed:
                 problems.append(f"not in {SUMS_NAME}: {rel}")
-    return {"ok": not problems, "problems": problems, "files": len(listed)}
+    return {"ok": not problems, "problems": problems, "files": len(listed), "bytes": total}
 
 
 # ---------------------------------------------------------------- Captures

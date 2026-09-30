@@ -10,6 +10,11 @@ here both come from the same Cell.
 Rate model: the operator sets resolution, fps and bits-per-pixel; kbps is derived
 (kbps = W*H*fps*bpp/1000). Setting kbps with a fixed resolution derives bpp instead, and
 resolution `auto` keeps the old rule (WxH from kbps/fps/bpp, grid.derive_geometry).
+
+Layout v2 (CONTRACT.md "Layout v2"): a cell lives in <grid>/<combo>/r<n>, where <combo> is
+built from the SWEPT variables only (h265-30fps-b0040), so the repeats of one combination sit
+side by side; control cells live in <grid>/controls/x<NN>. `Cell.rel_path` is the one place
+that path is derived. The label (room name, file prefix) is unchanged and still unique.
 """
 from __future__ import annotations
 
@@ -27,7 +32,8 @@ from pathlib import Path
 TELEOP_DIR = Path(__file__).resolve().parent.parent
 VARIABLES_PATH = TELEOP_DIR / "config" / "variables.yaml"
 
-GRID_KEYS = {"id", "description", "control", "defaults", "axes", "pairs", "order", "expect", "seed"}
+GRID_KEYS = {"id", "description", "control", "defaults", "axes", "pairs", "order", "expect", "seed",
+             "compress_raw"}
 CONTROL_KEYS = {"every", "cell", "thresholds"}
 THRESHOLD_KEYS = {"owd_p99_ms", "packets_lost"}
 EXPECT_KEYS = {"band", "arfcn", "pci"}
@@ -46,10 +52,21 @@ ALIASES = {"geometry": "resolution"}
 # Set on every Cell by rate resolution (not declared in variables.yaml: never set by a grid).
 DERIVED_VARS = ("width", "height")
 # Variables a cell never labels or passes to the harness, but which the grid may set.
-META_VARS = ("repeats", "lead_s", "cooldown_s", "screenshots")
+META_VARS = ("repeats", "lead_s", "cooldown_s")
 # Variables that go into manifest.json "variables" (CONTRACT.md).
 MANIFEST_VARS = ("codec", "kbps", "fps", "resolution", "width", "height", "bpp", "vbv_frames", "padding",
-                 "target_quality", "intra_refresh", "pin_bitrate", "duration_s", "clip", "lead_s", "screenshots")
+                 "target_quality", "intra_refresh", "pin_bitrate", "duration_s", "clip", "lead_s",
+                 "control_transport", "control_rx_buffer")
+# Variables that no longer exist. A grid file that still sets one is told why, by name, instead
+# of getting the generic "unknown variable".
+REMOVED_VARS = {
+    "screenshots": "removed 2026-09-30 with the subscriber's frame sampling (layout v2); delete it from "
+                   "the grid file -- per-frame decoder QP (hostb/frames-qp.csv) is always recorded",
+}
+# Names a combination directory can never take: they are the grid directory's own entries.
+RESERVED_DIRS = {"controls", "comparison", "postproc", "cells", "grid.yaml", "grid.log", "state.json", "STOP",
+                 "PAUSED"}
+COMBO_NAME_MAX = 200
 CAPTURE_TAIL_S = 30   # variables.yaml: capture span = lead_s + duration_s + 30
 # Defaults for variables that variables.yaml declares WITHOUT one (added by control-plane,
 # CONTRACT.md). fps 30 is the ARCHITECTURE §4 default; everything else must be given.
@@ -233,13 +250,50 @@ def resolution_warnings(w: int, h: int) -> list[str]:
     return out
 
 
-def sample_every(fps: int, duration_s: int, screenshots: int) -> int | None:
-    """The subscriber's --sample-every for `screenshots` frames over the cell: frame IDs are
-    sampled where id % N == 0, so N = floor(fps*duration_s/screenshots) spreads them evenly
-    (25 fps x 300 s / 6 = 1250). None when screenshots is 0 (off)."""
-    if not screenshots:
-        return None
-    return max(1, int(fps) * int(duration_s) // int(screenshots))
+# ---------------------------------------------------------------- layout v2
+def _combo_token(name: str, vals: dict) -> str:
+    """One swept variable, rendered short for the combination directory (CONTRACT.md)."""
+    v = vals.get(name)
+    if name == "codec":
+        return str(v)
+    if name == "fps":
+        return f"{v}fps"
+    if name == "bpp":
+        return f"b{bpp_tag(v)}"
+    if name == "kbps":
+        return f"{v}k"
+    if name == "resolution":
+        # the resolved W x H, so an `auto` cell names the geometry it will actually request
+        return f"{vals['width']}x{vals['height']}"
+    if name == "vbv_frames":
+        return f"v{v}"
+    if name == "padding":
+        return f"p{1 if v else 0}"
+    if name == "target_quality":
+        return f"tq{v}"                      # tqoff | tq30
+    if isinstance(v, bool):
+        text = "1" if v else "0"
+    elif name == "clip":
+        text = Path(str(v)).stem             # a path has '/', which cannot be in a directory name
+    else:
+        text = str(v)
+    # '-' joins the tokens, so it (and anything a path cannot hold) becomes '_' inside one
+    return name + re.sub(r"[^A-Za-z0-9_.]", "_", text)
+
+
+def combo_name(vals: dict, swept: list[str]) -> str:
+    """`h265-30fps-b0040`: the swept variables in axis order, joined with '-'; `all` without axes."""
+    return "-".join(_combo_token(k, vals) for k in swept) if swept else "all"
+
+
+def find_cell_dirs(grid_dir: str | os.PathLike) -> list[Path]:
+    """Every cell directory of a grid that has a manifest: <combo>/r<n> and controls/x<NN>
+    (layout v2), plus cells/<label> of a grid run before it. Sorted by path; callers that
+    need run order sort by the manifest's index."""
+    g = Path(grid_dir)
+    found = set(g.glob("*/r*/manifest.json")) | set(g.glob("controls/x*/manifest.json")) | \
+        set(g.glob("cells/*/manifest.json"))
+    return sorted(p.parent for p in found if p.parent.parent.name not in ("comparison", "postproc"))
 
 
 # ---------------------------------------------------------------- Cell
@@ -251,11 +305,26 @@ class Cell:
     repeat: int
     values: dict
     index_width: int = 2
-    combo: int = 0               # which combination (control = -1)
+    combo_index: int = 0         # which combination (control = -1)
+    combo: str = "all"           # the combination's directory name (control = "controls")
 
     @property
     def requested(self) -> tuple[int, int]:
         return int(self.values["width"]), int(self.values["height"])
+
+    @property
+    def run_token(self) -> str:
+        """c<NN> / x<NN>: the run-order field of the label."""
+        return f"{'x' if self.kind == 'control' else 'c'}{self.index:0{self.index_width}d}"
+
+    @property
+    def rel_path(self) -> str:
+        """The cell directory relative to the grid directory: <combo>/r<n>, or controls/x<NN>
+        (x<NN> is the label's run-order field, so the directory and the room name agree).
+        The orchestrator passes <grid-id>/<rel_path> to both agents; nothing else derives it."""
+        if self.kind == "control":
+            return f"controls/{self.run_token}"
+        return f"{self.combo}/r{self.repeat}"
 
     @property
     def label(self) -> str:
@@ -305,25 +374,25 @@ class Cell:
             "--degradation", "locked",
             "--camera-source", v["clip"],
             "--attach-timestamp", "--attach-frame-id", "--buffering-mode", "zero_jitter",
-            "--control-transport", "dc_reliable",
+            "--control-transport", str(v["control_transport"]),
             "--publish-only", "--stats-poll-hz", "1", "--video-poll-hz", "1",
         ]
 
     def manifest_variables(self) -> dict:
-        out = {k: self.values.get(k) for k in MANIFEST_VARS}
-        if self.values.get("sample_every") is not None:
-            out["sample_every"] = self.values["sample_every"]
-        return out
+        return {k: self.values.get(k) for k in MANIFEST_VARS}
 
     def subscriber_args(self) -> dict:
-        """What the B agent's `publish` needs from the cell (sampling is off when screenshots is 0)."""
-        return {"duration_s": self.duration_s, "screenshots": int(self.values.get("screenshots") or 0),
-                "sample_every": self.values.get("sample_every")}
+        """What the B agent's `publish` is told about the cell: control_rx_buffer becomes
+        --control-buffer-frames when the subscriber has the control log; the rest is kept in
+        process.json so B's record says what the cell was."""
+        return {"duration_s": self.duration_s, "control_transport": self.values.get("control_transport"),
+                "control_rx_buffer": self.values.get("control_rx_buffer")}
 
     def to_dict(self) -> dict:
         w, h = self.requested
         return {
             "index": self.index, "label": self.label, "kind": self.kind, "repeat": self.repeat,
+            "combo": self.combo, "rel_path": self.rel_path,
             "variables": dict(self.values), "requested": {"width": w, "height": h},
             "span_s": self.span_s,
             "harness_args": self.harness_args(), "harness_env": self.harness_env(),
@@ -345,6 +414,8 @@ class Grid:
     source: str = ""
     raw: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
+    swept: list = field(default_factory=list)   # the axes/pairs variables, in axis order
+    compress_raw: bool = True                   # zstd the raw captures on A after reduction
 
     def _resolve(self, overrides: dict, *, control: bool = False) -> dict:
         vals = dict(self.defaults)
@@ -359,12 +430,6 @@ class Grid:
         if missing:
             raise GridError(f"no value for {missing} (set in defaults, axes or pairs)")
         resolve_rate(vals)
-        # Derived, like width/height: recorded only when sampling is on, never labelled.
-        n = sample_every(vals["fps"], vals["duration_s"], vals.get("screenshots") or 0)
-        if n is not None:
-            vals["sample_every"] = n
-        else:
-            vals.pop("sample_every", None)
         for k in optional:
             vals.setdefault(k, None)
         return vals
@@ -395,17 +460,42 @@ class Grid:
                 plan.append(("control", -1, ctl_n))
         width = max(2, len(str(len(plan) - 1)))
         ctl_vals = self._resolve(self.control["cell"], control=True) if self.control else None
+        names = self.combo_names(resolved)
         cells = []
         for idx, (kind, ci, rep) in enumerate(plan):
             vals = ctl_vals if kind == "control" else resolved[ci]
-            cells.append(Cell(self.id, idx, kind, rep, dict(vals), width, ci))
+            cells.append(Cell(self.id, idx, kind, rep, dict(vals), width, ci,
+                              "controls" if kind == "control" else names[ci]))
         labels = [c.label for c in cells]
         if len(set(labels)) != len(labels):
             raise GridError("two cells expand to the same label; the grid has duplicate combinations")
         return cells
 
+    def combo_names(self, resolved: list[dict] | None = None) -> list[str]:
+        """Directory name of every combination, validated: distinct combinations must not
+        share a directory (their r1/ would collide), and a name is one path component."""
+        resolved = resolved if resolved is not None else [self._resolve(c) for c in self.combos]
+        names = [combo_name(r, self.swept) for r in resolved]
+        seen: dict[str, int] = {}
+        for i, n in enumerate(names):
+            if n in seen:
+                raise GridError(f"combinations {self.combos[seen[n]]} and {self.combos[i]} both render to the "
+                                f"directory name {n!r}; make the axis values differ in what the name shows "
+                                "(bpp to 3 decimals, codec, fps, ...)")
+            seen[n] = i
+            if n in RESERVED_DIRS or n.startswith(".") or "/" in n or len(n) > COMBO_NAME_MAX:
+                raise GridError(f"combination {self.combos[i]} renders to {n!r}, which cannot be a combination "
+                                f"directory (reserved, hidden, or longer than {COMBO_NAME_MAX} characters)")
+        return names
+
     def expanded_dict(self) -> dict:
         cells = self.expand()
+        sweep = {}
+        if isinstance(self.raw.get("axes"), dict):
+            sweep["axes"] = {ALIASES.get(k, k): v for k, v in self.raw["axes"].items()}
+        elif isinstance(self.raw.get("pairs"), list):
+            sweep["pairs"] = [{ALIASES.get(k, k): v for k, v in p.items()} for p in self.raw["pairs"]
+                              if isinstance(p, dict)]
         return {
             "id": self.id,
             "description": self.description,
@@ -417,6 +507,11 @@ class Grid:
             "defaults": self.defaults,
             "expect": self.expect,
             "control": self.control,
+            # layout v2: which variables name the combination directories, and the sweep itself
+            # at the top level (report/grid.py reads `axes`/`pairs` here for column order)
+            "swept": list(self.swept),
+            **sweep,
+            "compress_raw": self.compress_raw,
             "definition": self.raw,
             "cells": [{k: v for k, v in c.to_dict().items() if k not in ("harness_args", "harness_env")}
                       for c in cells],
@@ -460,6 +555,9 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
     def check_names(d: dict, where: str):
         if not isinstance(d, dict):
             raise GridError(f"{where}: must be a mapping")
+        gone = [k for k in d if k in REMOVED_VARS and k not in variables]
+        if gone:
+            raise GridError(f"{where}: {gone[0]!r} {REMOVED_VARS[gone[0]]}")
         bad = [k for k in d if k not in variables]
         if bad:
             raise GridError(f"{where}: unknown variable(s) {bad}; declared in variables.yaml: {sorted(variables)}")
@@ -494,6 +592,7 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
     if "axes" in raw and "pairs" in raw:
         raise GridError("use either axes: (cross product) or pairs: (explicit list), not both")
     combos: list[dict] = []
+    swept: list[str] = []
     if "axes" in raw:
         axes = unalias(raw["axes"] or {}, "axes")
         check_names(axes, "axes")
@@ -504,6 +603,7 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
                 coerce(k, v, variables[k])
         keys = list(axes)
         combos = [dict(zip(keys, prod)) for prod in itertools.product(*(axes[k] for k in keys))]
+        swept = keys
     elif "pairs" in raw:
         pairs = raw["pairs"]
         if not isinstance(pairs, list) or not pairs:
@@ -514,6 +614,7 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
             for k, v in p.items():
                 coerce(k, v, variables[k])
         combos = [dict(p) for p in pairs]
+        swept = list(dict.fromkeys(k for p in pairs for k in p))   # first-appearance order
     else:
         combos = [{}]
     control = raw.get("control")
@@ -543,6 +644,8 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         raise GridError(f"expect: allowed keys {sorted(EXPECT_KEYS)}")
     if "band" in expect and not re.match(r"^n\d+$", str(expect["band"])):
         raise GridError(f"expect.band: expected like n41, got {expect['band']!r}")
+    compress = raw.get("compress_raw", True)
+    compress = _as_bool("compress_raw", True if compress is None else compress)
     if seed is None:
         seed = raw.get("seed")
     if seed is None:
@@ -551,8 +654,8 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         raise GridError("seed: must be an integer")
     g = Grid(id=gid, description=str(raw.get("description", "")), defaults=defaults, combos=combos,
              order=order, seed=int(seed), expect=dict(expect), control=control, variables=variables,
-             source=source, raw=raw)
-    cells = g.expand()  # validates labels are unique and every value resolves
+             source=source, raw=raw, swept=swept, compress_raw=compress)
+    cells = g.expand()  # validates labels and combination directories are unique, every value resolves
     for c in cells:
         if c.values["resolution"] != "auto":
             for w in resolution_warnings(*c.requested):

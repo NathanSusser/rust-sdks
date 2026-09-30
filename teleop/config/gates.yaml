@@ -1,7 +1,11 @@
 # Pre-flight thresholds. Each gate in preflight.py reads its entry here.
 code_match:
   require_same_commit: true
-  require_same_harness_sha256: true
+  # Binaries are per-role and built on each host: A runs teleop-harness, B runs the
+  # subscriber. Their hashes never match across machines, so code identity is the commit
+  # plus the teleop package and requirements hashes; the binaries are compared only
+  # when a grid asks for it.
+  require_same_harness_sha256: false
   require_same_requirements_sha256: true
 ptp_b:
   carrier_up: true

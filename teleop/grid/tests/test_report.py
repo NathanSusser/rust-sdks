@@ -2,13 +2,17 @@
 
     python3 -m unittest teleop.grid.tests.test_report -v      (from the repo root, Host A)
 
-No data file is committed; everything is generated here. Nothing is written outside
-the temporary directory, except the optional legacy-cell check (see the last test), which
-renders into that cell's own directory as the contract prescribes.
+Grids use layout v2 (<grid>/<combo>/r<n>/, CONTRACT.md); one test keeps the older cells/<label>/
+layout readable. The analysis page (comparison/analysis.html) is checked on a 2 x 2 x 5 x 3 grid,
+on one cell and on repeats without metrics; when google-chrome is installed its script is run
+headless and the rendered DOM counted. No data file is committed; everything is generated here.
+Nothing is written outside the temporary directory, except the optional legacy-cell check (see
+the last test), which renders into that cell's own directory as the contract prescribes.
 """
 from __future__ import annotations
 
 import csv
+import html as htmllib
 import json
 import math
 import re
@@ -21,8 +25,10 @@ from pathlib import Path
 import numpy as np
 
 from teleop.grid import stats
+from teleop.grid.report import analysis as report_analysis
 from teleop.grid.report import cell as report_cell
 from teleop.grid.report import grid as report_grid
+from teleop.grid.tests import synth
 
 GRID_ID = "gtest01"
 EPOCH = 1_790_384_410
@@ -48,8 +54,9 @@ def _write_csv(path: Path, head: list[str], rows: list[list]) -> None:
 def make_cell(grid_dir: Path, index: int, codec: str, kbps: int, repeat: int = 1, *, duration_s: int = 60,
               status: str = "OK", encoder: str = "NVIDIA NVENC", ptp_locked: bool = True,
               reduced: bool = True, spikes_csv: bool = True, seed: int | None = None, alt_names: bool = False,
-              extra_vars: dict | None = None) -> Path:
-    """One realistic cell: manifest.json, metrics.json and (optionally) reduced/*.csv.
+              extra_vars: dict | None = None, layout: str = "v2") -> Path:
+    """One realistic cell: manifest.json, metrics.json and (optionally) reduced/*.csv, at
+    <grid>/<codec>-<kbps>k[-...]/r<repeat> (layout v2) or <grid>/cells/<label> (layout="cells").
 
     Column names are the canonical ones reduce/ writes (CONTRACT.md "Reduced tables");
     alt_names=True writes the `_ms`-suffixed spellings the report also accepts.
@@ -64,7 +71,8 @@ def make_cell(grid_dir: Path, index: int, codec: str, kbps: int, repeat: int = 1
     variables.update(extra_vars or {})
     vtag = "".join(f"-{k[:1]}{v}" for k, v in (extra_vars or {}).items())
     label = f"{GRID_ID}-c{index:02d}-{codec}-{kbps}k-{w}x{h}-v1-p1{vtag}-r{repeat}"
-    cd = grid_dir / "cells" / label
+    combo = f"{codec}-{kbps}k{vtag}"
+    cd = grid_dir / "cells" / label if layout == "cells" else grid_dir / combo / f"r{repeat}"
     (cd / "reduced").mkdir(parents=True, exist_ok=True)
 
     # ---- frames ---------------------------------------------------------------------
@@ -254,6 +262,14 @@ def make_grid(root: Path, codecs=("h264", "av1"), kbps=(512, 2500, 8000), repeat
     return gd
 
 
+def label_of(cd: Path) -> str:
+    return json.loads((cd / "manifest.json").read_text())["label"]
+
+
+def repeat_dirs(gd: Path) -> list[Path]:
+    return sorted(p for p in gd.glob("*/r*") if p.is_dir())
+
+
 def pdf_pages(path: Path) -> int:
     out = subprocess.run(["pdfinfo", str(path)], capture_output=True, text=True, check=True).stdout
     return int(re.search(r"^Pages:\s+(\d+)", out, re.M).group(1))
@@ -265,7 +281,8 @@ def expected_cell_pages(cd: Path) -> int:
     n = sum(1 for r in rows if (v := r.get("owd") or r.get("owd_ms")) and float(v) > 100)
     extra = max(0, n - report_cell.SPIKE_ROWS_FIRST)
     qp_page = 1 if any(r.get("qp") for r in rows) else 0     # "QP per frame" when frames carry qp
-    return 8 + qp_page + min(report_cell.SPIKE_MAX_CONT_PAGES, math.ceil(extra / report_cell.SPIKE_ROWS_CONT))
+    # 8 fixed pages + "Control path (data track)" (always, "no data" when there are no logs)
+    return 9 + qp_page + min(report_cell.SPIKE_MAX_CONT_PAGES, math.ceil(extra / report_cell.SPIKE_ROWS_CONT))
 
 
 class ReportTests(unittest.TestCase):
@@ -273,14 +290,13 @@ class ReportTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="teleop-report-test-"))
         cls.grid = make_grid(cls.tmp)
-        cells = sorted((cls.grid / "cells").iterdir())
         # vary the six: one INCOMPLETE (excluded), one non-NVENC, one PTP-unlocked, one without spikes.csv
         make_cell(cls.grid, 2, "h264", 2500, status="INCOMPLETE")
         make_cell(cls.grid, 4, "av1", 512, encoder="libaom (software)")
         make_cell(cls.grid, 5, "av1", 2500, alt_names=True)
-        make_cell(cls.grid, 6, "av1", 8000, ptp_locked=False, spikes_csv=False)
-        (cls.grid / "cells" / sorted(p.name for p in cells if "-c06-" in p.name)[0] / "reduced" / "spikes.csv").unlink(missing_ok=True)
-        cls.cells = sorted((cls.grid / "cells").iterdir())
+        c6 = make_cell(cls.grid, 6, "av1", 8000, ptp_locked=False, spikes_csv=False)
+        (c6 / "reduced" / "spikes.csv").unlink(missing_ok=True)
+        cls.cells = repeat_dirs(cls.grid)
 
     @classmethod
     def tearDownClass(cls):
@@ -292,16 +308,18 @@ class ReportTests(unittest.TestCase):
             pdf = report_cell.render(cd)
             self.assertTrue(pdf.is_file())
             html = (cd / "report.html").read_text()
-            self.assertIn(cd.name, html)
-            self.assertEqual(pdf_pages(pdf), expected_cell_pages(cd), cd.name)
+            self.assertIn(label_of(cd), html)
+            self.assertEqual(pdf_pages(pdf), expected_cell_pages(cd), cd)
             self.assertNotIn("http://", html.replace("http://www.w3.org", ""))
             self.assertNotIn("https://", html)
+            self.assertIn("Control path (data track)", html)
+            self.assertNotIn("Screenshot", html)
         # the loud flags
-        nonnv = next(c for c in self.cells if "-c04-" in c.name)
+        nonnv = next(c for c in self.cells if "-c04-" in label_of(c))
         self.assertIn("not NVENC", (nonnv / "report.html").read_text())
-        unlocked = next(c for c in self.cells if "-c06-" in c.name)
+        unlocked = next(c for c in self.cells if "-c06-" in label_of(c))
         self.assertIn("PTP NOT LOCKED", (unlocked / "report.html").read_text())
-        locked = next(c for c in self.cells if "-c01-" in c.name)
+        locked = next(c for c in self.cells if "-c01-" in label_of(c))
         self.assertNotIn("PTP NOT LOCKED", (locked / "report.html").read_text())
         # the rendered HTML carries every seven-field statistic header
         self.assertIn("<th class=\"num\">p99</th>", (locked / "report.html").read_text())
@@ -310,24 +328,36 @@ class ReportTests(unittest.TestCase):
         gd = self.tmp / "sparse"
         cd = make_cell(gd, 1, "h264", 2500, reduced=False)
         pdf = report_cell.render(cd)
-        self.assertEqual(pdf_pages(pdf), 8)
-        self.assertIn("frames.csv missing", (cd / "report.html").read_text())
+        self.assertEqual(pdf_pages(pdf), 9)
+        html = (cd / "report.html").read_text()
+        self.assertIn("frames.csv missing", html)
+        self.assertIn("Control metrics incomplete", html)
 
     def test_grid_comparison(self):
         for cd in self.cells:
             if not (cd / "report.html").exists():
                 report_cell.render(cd)
         out = report_grid.render(self.grid)
-        for f in ("metrics.csv", "comparison.html", "comparison.pdf"):
+        for f in ("metrics.csv", "comparison.html", "comparison.pdf", "analysis.html"):
             self.assertTrue((out / f).is_file(), f)
         self.assertEqual(pdf_pages(out / "comparison.pdf"), 1 + len(report_grid.KPIS_OF_RECORD))
         html = (out / "comparison.html").read_text()
         for cd in self.cells:
-            self.assertIn(cd.name, html)
-        self.assertIn("../cells/", html)
+            self.assertIn(label_of(cd), html)
+            self.assertIn(f"../{cd.parent.name}/{cd.name}/report.html", html)
+        # every combination got its summary (report.grid.render refreshes missing ones)
+        for cd in self.cells:
+            self.assertTrue((cd.parent / "summary.pdf").is_file(), cd.parent)
         with (out / "metrics.csv").open() as f:
             rows = list(csv.DictReader(f))
-        self.assertEqual(set(r["label"] for r in rows), {c.name for c in self.cells})
+        self.assertEqual(set(r["label"] for r in rows), {label_of(c) for c in self.cells})
+        self.assertEqual(list(rows[0])[:8], ["grid_id", "label", "combo", "index", "repeat", "kind", "status", "excluded"])
+        self.assertEqual({r["combo"] for r in rows}, {c.parent.name for c in self.cells})
+        self.assertEqual({r["repeat"] for r in rows}, {"1"})
+        # a metrics.json from before the control path still carries the (empty) control rows
+        ctl = [r for r in rows if r["metric_path"] == "control.owd" and r["statistic"] == "p99"]
+        self.assertEqual(len(ctl), len(self.cells))
+        self.assertEqual({r["value"] for r in ctl}, {""})
         owd = [r for r in rows if r["metric_path"] == "latency.owd"]
         self.assertEqual({r["statistic"] for r in owd}, set(stats.FIELDS))
         self.assertTrue(any(r["metric_path"] == "frame.fps_delivered" and r["statistic"] == "value" for r in rows))
@@ -344,28 +374,246 @@ class ReportTests(unittest.TestCase):
         gd = self.tmp / "one" / GRID_ID
         make_cell(gd, 1, "h264", 2500, reduced=False)
         # a cell that ran but never reduced: manifest only
-        broken = gd / "cells" / f"{GRID_ID}-c02-av1-2500k-x-r1"
+        broken = gd / "av1-2500k" / "r1"
         broken.mkdir(parents=True)
-        (broken / "manifest.json").write_text(json.dumps({"label": broken.name, "grid_id": GRID_ID, "index": 2,
+        blabel = f"{GRID_ID}-c02-av1-2500k-x-r1"
+        (broken / "manifest.json").write_text(json.dumps({"label": blabel, "grid_id": GRID_ID, "index": 2,
                                                           "status": "INCOMPLETE", "variables": {"codec": "av1", "kbps": 2500}}))
+        # a repeat directory that was created but holds nothing yet: ignored everywhere
+        (gd / "av1-2500k" / "r2" / "hosta").mkdir(parents=True)
         out = report_grid.render(gd)
         self.assertEqual(pdf_pages(out / "comparison.pdf"), 1 + len(report_grid.KPIS_OF_RECORD))
         html = (out / "comparison.html").read_text()
-        self.assertIn(broken.name, html)
+        self.assertIn(blabel, html)
         self.assertIn("no metrics.json", html)
+        model = analysis_model(out / "analysis.html")
+        self.assertEqual(sorted(len(c["repeats"]) for c in model["combos"]), [1, 1])
+        rep_ = next(c for c in model["combos"] if c["name"] == "av1-2500k")["repeats"][0]
+        self.assertEqual((rep_["has"], rep_["included"], rep_["status"]), (False, False, "INCOMPLETE"))
+        self.assertIn("no_metrics", rep_["flags"])
 
     def test_grid_48_cells(self):
         # 2 codecs x 4 kbps x 2 vbv x 3 repeats = 48; metrics only, as the comparison reads nothing else
         gd = make_grid(self.tmp / "big", kbps=(512, 1500, 2500, 8000), repeats=3, extra={"vbv_frames": (1, 5)},
                        reduced=False, duration_s=20)
-        self.assertEqual(len(list((gd / "cells").iterdir())), 48)
-        out = report_grid.render(gd)
+        self.assertEqual(len(repeat_dirs(gd)), 48)
+        out = report_grid.render(gd, summaries=False)
         self.assertEqual(pdf_pages(out / "comparison.pdf"), 1 + len(report_grid.KPIS_OF_RECORD))
+        model = analysis_model(out / "analysis.html")
+        self.assertEqual(len(model["combos"]), 16)
+        self.assertEqual(model["axes"], ["codec", "kbps", "vbv_frames"])
+        self.assertEqual(model["x"], "kbps")          # no bpp axis: the first numeric one
+
+    def test_legacy_cells_layout_still_read(self):
+        gd = self.tmp / "old" / GRID_ID
+        cds = [make_cell(gd, i, codec, kb, reduced=False, layout="cells")
+               for i, (codec, kb) in enumerate((("h264", 512), ("av1", 2500)), 1)]
+        report_cell.render(cds[0])
+        out = report_grid.render(gd)
+        with (out / "metrics.csv").open() as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len({r["label"] for r in rows}), 2)
+        self.assertEqual({r["combo"] for r in rows}, {""})
+        self.assertIn("../cells/", (out / "comparison.html").read_text())
+        self.assertEqual(len(analysis_model(out / "analysis.html")["combos"]), 2)
 
     @unittest.skipUnless((LEGACY_CELL / "metrics.json").is_file(), "legacy cell not reduced yet")
-    def test_legacy_cell(self):
+    def test_legacy_cell(self):  # noqa: D102
         pdf = report_cell.render(LEGACY_CELL)
         self.assertGreaterEqual(pdf_pages(pdf), 8)
+
+
+
+# ======================================================================================
+# the analysis page
+# ======================================================================================
+
+def analysis_model(path: Path) -> dict:
+    """The JSON the page embeds (the same model its script renders from)."""
+    text = Path(path).read_text(encoding="utf-8")
+    m = re.search(r'<script type="application/json" id="analysis-data">(.*?)</script>', text, re.S)
+    return json.loads(m.group(1).replace("<\\/", "</"))
+
+
+def hrefs(text: str) -> list[str]:
+    return [htmllib.unescape(h) for h in re.findall(r'href="([^"]+)"', text)]
+
+
+CHROME = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+
+
+def chrome_dom(page: Path) -> str | None:
+    """The DOM after the page's script ran (headless), or None when the browser fails to start."""
+    try:
+        r = subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--no-sandbox", "--no-first-run",
+                            "--virtual-time-budget=4000", "--dump-dom", page.resolve().as_uri()],
+                           capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 and "<html" in r.stdout else None
+
+
+class AnalysisTests(unittest.TestCase):
+    """2 codecs x 2 fps x 5 bpp x 3 repeats in layout v2, the awkward repeats synth.make_grid adds
+    (INCOMPLETE, not NVENC, PTP unlocked, codec fallback, SKIPPED, not run, no control logs) and
+    one control cell; combination summaries and a few cell reports rendered for the links."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="teleop-analysis-test-"))
+        cls.grid = synth.make_grid(cls.tmp, duration_s=20)
+        cls.reports = [cls.grid / "h265-30fps-b0040" / "r1", cls.grid / "av1-25fps-b0060" / "r3"]
+        for cd in cls.reports:
+            report_cell.render(cd)
+        cls.out = report_grid.render(cls.grid)          # renders every combination's summary too
+        cls.page = (cls.out / "analysis.html").read_text(encoding="utf-8")
+        cls.model = analysis_model(cls.out / "analysis.html")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_structure(self):
+        m = self.model
+        self.assertEqual(m["axes"], ["codec", "fps", "bpp"])
+        self.assertEqual(m["x"], "bpp")
+        self.assertEqual(m["series_axes"], ["codec", "fps"])
+        self.assertEqual(m["values"]["bpp"], [0.04, 0.06, 0.08, 0.1, 0.14])
+        self.assertEqual(len(m["combos"]), 20)
+        self.assertEqual(sum(len(c["repeats"]) for c in m["combos"]), 59)       # one not run yet
+        for sec in ("overview", "curves", "radar", "matrix", "repeats"):
+            self.assertIn(f'id="{sec}"', self.page)
+        self.assertEqual(self.page.count('<details class="how">'), 5)          # one "how to read this" each
+        # self-contained: no external fetch of any kind
+        self.assertNotRegex(self.page.replace("http://www.w3.org/2000/svg", ""), r"https?://")
+        self.assertNotIn("<link", self.page)
+        self.assertNotRegex(self.page, r"<script[^>]+src=")
+        # both themes are styled
+        self.assertIn('[data-theme="dark"]', self.page)
+        self.assertIn("prefers-color-scheme: dark", self.page)
+        # the KPIs of record, primary first
+        prim = [k["id"] for k in m["kpis"] if k["primary"]]
+        self.assertEqual(prim, ["e2e", "owd", "jit_sd", "jit_ia", "qp", "spread", "fps", "lost", "c_owd", "c_del"])
+        self.assertEqual([r["label"] for r in m["radar"]],
+                         ["e2e p50", "e2e p99", "owd p99", "jitter sd", "QP p50", "QP p99", "control owd p99"])
+        self.assertEqual(m["qp_scale"]["av1"], "AV1 q-index 0–255")
+        self.assertEqual(set(m["qp_path"].values()), {"encoder.qp_per_frame"})
+
+    def test_flags_and_counting(self):
+        reps = {(c["name"], r["n"]): r for c in self.model["combos"] for r in c["repeats"]}
+        self.assertEqual(reps[("h265-30fps-b0100", 2)]["status"], "INCOMPLETE")
+        self.assertFalse(reps[("h265-30fps-b0100", 2)]["included"])
+        self.assertIn("incomplete", reps[("h265-30fps-b0100", 2)]["flags"])
+        self.assertIn("not_nvenc", reps[("av1-25fps-b0060", 3)]["flags"])
+        self.assertIn("ptp_unlocked", reps[("av1-30fps-b0140", 1)]["flags"])
+        self.assertIn("codec_fallback", reps[("h265-25fps-b0040", 1)]["flags"])
+        self.assertIn("no_control", reps[("h265-30fps-b0060", 3)]["flags"])
+        sk = reps[("av1-25fps-b0100", 2)]
+        self.assertEqual((sk["status"], sk["has"], sk["included"]), ("SKIPPED", False, False))
+        self.assertNotIn(("h265-25fps-b0140", 3), reps)
+        cb = next(c for c in self.model["combos"] if c["name"] == "h265-25fps-b0140")
+        self.assertEqual(cb["missing"], [3])
+        ov = self.model["overview"]
+        self.assertEqual(ov["status"], {"OK": 57, "INCOMPLETE": 1, "SKIPPED": 1})
+        self.assertEqual(ov["ptp_locked"], 57)                  # 58 with metrics, one unlocked
+        self.assertIn("libaom (software)", ov["encoders"]["av1"])
+        self.assertEqual(len(self.model["controls"]), 1)
+
+    def test_medians_match_python(self):
+        """The overview's computed medians use stats.percentile over the counted repeats."""
+        m = self.model
+        k = next(x for x in m["kpis"] if x["id"] == "e2e")
+        cb = next(c for c in m["combos"] if c["name"] == "h265-30fps-b0100")      # r2 INCOMPLETE
+        vals = [r["mx"]["latency.e2e"]["p99"] for r in cb["repeats"] if r["included"]]
+        self.assertEqual(len(vals), 2)
+        self.assertEqual(report_analysis.combo_value(m, cb, k, "p99"), stats.summ(vals)["p50"])
+        allv = [r["mx"]["latency.e2e"]["p99"] for r in cb["repeats"] if r["has"]]
+        self.assertEqual(report_analysis.combo_value(m, cb, k, "p99", include_all=True), stats.summ(allv)["p50"])
+
+    def test_computed_summaries(self):
+        lines = {ln["id"]: ln for ln in self.model["overview"]["kpi_lines"]}
+        self.assertEqual(set(lines), {"e2e", "owd", "jit_sd", "jit_ia", "qp", "spread", "fps", "lost", "c_owd", "c_del"})
+        e2e = " ".join(lines["e2e"]["text"])
+        self.assertRegex(e2e, r"best .+ = [\d.]+ ms; worst .+ = [\d.]+ ms \(\+[\d.]+ ms, [\d.]+×\)")
+        self.assertRegex(e2e, r"bpp 0\.04 → 0\.14: ")
+        self.assertRegex(e2e, r"(h265 vs av1|av1 vs h265): median [+−][\d.]+ ms over 10 matched settings")
+        qp = lines["qp"]["text"]
+        self.assertTrue(any(t.startswith("av1 (AV1 q-index 0–255): best") for t in qp))
+        self.assertTrue(any(t.startswith("h265 (H.265 QP 0–51): best") for t in qp))
+        self.assertFalse(any(" vs " in t and "h265" in t.split(":")[1] and "av1" in t.split(":")[1] for t in qp))
+        self.assertIn("computed from metrics.json", self.page)
+
+    def test_links_resolve(self):
+        base = self.out
+        for cb in self.model["combos"]:
+            self.assertEqual(cb["summary_pdf"], f"../{cb['name']}/summary.pdf")
+            self.assertTrue((base / cb["summary_pdf"]).is_file(), cb["summary_pdf"])
+            for r in cb["repeats"]:
+                if r["report_pdf"]:
+                    self.assertTrue((base / r["report_pdf"]).is_file())
+        with_reports = {r["report_pdf"] for c in self.model["combos"] for r in c["repeats"] if r["report_pdf"]}
+        self.assertEqual(with_reports, {f"../{cd.parent.name}/{cd.name}/report.pdf" for cd in self.reports})
+        # the summaries link back to their repeats' reports and to the analysis page
+        s = (self.grid / "h265-30fps-b0040" / "summary.html").read_text()
+        self.assertIn('href="r1/report.pdf"', s)
+        self.assertIn('href="../comparison/analysis.html"', s)
+        for h in hrefs(self.page):
+            if not h.startswith("#"):
+                self.assertTrue((base / h).exists(), h)
+
+    def test_metrics_csv_v2(self):
+        with (self.out / "metrics.csv").open() as f:
+            rows = list(csv.DictReader(f))
+        combos = {r["combo"] for r in rows}
+        self.assertEqual(len(combos - {"controls"}), 20)
+        self.assertIn("controls", combos)
+        self.assertEqual({r["repeat"] for r in rows if r["combo"] != "controls"}, {"1", "2", "3"})
+        d = [r for r in rows if r["metric_path"] == "control.delivered_pct" and r["combo"] == "h265-30fps-b0040"]
+        self.assertEqual(len(d), 3)
+        self.assertTrue(all(98 < float(r["value"]) <= 100 for r in d))
+        g = {r["value"] for r in rows if r["metric_path"] == "control.gaps.max_consecutive_lost"
+             and r["combo"] == "h265-30fps-b0060" and r["repeat"] == "3"}
+        self.assertEqual(g, {""})                                # older subscriber: no control log
+
+    def test_one_cell(self):
+        gd = synth.make_grid(self.tmp / "one", codecs=("av1",), fps=(30,), bpp=(0.08,), repeats=1, flags=False,
+                             controls=False, duration_s=12)
+        out = report_grid.render(gd)
+        m = analysis_model(out / "analysis.html")
+        self.assertEqual(len(m["combos"]), 1)
+        self.assertEqual(m["x"], "bpp")
+        lines = {ln["id"]: ln for ln in m["overview"]["kpi_lines"]}
+        self.assertIn("one setting only", lines["e2e"]["text"][0])
+        self.assertTrue((gd / "av1-30fps-b0080" / "summary.pdf").is_file())
+
+    def test_no_metrics_anywhere(self):
+        gd = self.tmp / "empty" / "gnone"
+        for combo in ("h265-30fps-b0040", "av1-30fps-b0040"):
+            d = gd / combo / "r1"
+            d.mkdir(parents=True)
+            (d / "manifest.json").write_text(json.dumps({"label": f"gnone-c00-{combo}-r1", "grid_id": "gnone",
+                                                         "status": "SKIPPED", "variables": {
+                                                             "codec": combo[:4].strip("-"), "fps": 30, "bpp": 0.04}}))
+        out = report_grid.render(gd)
+        m = analysis_model(out / "analysis.html")
+        self.assertEqual(len(m["combos"]), 2)
+        self.assertTrue(all(ln["empty"] for ln in m["overview"]["kpi_lines"]))
+        self.assertTrue((gd / "h265-30fps-b0040" / "summary.pdf").is_file())
+
+    @unittest.skipUnless(CHROME, "no headless Chrome on this host")
+    def test_script_renders_in_chrome(self):
+        dom = chrome_dom(self.out / "analysis.html")
+        if dom is None:
+            self.skipTest("headless Chrome did not start")
+        n_kpi = len(self.model["kpis"])
+        # one svg per chart: each KPI once, QP-like KPIs once per codec, plus the explorer
+        n_codec = sum(2 for k in self.model["kpis"] if k["per_codec"]) + sum(1 for k in self.model["kpis"] if not k["per_codec"])
+        self.assertGreaterEqual(dom.count('class="ch"'), n_codec)
+        self.assertLessEqual(dom.count('class="ch"'), n_codec + 2)
+        self.assertEqual(dom.count('<table class="mx">'), 1)
+        self.assertEqual(dom.count('class="ring"'), 4)                              # the radar's four rings
+        self.assertIn("gsynth-c", dom)                                              # the repeats table
+        self.assertGreater(n_kpi, 10)
 
 
 if __name__ == "__main__":

@@ -7,12 +7,14 @@ in CONTRACT.md, and writes <cell>/reduced/:
 
     dlf-rates-a.csv dlf-rates-b.csv band-a.csv band-b.csv   (only when that host's DLF exists)
     frames.csv seconds.csv spikes.csv episodes.csv inflight.csv reduce.json
-    screens.csv screens/<frame_id>.png                      (only when hostb/frames/ exists)
+    control.csv                        (when either control-path log exists, reduce/control.py)
+    probes.csv                         (when A's jsonl carries the probe section)
 
 then updates manifest["band"], manifest["integrity"]["reduce_resyncs"] and
 manifest["integrity"]["reduce"] (see CONTRACT.md "added by reduce"). Nothing is written
 outside the cell directory. A missing input (hostb/ absent, no DLF, no hops) is recorded in
-reduce.json "missing" and the tables carry blanks where that input would have been.
+reduce.json "missing" and the tables carry blanks where that input would have been. Every raw
+input is read once; the multi-GB DLFs are streamed.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import os
 import time
 from pathlib import Path
 
-from . import dlf_rates, frames as F, pcap_extract, screens, segjoin
+from . import control as CTL, dlf_rates, frames as F, pcap_extract, qp as QP, segjoin
 
 __all__ = ["reduce_cell"]
 
@@ -229,20 +231,40 @@ def reduce_cell(cell_dir) -> None:
                             dlf_b.get("x19ef") if dlf_b["present"] else None, enc, seconds)
 
     # per-frame QP from B's decoder log (hostb/frames-qp.csv): optional, an older subscriber
-    # writes none. A failure here costs the qp column, never the cell.
+    # writes none. A failure here costs the qp column, never the cell. The log's summary goes to
+    # reduce.json so metrics never reads the raw file again.
     frame_cols = F.FRAME_COLS
+    qp_summary = None
     try:
-        qlog = screens.read_qp_log(hb / screens.QP_LOG)
+        qlog = QP.read_qp_log(hb / QP.QP_LOG)
         if qlog is not None:
-            matched = screens.attach_qp(rows, qlog)
+            qp_summary = qlog.summary()
+            matched = QP.attach_qp(rows, qlog)
+            qp_summary["joined"] = matched
             frame_cols = (*F.FRAME_COLS, "qp")
             if len(qlog) and not matched:
-                notes.append(f"{screens.QP_LOG}: {len(qlog)} rows, none joined to a published frame")
+                notes.append(f"{QP.QP_LOG}: {len(qlog)} rows, none joined to a published frame")
+            if len(qlog) and not qp_summary["with_qp"]:
+                notes.append(f"{QP.QP_LOG}: {len(qlog)} rows, qp empty in all (decoder does not expose it)")
         elif hb.is_dir():
-            notes.append(f"{screens.QP_LOG} absent (subscriber without LK_DECODER_FRAME_LOG): no per-frame QP")
+            notes.append(f"{QP.QP_LOG} absent (subscriber without LK_DECODER_FRAME_LOG): no per-frame QP")
     except Exception as e:  # noqa: BLE001
-        notes.append(f"{screens.QP_LOG}: not joined ({type(e).__name__}: {e})")
+        notes.append(f"{QP.QP_LOG}: not joined ({type(e).__name__}: {e})")
     F.write_csv(out / "frames.csv", frame_cols, rows)
+
+    # control path (data track): A's publisher seq log + B's receive log, and the probe round
+    # trips read_webrtc_stats collected from A's jsonl in its one pass. Never fails the cell.
+    try:
+        control = CTL.reduce_control(ha, hb, epoch, out, notes, (manifest.get("variables") or {}).get("control_transport"))
+    except Exception as e:  # noqa: BLE001
+        control = {"reason": f"control reduce failed: {type(e).__name__}: {e}"}
+        notes.append(control["reason"])
+    control["probe_section"] = stats.get("probe_section", False)
+    control["probe_rtts"] = len(stats.get("probes") or [])
+    if stats.get("probe_section"):
+        CTL.write_probes(out / "probes.csv", stats["probes"])
+    else:
+        (out / "probes.csv").unlink(missing_ok=True)
     F.write_csv(out / "seconds.csv", F.SECONDS_COLS, sec_rows)
     F.write_csv(out / "spikes.csv", F.SPIKE_COLS, spikes)
     F.write_csv(out / "episodes.csv", F.EPISODE_COLS, episodes)
@@ -302,6 +324,8 @@ def reduce_cell(cell_dir) -> None:
                     "note": "padding off for this cell" if pad_off else
                     "filler NALs (H.264 type 12) / AV1 padding are invisible through SRTP; share not measurable from the wire"},
         "spikes": {"n": len(spikes), "episodes": len(episodes)},
+        "qp_log": qp_summary,
+        "control": control,
     }
     (out / "reduce.json").write_text(json.dumps(red, indent=1, default=str))
 
@@ -317,14 +341,3 @@ def reduce_cell(cell_dir) -> None:
     tmp = mpath.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(manifest, indent=2))
     os.replace(tmp, mpath)
-
-    # ---- screenshots, last: reads frames.csv back, and a failure must not fail the cell
-    try:
-        shot_notes: list[str] = []
-        n = screens.reduce_screens(cell, epoch, manifest, shot_notes)
-        if n or shot_notes:
-            red["screens"] = {"written": n, "notes": shot_notes}
-            (out / "reduce.json").write_text(json.dumps(red, indent=1, default=str))
-    except Exception as e:  # noqa: BLE001
-        red["screens"] = {"written": 0, "error": f"{type(e).__name__}: {e}"}
-        (out / "reduce.json").write_text(json.dumps(red, indent=1, default=str))

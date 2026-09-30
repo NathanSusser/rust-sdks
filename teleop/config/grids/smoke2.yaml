@@ -1,0 +1,26 @@
+# Two short cells (one per codec) that prove layout v2 end to end before tonight's grid:
+# pull + verify + purge on B, the data-track control path, background reduction, compression.
+id: smoke2
+description: h265 and av1, 30 s at 1600x1300@30, bpp 0.10 (6240 kbps derived)
+defaults:
+  resolution: 1600x1300
+  fps: 30
+  bpp: 0.10
+  duration_s: 30
+  repeats: 1
+  lead_s: 30
+  cooldown_s: 10
+  vbv_frames: 1
+  padding: on
+  pin_bitrate: on
+  target_quality: off
+  intra_refresh: 0
+  control_transport: data_track_buf1
+  control_rx_buffer: 64         # B's --control-buffer-frames (depth 1 dropped ~26% in the SDK queue)
+  clip: /home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4
+axes:
+  codec: [h265, av1]
+order: sequential
+compress_raw: true
+expect:
+  band: n41

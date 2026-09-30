@@ -436,6 +436,14 @@ class HostCfg(unittest.TestCase):
             hostcfg.validate(dict(raw, display=""))
         self.assertEqual(hostcfg.validate(dict(raw, role="a", display=None))["display"], "")
 
+    def test_b_keep_after_pull(self):
+        raw = {k: v for k, v in CFG_B.items() if k != "peer_repo"}
+        self.assertIs(hostcfg.validate(dict(raw))["b_keep_after_pull"], False)
+        for v, want in ((True, True), ("yes", True), (1, True), (False, False), ("off", False), (None, False)):
+            self.assertIs(hostcfg.validate(dict(raw, b_keep_after_pull=v))["b_keep_after_pull"], want, v)
+        with self.assertRaisesRegex(hostcfg.HostConfigError, "b_keep_after_pull must be true or false"):
+            hostcfg.validate(dict(raw, b_keep_after_pull="maybe"))
+
     def test_sfu_env(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "sfu.env"
@@ -444,6 +452,67 @@ class HostCfg(unittest.TestCase):
             p.write_text("OTHER=1\n")
             with self.assertRaisesRegex(hostcfg.HostConfigError, "not set"):
                 hostcfg.sfu_host(p)
+
+
+class GridDisk(unittest.TestCase):
+    """The whole-grid disk projection on Host A (control plane v2)."""
+
+    @staticmethod
+    def cells(n=2, kbps=8800, lead=45, dur=180, repeats=(1, 2)):
+        return [{"repeat": repeats[i % len(repeats)],
+                 "variables": {"kbps": kbps, "lead_s": lead, "duration_s": dur}} for i in range(n)]
+
+    @staticmethod
+    def st(free):
+        class St:
+            f_bavail, f_frsize = free, 1
+        return lambda p: St
+
+    def test_formula(self):
+        # span 255 s; DLF 2 hosts x 4.5 MB/s x 255 s x 1.1; pcap per host: 8800 kbps = 1.1 MB/s
+        # = 1000 video pkt/s + 500 other = 1500 pkt/s x 144 B x 255 s
+        dlf_cell = 2 * 4.5e6 * 255 * 1.1
+        pcap_host = 1500 * 144 * 255
+        self.assertAlmostEqual(preflight.pcap_bytes_estimate(self.cells()[0]), pcap_host)
+        p = preflight.grid_disk_projection(self.cells(), compress_raw=False)
+        self.assertAlmostEqual(p["dlf_bytes"], 2 * dlf_cell)
+        self.assertAlmostEqual(p["pcap_bytes"], 2 * 2 * pcap_host)
+        self.assertAlmostEqual(p["uncompressed_bytes"], 2 * (dlf_cell + 2 * pcap_host))
+        self.assertAlmostEqual(p["projected_bytes"], p["uncompressed_bytes"])
+        self.assertAlmostEqual(p["uncompressed_bytes"], 5_269_320_000)
+        q = preflight.grid_disk_projection(self.cells(), compress_raw=True)
+        self.assertAlmostEqual(q["projected_bytes"], 0.75 * 5_269_320_000)
+        self.assertAlmostEqual(q["uncompressed_bytes"], 5_269_320_000)
+        self.assertAlmostEqual(q["last_repeat_round_bytes"], 0.75 * (dlf_cell + 2 * pcap_host))
+
+    def test_gate_with_and_without_compression(self):
+        free = 24e9                       # budget = free - 20 GB = 4 GB
+        on = preflight.gate_grid_disk(self.cells(), "/nonexistent/x", True, statvfs=self.st(free))
+        self.assertTrue(on["pass"], on["detail"])                 # 3.95 GB <= 4 GB
+        self.assertIn("project 4.0 GB", on["detail"])
+        self.assertIn("5.3 GB uncompressed", on["detail"])
+        self.assertIn("free 24.0 GB", on["detail"])
+        self.assertIn("budget free - 20 GB = 4.0 GB", on["detail"])
+        off = preflight.gate_grid_disk(self.cells(), "/nonexistent/x", False, statvfs=self.st(free))
+        self.assertFalse(off["pass"])                              # 5.27 GB > 4 GB
+        self.assertIn("SHORT by 1.3 GB", off["detail"])
+        for hint in ("fewer repeats", "shorter lead_s", "compress_raw: true", "free space under /"):
+            self.assertIn(hint, off["detail"])
+        self.assertEqual(off["data"]["budget_bytes"], free - 20e9)
+        # 20 GB of headroom is not negotiable: just enough free space for the bytes still fails
+        tight = preflight.gate_grid_disk(self.cells(), "/", True, statvfs=self.st(4e9))
+        self.assertFalse(tight["pass"])
+
+    def test_tonight(self):
+        from teleop.grid import grid as G
+        cells = G.load(G.TELEOP_DIR / "config" / "grids" / "tonight.yaml", seed=1).expand()
+        p = preflight.grid_disk_projection(cells, compress_raw=True)
+        self.assertEqual(p["cells"], 60)
+        self.assertAlmostEqual(p["dlf_bytes"], 60 * 2 * 4.5e6 * 255 * 1.1)
+        pcap = sum(2 * (c.values["kbps"] * 125 / 1100 + 500) * 144 * 255 for c in cells)
+        self.assertAlmostEqual(p["pcap_bytes"], pcap)
+        self.assertAlmostEqual(p["projected_bytes"], 0.75 * (p["dlf_bytes"] + pcap))
+        self.assertAlmostEqual(p["lead_10s_bytes"], 60 * 2 * 4.5e6 * 10 * 1.1 * 0.75)
 
 
 class Checksums(unittest.TestCase):

@@ -3,9 +3,9 @@
 Ported from archive/local_video-scripts/generate_frame_report.py. Its four pages are kept
 (overview with the frame funnel, per-segment breakdown, one-way network latency and
 jitter, modem activity on both hosts) and fed from the reduced tables instead of raw CSVs;
-four pages are added (frame size, wire rates, QP and codec timing, late-frame breakdown).
-When B sampled decoded frames (reduced/screens.csv) a "Screenshots" page shows them, and when
-B's decoder logged per-frame QP a "QP per frame" page follows.
+pages are added (the control path over the data track, frame size, wire rates, QP and codec
+timing, late-frame breakdown). When B's decoder logged per-frame QP a "QP per frame" page
+follows.
 
 Every distribution shown carries mean, p50, p95, p99, max, min and n from stats.summ.
 Never writes anywhere but the cell directory.
@@ -126,6 +126,55 @@ def _read_csv(path: Path) -> Table | None:
     return Table(rows, list(reader.fieldnames or []))
 
 
+class Cols:
+    """Selected columns of a large reduced table as float arrays, with Table's col/resolve/len.
+    reduced/control.csv has one row per control sample (~36k in a 180 s cell): only the columns a
+    page draws are kept, never every row as a dict."""
+
+    def __init__(self, arrays: dict[str, np.ndarray], fields: list[str]):
+        self._a = arrays
+        self.fields = fields
+        self._n = len(next(iter(arrays.values()))) if arrays else 0
+
+    def __len__(self) -> int:
+        return self._n
+
+    def resolve(self, name: str) -> str | None:
+        return name if name in self.fields else None
+
+    def has(self, name: str) -> bool:
+        return self.resolve(name) is not None and self._n > 0 and bool(np.isfinite(self.col(name)).any())
+
+    def col(self, name: str) -> np.ndarray:
+        a = self._a.get(name)
+        return a if a is not None else np.full(self._n, np.nan)
+
+
+def read_columns(path: Path, cols: tuple[str, ...]) -> Cols | None:
+    """Only `cols` of a CSV (NaN where empty or not a number), streamed row by row."""
+    if not Path(path).is_file():
+        return None
+    out: dict[str, list] = {c: [] for c in cols}
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        rd = csv.reader(ln for ln in f if not ln.startswith("#"))
+        head = next(rd, None)
+        if not head:
+            return None
+        idx = {c: head.index(c) for c in cols if c in head}
+        for row in rd:
+            for c in cols:
+                i = idx.get(c)
+                v = row[i] if i is not None and i < len(row) else ""
+                try:
+                    out[c].append(float(v) if v else math.nan)
+                except ValueError:
+                    out[c].append(math.nan)
+    return Cols({c: np.asarray(v, dtype=float) for c, v in out.items()}, [c for c in head if c in cols])
+
+
+CONTROL_COLS = ("seq", "t_s", "sent", "received", "owd_ms", "ia_ms", "in_window")
+
+
 def _read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -216,7 +265,8 @@ class Cell:
     frames: Table | None
     seconds: Table | None
     spikes: Table | None
-    screens: Table | None = None
+    control: Cols | None = None              # reduced/control.csv, one row per control seq
+    probes: Table | None = None              # reduced/probes.csv, probe round trips
     qp_frames: tuple | None = None           # (t_s, qp) arrays, per decoded frame
     modem: dict[str, ModemRates | None] = field(default_factory=dict)
     bands: dict[str, Table | None] = field(default_factory=dict)
@@ -229,7 +279,8 @@ class Cell:
         man = _read_json(cd / "manifest.json")
         met = _read_json(cd / "metrics.json")
         c = cls(cd, man, met, _read_csv(red / "frames.csv"), _read_csv(red / "seconds.csv"),
-                _read_csv(red / "spikes.csv"), _read_csv(red / "screens.csv"))
+                _read_csv(red / "spikes.csv"), read_columns(red / "control.csv", CONTROL_COLS),
+                _read_csv(red / "probes.csv"))
         epoch = c.epoch
         c.qp_frames = _load_qp_frames(c)
         for h in ("a", "b"):
@@ -376,7 +427,6 @@ class Page:
         self.fig = plt.figure(figsize=S.PAGE_SIZE)
         self.name = name
         self.html_blocks: list[str] = []
-        self.html_fig = True       # False: html_blocks already show everything (screenshots)
         f = self.fig
         f.patches.append(Rectangle((0, 0.925), 1, 0.075, transform=f.transFigure, color=S.BAND, zorder=-1))
         title = cell.label
@@ -1195,13 +1245,10 @@ def pages_late(c: Cell) -> list[Page]:
 
 
 # --------------------------------------------------------------------------------------
-# screenshots and per-frame QP (reduce/screens.py)
+# per-frame QP (reduce/qp.py)
 # --------------------------------------------------------------------------------------
 
 QP_SCALE = {"h264": "H.264 QP 0–51", "h265": "H.265 QP 0–51", "av1": "AV1 q-index 0–255"}
-SHOTS_PER_PAGE = 6            # 2 rows x 3
-SHOT_PDF_MAX_W = 800          # px: downscaled before drawing so the PDF stays small
-SHOT_HTML_MAX_W = 640         # px: the HTML embeds each PNG at this width
 
 
 def qp_scale(c: Cell) -> str:
@@ -1210,108 +1257,18 @@ def qp_scale(c: Cell) -> str:
 
 
 def _load_qp_frames(c: Cell):
-    """Per-frame QP: reduced/frames.csv `qp` when reduce joined it, else hostb/frames-qp.csv
-    placed on the epoch by its capture timestamp. None when neither has a QP."""
+    """Per-frame QP: reduced/frames.csv `qp` when reduce joined it. A cell reduced before the
+    join existed falls back to hostb/frames-qp.csv placed on the epoch by its capture
+    timestamp. None when neither has a QP."""
     if c.frames is not None and c.frames.has("qp"):
         return c.fcol("t_s"), c.fcol("qp")
+    if c.frames is not None and c.frames.resolve("qp"):
+        return None                       # reduce joined the log: the decoder gave no QP
     log = c.dir / "hostb" / "frames-qp.csv"
     t = _read_csv(log)
     if t is None or not t.has("qp") or c.epoch is None:
         return None
     return t.col("capture_timestamp_us") / 1e6 - c.epoch, t.col("qp")
-
-
-def _downscale(img: np.ndarray, max_w: int) -> np.ndarray:
-    """Block-mean to at most max_w wide (integer factor, so no resampling artefacts)."""
-    k = int(math.ceil(img.shape[1] / max_w))
-    if k <= 1:
-        return img
-    h, w = (img.shape[0] // k) * k, (img.shape[1] // k) * k
-    x = img[:h, :w].astype(np.float32)
-    x = x.reshape(h // k, k, w // k, k, *img.shape[2:]).mean(axis=(1, 3))
-    return np.clip(x + 0.5, 0, 255).astype(np.uint8) if img.dtype == np.uint8 else x.astype(img.dtype)
-
-
-def _png_b64(img: np.ndarray) -> str:
-    import base64
-    import io
-    import matplotlib.image as mimg
-    buf = io.BytesIO()
-    mimg.imsave(buf, img, format="png")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _shot_caption(r: dict) -> str:
-    def f(v, spec):
-        return spec.format(v) if S.is_num(v) else "–"
-    kb = r["bytes"] / 1000 if S.is_num(r["bytes"]) else None
-    return (f"#{f(r['frame_id'], '{:.0f}')}  t {f(r['t_s'], '{:.1f}')} s  QP {f(r['qp'], '{:.0f}')}  "
-            f"{f(kb, '{:.1f}')} kB  one-way {f(r['owd'], '{:.0f}')} ms")
-
-
-def _shot_rows(c: Cell) -> list[dict]:
-    t = c.screens
-    if t is None or not len(t):
-        return []
-    cols = {k: t.col(k) for k in ("frame_id", "t_s", "qp", "bytes", "owd", "e2e")}
-    png = t.text("png")
-    out = []
-    for i in range(len(t)):
-        r = {k: (float(v[i]) if math.isfinite(v[i]) else None) for k, v in cols.items()}
-        r["png"] = c.dir / "reduced" / png[i] if png[i] else None
-        out.append(r)
-    return sorted(out, key=lambda r: r["frame_id"] if r["frame_id"] is not None else 1e18)
-
-
-def pages_screens(c: Cell) -> list[Page]:
-    """Decoded frames B sampled, 2 x 3 per page, each captioned from screens.csv."""
-    import matplotlib.image as mimg
-    rows = _shot_rows(c)
-    if not rows:
-        return []
-    every = c.variables.get("sample_every")
-    sub = (f"decoded on B, every {every}th frame ID" if every else "decoded on B") + f"  ·  {qp_scale(c)}"
-    pages = []
-    cols, nrows = 3, 2
-    cw, top, bot = 0.94 / cols, 0.905, 0.05
-    rh = (top - bot) / nrows
-    for start in range(0, len(rows), SHOTS_PER_PAGE):
-        chunk = rows[start:start + SHOTS_PER_PAGE]
-        name = "Screenshots" + (f" ({start // SHOTS_PER_PAGE + 1})" if len(rows) > SHOTS_PER_PAGE else "")
-        p = Page(c, name, sub)
-        p.html_fig = False
-        figs = []
-        for k, r in enumerate(chunk):
-            x = 0.03 + (k % cols) * cw
-            y = top - (k // cols + 1) * rh
-            ax = p.fig.add_axes([x + 0.005, y + 0.03, cw - 0.01, rh - 0.045])
-            ax.set_axis_off()
-            img = None
-            try:
-                img = mimg.imread(str(r["png"])) if r["png"] is not None else None
-            except (OSError, ValueError, SyntaxError):
-                img = None
-            if img is None:
-                _no_data(ax, "PNG missing")
-            else:
-                if img.dtype != np.uint8:
-                    img = np.clip(img * 255 + 0.5, 0, 255).astype(np.uint8)
-                img = img[..., :3] if img.ndim == 3 else img
-                ax.imshow(_downscale(img, SHOT_PDF_MAX_W), interpolation="antialiased")
-            cap = _shot_caption(r)
-            # in axes coordinates, so the caption follows the image box once imshow letterboxes it
-            ax.text(0.5, -0.015, cap, transform=ax.transAxes, ha="center", va="top", fontsize=7.2, color=S.INK)
-            src = (f'<img alt="{H.esc(cap)}" src="data:image/png;base64,{_png_b64(_downscale(img, SHOT_HTML_MAX_W))}" '
-                   f'style="width:100%;height:auto;display:block;border-radius:4px">' if img is not None
-                   else '<p class="note">PNG missing</p>')
-            figs.append(f'<figure style="margin:0">{src}<figcaption class="note" style="font-size:12px;'
-                        f'color:var(--ink2);margin-top:4px">{H.esc(cap)}</figcaption></figure>')
-        p.html_blocks.append(f'<p class="note">{H.esc(sub)}. QP is the frame\'s own (B\'s decoder); '
-                             f'kB is the frame on A\'s wire; one-way is packetize → receive.</p>'
-                             '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));'
-                             f'gap:12px">{"".join(figs)}</div>')
-        pages.append(p)
-    return pages
 
 
 def page_qp_frames(c: Cell) -> Page:
@@ -1334,14 +1291,6 @@ def page_qp_frames(c: Cell) -> Page:
         _series(ax, tt, qq, S.SLOTS[0], "per frame", marker=True, size=5.0)
         _stat_lines(ax, s_qp, fmtu="{:.0f}")
         ax.set_ylim(max(0.0, float(qq.min()) - 3), float(qq.max()) + 3)
-        shots = [r for r in _shot_rows(c) if S.is_num(r["t_s"])]
-        for r in shots:
-            ax.axvline(r["t_s"], color=S.SLOTS[1], lw=1.1, zorder=1)
-            ax.text(r["t_s"], 1.0, f" #{r['frame_id']:.0f}", transform=ax.get_xaxis_transform(), rotation=90,
-                    ha="left", va="top", fontsize=6.2, color=S.SLOTS[1])
-        if shots:
-            ax.text(1.0, 1.01, "vertical lines: screenshot frames", transform=ax.transAxes, fontsize=6.5,
-                    ha="right", va="bottom", color=S.SLOTS[1])
     else:
         _no_data(ax, "no per-frame QP")
     ax = p.axes([0.73, 0.08, 0.24, top - 0.08], "QP histogram", "frames", "QP")
@@ -1358,6 +1307,189 @@ def page_qp_frames(c: Cell) -> Page:
     else:
         _no_data(ax, "no per-frame QP")
     p.html_blocks.append(stat_html(rows) + f'<p class="note">{H.esc(scale)}. Compare QP only within a codec.</p>')
+    return p
+
+
+# --------------------------------------------------------------------------------------
+# control path over the data track (reduce/control.py)
+# --------------------------------------------------------------------------------------
+
+def _runs(lost: np.ndarray) -> list[tuple[int, int]]:
+    """(start index, length) of every run of True in a boolean array."""
+    out, start = [], None
+    for i, v in enumerate(lost.tolist()):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            out.append((start, i - start))
+            start = None
+    if start is not None:
+        out.append((start, len(lost) - start))
+    return out
+
+
+def control_view(c: Cell) -> dict:
+    """What the control page (and the combo summary) draws, from reduced/control.csv and
+    reduced/probes.csv, with the Summaries from metrics.json when present. Empty dict when
+    reduce wrote no control.csv."""
+    tb = c.control
+    out: dict = {}
+    if tb is None or not len(tb):
+        return out
+    t, owd, sent, rec = tb.col("t_s"), tb.col("owd_ms"), tb.col("sent"), tb.col("received")
+    inw = tb.col("in_window") == 1
+    have_pub, have_recv = bool(np.isfinite(sent).any()), bool(np.isfinite(rec).any())
+    order = np.argsort(tb.col("seq"), kind="stable")
+    sel = order[(inw & (sent == 1))[order]] if have_pub else np.array([], dtype=int)
+    lost = (rec[sel] != 1) if (have_pub and have_recv) else np.array([], dtype=bool)
+    runs = _runs(lost) if len(lost) else []
+    per_s: dict[int, list[int]] = {}
+    if have_pub and have_recv:
+        for ts, ok in zip(t[sel].tolist(), (~lost).tolist()):
+            if math.isfinite(ts):
+                v = per_s.setdefault(int(math.floor(ts)), [0, 0])
+                v[0] += 1
+                v[1] += int(ok)
+    secs = sorted(per_s)
+    ts_sent = np.sort(t[sent == 1]) if have_pub else np.sort(t[np.isfinite(t)])
+    step_ms = float(np.median(np.diff(ts_sent)) * 1000) if len(ts_sent) > 2 else None
+    pr = c.probes
+    out.update(
+        t=t, owd=np.where(rec == 1, owd, np.nan), in_window=inw, have_pub=have_pub, have_recv=have_recv,
+        lost_t=t[sel][lost] if len(lost) else np.array([]),
+        gap_lengths=[n for _, n in runs], step_ms=step_ms,
+        per_second=(np.array(secs, dtype=float), np.array([100.0 * per_s[k][1] / per_s[k][0] for k in secs])),
+        owd_s=c.summ("control.owd") if dig(c.metrics, "control.owd.n") else
+        stats.summ(owd[inw & (rec == 1)].tolist()),
+        ia_s=c.summ("control.interarrival") if dig(c.metrics, "control.interarrival.n") else
+        stats.summ(tb.col("ia_ms")[inw].tolist()),
+        rtt=pr.col("rtt_ms") if pr is not None and len(pr) else np.array([]),
+        rtt_t=pr.col("t") if pr is not None and len(pr) else np.array([]),
+    )
+    w = dig(c.metrics, "control.window_s")
+    if not (isinstance(w, list) and len(w) == 2) and inw.any():
+        w = [float(np.nanmin(t[inw])), float(np.nanmax(t[inw]))]
+    out["window"] = w if isinstance(w, list) and len(w) == 2 else None
+    r_s = dig(c.metrics, "control.rtt")
+    if is_summary(r_s) and r_s.get("n"):
+        out["rtt_s"] = r_s
+    else:
+        rv, rt = out["rtt"], out["rtt_t"]
+        if out["window"] and len(rv):
+            rv = rv[(rt >= out["window"][0]) & (rt <= out["window"][1])]
+        out["rtt_s"] = stats.summ(rv.tolist())
+    return out
+
+
+def page_control(c: Cell) -> Page:
+    m = dig(c.metrics, "control", {}) or {}
+    tr = m.get("transport") or c.variables.get("control_transport") or "transport not recorded"
+    p = Page(c, "Control path (data track)", f"{tr}  ·  A publisher → SFU → B subscriber, one sample per seq")
+    v = control_view(c)
+    y = 0.895
+    notes_html = []
+    reason = m.get("reason")
+    if not v and not reason:
+        reason = "reduced/control.csv absent (no control logs, or reduce predates the control path)"
+    if reason:
+        p.banner(y - 0.033, "Control metrics incomplete: " + reason[:150])
+        notes_html.append(f'<div class="banner">Control metrics incomplete: {H.esc(reason)}</div>')
+        y -= 0.05
+    locked, detail = c.ptp_locked()
+    if locked is not True and v:
+        msg = ("PTP NOT LOCKED" if locked is False else "PTP STATE NOT RECORDED") + \
+              f" ({detail}): control one-way is B's clock minus A's clock and is not trustworthy."
+        p.banner(y - 0.033, msg)
+        notes_html.append(f'<div class="banner">{H.esc(msg)}</div>')
+        y -= 0.05
+    gl = v.get("gap_lengths") or []
+    ps = v.get("per_second") or (np.array([]), np.array([]))
+    s_gap = stats.summ(gl)
+    rows = [stat_row("one-way (A send → B receive)", v.get("owd_s") or c.summ("control.owd"), "ms"),
+            stat_row("interarrival at B", v.get("ia_s") or c.summ("control.interarrival"), "ms"),
+            stat_row("probe round trip (A → B → A)", v.get("rtt_s") or c.summ("control.rtt"), "ms"),
+            stat_row("gap length (consecutive lost)", s_gap, "samples"),
+            stat_row("delivered per second", stats.summ(ps[1].tolist()), "%")]
+    y = p.table(0.03, y, 0.94, STAT_HEAD, rows, STAT_W, fs=7.2, lh=0.022)
+    step = v.get("step_ms")
+    w = v.get("window") or m.get("window_s")
+    dp = m.get("delivered_pct")
+    gaps = m.get("gaps") or {}
+    bits = [f"window {w[0]:.1f}–{w[1]:.1f} s" if w else "no window",
+            f"published {S.fmt(m.get('published'))}", f"received {S.fmt(m.get('received'))}",
+            f"delivered {dp:.3f}%" if S.is_num(dp) else "delivered –",
+            f"gaps {S.fmt(gaps.get('count'))}, longest {S.fmt(gaps.get('max_consecutive_lost'))} samples"
+            + (f" ({gaps['max_consecutive_lost'] * step:.0f} ms)" if S.is_num(gaps.get("max_consecutive_lost")) and step
+               else ""),
+            f"duplicates {S.fmt(m.get('duplicates'))}", f"jitter (one-way sd) {S.fmt(m.get('jitter_sd_ms'))} ms"]
+    if step:
+        bits.append(f"one sample every {step:.1f} ms")
+    p.text(0.03, y - 0.006, "   ·   ".join(bits), fontsize=7.0, va="top")
+    top = y - 0.045
+    h_ts = max(0.12, (top - 0.10) * 0.40)
+    ax = p.axes([0.07, top - h_ts, 0.90, h_ts], "One-way over the cell (per sample, by send time)", "ms")
+    t, owd = v.get("t", np.array([])), v.get("owd", np.array([]))
+    owd_s = v.get("owd_s") or {}
+    if len(t) and np.isfinite(owd).any():
+        cap = max(1.0, (owd_s.get("p99") or float(np.nanmax(owd))) * 1.4)
+        over = _series(ax, t, owd, S.OWD, "one-way", ycap=cap, marker=True, size=1.5)
+        lt = v.get("lost_t", np.array([]))
+        if len(lt):
+            ax.vlines(lt, 0, cap * 0.05, color=S.CRITICAL, lw=0.6, label=f"lost ({len(lt):,})")
+        _stat_lines(ax, owd_s, keys=("p50", "p99"), fmtu="{:.0f}")
+        if w:
+            for a, b in ((float(np.nanmin(t)), w[0]), (w[1], float(np.nanmax(t)))):
+                if b > a:
+                    ax.axvspan(a, b, color=S.PANEL, zorder=0, lw=0)
+        ax.set_ylim(0, cap * 1.05)
+        ax.set_xlim(float(np.nanmin(t)), float(np.nanmax(t)))
+        ax.legend(loc="upper left", ncol=2, markerscale=4)
+        if over:
+            ax.text(0.995, 0.97, f"{over:,} samples above {cap:.0f} ms drawn at the top", transform=ax.transAxes,
+                    ha="right", va="top", fontsize=6.5, color=S.INK_2)
+        ax.text(0.005, 0.02, "grey: outside the window (first and last 2 s)", transform=ax.transAxes, fontsize=6.3,
+                color=S.INK_2)
+    else:
+        _no_data(ax, "no control one-way (hostb/control.csv absent or empty)")
+    top2 = top - h_ts - 0.055
+    h_d = max(0.08, (top - 0.10) * 0.20)
+    ax = p.axes([0.07, top2 - h_d, 0.90, h_d], "Delivered per second (published samples B received)", "%",
+                "seconds since epoch")
+    if len(ps[0]):
+        ax.step(ps[0], ps[1], where="post", color=S.SLOTS[2], lw=1.0)
+        lo_v = float(np.nanmin(ps[1]))
+        ax.set_ylim(min(99.0, lo_v - 0.5 * (100.5 - lo_v)), 100.5)
+        lt = v.get("lost_t", np.array([]))
+        if len(lt):
+            ax.vlines(lt, ax.get_ylim()[0], ax.get_ylim()[0] + (100.5 - ax.get_ylim()[0]) * 0.08, color=S.CRITICAL,
+                      lw=0.6)
+        if len(t):
+            ax.set_xlim(float(np.nanmin(t)), float(np.nanmax(t)))
+    else:
+        _no_data(ax, "delivered % needs both logs (A's publisher log and B's receive log)")
+    h_h = top2 - h_d - 0.08 - 0.08
+    for i, (arr, s_, lab, colr) in enumerate(((owd[np.isfinite(owd) & v.get("in_window", np.zeros(len(owd), bool))]
+                                               if len(owd) else np.array([]), owd_s, "One-way distribution (window)",
+                                               S.OWD),
+                                              (v.get("rtt", np.array([])), v.get("rtt_s") or {},
+                                               "Probe round trip distribution", S.SLOTS[1]))):
+        ax = p.axes([0.07 + i * 0.47, 0.08, 0.43, max(0.08, h_h)], lab, "samples", "ms")
+        arr = arr[np.isfinite(arr)] if len(arr) else arr
+        if len(arr):
+            lo = float(arr.min())
+            hi = max(float(s_.get("p99") or arr.max()) * 1.3, lo + 1.0)
+            ax.hist(np.clip(arr, lo, hi), bins=60, range=(lo, hi), color=colr, edgecolor=S.SURFACE, linewidth=0.4)
+            for k, ls in (("p50", ":"), ("p95", "--"), ("p99", "-.")):
+                if S.is_num(s_.get(k)):
+                    ax.axvline(s_[k], color=S.INK_2, lw=0.7, ls=ls)
+                    ax.text(s_[k], 0.97 - 0.08 * ("p50", "p95", "p99").index(k), f" {k} {s_[k]:.0f}",
+                            transform=ax.get_xaxis_transform(), fontsize=6.5, va="top", color=S.INK_2, clip_on=True)
+            ax.set_xlim(lo, hi)
+            ax.text(0.99, 0.97, f"max {S.fmt(s_.get('max'))} ms", transform=ax.transAxes, ha="right", va="top",
+                    fontsize=6.5, color=S.INK_2)
+        else:
+            _no_data(ax, "no data")
+    p.html_blocks.append("".join(notes_html) + stat_html(rows) + f'<p class="note">{H.esc("   ·   ".join(bits))}</p>')
     return p
 
 
@@ -1387,9 +1519,8 @@ def _html_header(c: Cell) -> str:
 
 def build_pages(c: Cell) -> list[Page]:
     S.apply_rc()
-    pages = [page_overview(c), page_segments(c), page_network(c), page_modem(c),
+    pages = [page_overview(c), page_segments(c), page_network(c), page_control(c), page_modem(c),
              page_frame_size(c), page_rates(c), page_qp(c)]
-    pages += pages_screens(c)
     if c.qp_frames is not None:
         pages.append(page_qp_frames(c))
     pages += pages_late(c)
@@ -1401,6 +1532,8 @@ FOOTNOTES = {
     "Latency by segment": "Summaries from metrics.json; each from stats.summ over the frames where the segment was measured.",
     "One-way network latency and jitter": "Host A packetize to Host B webrtc receive, joined per frame.",
     "Modem activity, both hosts": "Per-second DIAG record counts, not grant sizes. Decoding the records themselves needs QCAT.",
+    "Control path (data track)": "Every statistic over the window: the publisher's span minus 2 s at each end. "
+                                 "Round trip = the harness's probe, A → SFU → B → SFU → A plus scheduling.",
 }
 
 
@@ -1426,7 +1559,7 @@ def render(cell_dir) -> Path:
     sections = []
     for i, p in enumerate(pages, 1):
         body = "".join(p.html_blocks)
-        fig = H.fig_img(p.fig, p.name) if p.html_fig else ""
+        fig = H.fig_img(p.fig, p.name)
         sections.append(f'<section id="p{i}"><h2>{i}. {H.esc(p.name)}</h2>{body}{fig}</section>')
         plt.close(p.fig)
     nav = " · ".join(f'<a href="#p{i}">{H.esc(p.name)}</a>' for i, p in enumerate(pages, 1))

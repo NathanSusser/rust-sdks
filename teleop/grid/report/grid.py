@@ -1,11 +1,15 @@
-"""Grid comparison: comparison/metrics.csv, comparison.html and comparison.pdf.
+"""Grid comparison: comparison/metrics.csv, comparison.html, comparison.pdf and analysis.html.
 
-Reads every cells/*/manifest.json and cells/*/metrics.json under a grid directory. A cell
-with no metrics.json, or with a KPI missing, is skipped for that chart and listed, never
-silently dropped. Repeats are never averaged away: each repeat is a point; the median
-across repeats is a line and a summary row.
+Reads every repeat directory of layout v2 (<grid>/<combo>/r<n>/, control cells in
+controls/<x..>/) and, for grids written before it, cells/<label>/. A repeat directory with
+neither manifest.json nor metrics.json (not started yet) is ignored; a cell with no
+metrics.json, or with a KPI missing, is skipped for that chart and listed, never silently
+dropped. Repeats are never averaged away: each repeat is a point; the median across repeats
+is a line and a summary row.
 
-Only writes into <grid_dir>/comparison/.
+render() writes <grid_dir>/comparison/ and (re)renders each combination's summary.pdf /
+summary.html (report/combo.py) when it is missing or older than one of its repeats'
+metrics.json. Nothing else is written.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ import csv
 import json
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +49,8 @@ KPIS_OF_RECORD = [
     ("Delivered frame rate", [("frame.fps_delivered", ("value",))], "fps"),
     ("Loss — packets lost at B", [("network.packets_lost", ("value",))], "packets"),
     ("Tail — share of frames over 100 ms one-way", [("tail.owd_over_100.share", ("value",))], "share"),
+    ("Control path — one-way over the data track", [("control.owd", TAIL)], "ms"),
+    ("Control path — delivered share of published samples", [("control.delivered_pct", ("value",))], "%"),
 ]
 
 SKIP_GROUPS = {"config"}
@@ -84,11 +91,21 @@ def flatten(metrics: dict) -> dict[str, dict[str, float | None]]:
         if group in SKIP_GROUPS:
             continue
         walk(group, node)
-    # A metrics.json from before per-frame QP still gets its (empty) rows in metrics.csv, so
-    # the column set does not depend on which cells were rebuilt.
+    # A metrics.json from before per-frame QP or the control path still gets its (empty) rows in
+    # metrics.csv, so the row set does not depend on which cells were rebuilt.
     if metrics and "encoder" in metrics:
         out.setdefault("encoder.qp_per_frame", {k: (0 if k == "n" else None) for k in SUMMARY_STATS})
+    if metrics:
+        for pth in CONTROL_SUMMARIES:
+            out.setdefault(pth, {k: (0 if k == "n" else None) for k in SUMMARY_STATS})
+        for pth in CONTROL_VALUES:
+            out.setdefault(pth, {"value": None})
     return out
+
+
+CONTROL_SUMMARIES = ("control.owd", "control.interarrival", "control.rtt")
+CONTROL_VALUES = ("control.delivered_pct", "control.jitter_sd_ms", "control.gaps.count",
+                  "control.gaps.max_consecutive_lost", "control.published", "control.received", "control.duplicates")
 
 
 @dataclass
@@ -97,10 +114,22 @@ class GridCell:
     manifest: dict
     metrics: dict | None
     flat: dict = field(default_factory=dict)
+    combo: str | None = None          # layout v2: the <combo>/ directory ("controls" for a control cell)
+    rep_dir: int | None = None        # layout v2: n of the r<n>/ directory
 
     @property
     def label(self) -> str:
         return str(self.manifest.get("label") or self.dir.name)
+
+    @property
+    def repeat(self):
+        """The repeat number: the r<n> directory in layout v2, else the manifest's."""
+        return self.rep_dir if self.rep_dir is not None else self.manifest.get("repeat")
+
+    @property
+    def rel(self) -> str:
+        """The cell directory relative to the grid directory (<combo>/r<n>, controls/x00, cells/<label>)."""
+        return f"{self.dir.parent.name}/{self.dir.name}"
 
     @property
     def variables(self) -> dict:
@@ -178,17 +207,48 @@ class GridCell:
         return v if S.is_num(v) else None
 
 
+REPEAT_DIR = re.compile(r"^r(\d+)$")
+NOT_COMBOS = {"comparison", "controls", "cells", "postproc"}   # reserved names (CONTRACT.md control plane v2)
+
+
+def _load_cell(d: Path, combo: str | None = None, rep: int | None = None) -> GridCell | None:
+    """None for a directory that has neither manifest.json nor metrics.json (not started)."""
+    if not (d / "manifest.json").is_file() and not (d / "metrics.json").is_file():
+        return None
+    man = _read_json(d / "manifest.json") or {}
+    met = _read_json(d / "metrics.json")
+    c = GridCell(d, man, met, combo=combo, rep_dir=rep)
+    c.flat = flatten(met) if met else {}
+    return c
+
+
+def combo_dirs(grid_dir: Path) -> list[Path]:
+    """Layout v2 combination directories: children of the grid holding at least one r<n>/."""
+    gd = Path(grid_dir)
+    if not gd.is_dir():
+        return []
+    return sorted(p for p in gd.iterdir() if p.is_dir() and p.name not in NOT_COMBOS and not p.name.startswith(".")
+                  and any(q.is_dir() and REPEAT_DIR.match(q.name) for q in p.iterdir()))
+
+
 def load_cells(grid_dir: Path) -> list[GridCell]:
+    """Every repeat of layout v2 (<combo>/r<n>/), every control cell (controls/*/) and every
+    cell of the older layout (cells/<label>/). Missing repeats are simply absent."""
     cells = []
-    root = grid_dir / "cells"
-    if not root.is_dir():
-        return cells
-    for d in sorted(p for p in root.iterdir() if p.is_dir()):
-        man = _read_json(d / "manifest.json") or {}
-        met = _read_json(d / "metrics.json")
-        c = GridCell(d, man, met)
-        c.flat = flatten(met) if met else {}
-        cells.append(c)
+    gd = Path(grid_dir)
+    for cd in combo_dirs(gd):
+        for d in sorted((q for q in cd.iterdir() if q.is_dir() and REPEAT_DIR.match(q.name)),
+                        key=lambda q: int(q.name[1:])):
+            c = _load_cell(d, cd.name, int(d.name[1:]))
+            if c is not None:
+                cells.append(c)
+    for sub, combo in (("controls", "controls"), ("cells", None)):
+        root = gd / sub
+        if root.is_dir():
+            for d in sorted(p for p in root.iterdir() if p.is_dir()):
+                c = _load_cell(d, combo)
+                if c is not None:
+                    cells.append(c)
 
     def key(c: GridCell):
         i = c.manifest.get("index")
@@ -204,20 +264,52 @@ def _sort_values(vals):
     return sorted(vals, key=lambda v: str(v))
 
 
+def read_grid_yaml(grid_dir: Path) -> dict:
+    """The expanded grid.yaml (or {}): a broken or absent file must not stop the report."""
+    gy = Path(grid_dir) / "grid.yaml"
+    if not gy.is_file():
+        return {}
+    try:
+        import yaml  # Host A only; the report runs on A
+        doc = yaml.safe_load(gy.read_text(encoding="utf-8")) or {}
+        return doc if isinstance(doc, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def declared_axes(doc: dict) -> list[str]:
+    """Axis names in grid-file order: the expanded copy's `swept`, else top-level axes/pairs, else
+    the original file under `definition`."""
+    sw = doc.get("swept")
+    if isinstance(sw, list) and sw and all(isinstance(x, str) for x in sw):
+        return list(sw)
+    for src in (doc, doc.get("definition") if isinstance(doc.get("definition"), dict) else {}):
+        if isinstance(src.get("axes"), dict):
+            return [k for k in src["axes"] if k != "geometry"] + (["resolution"] if "geometry" in src["axes"] else [])
+        if isinstance(src.get("pairs"), list):
+            return list(dict.fromkeys(k for p in src["pairs"] if isinstance(p, dict) for k in p))
+    return []
+
+
+DERIVED_FROM = {"kbps": ("bpp", "fps", "resolution"), "bpp": ("kbps",), "width": ("resolution", "kbps", "bpp"),
+                "height": ("resolution", "kbps", "bpp"), "sample_every": ("fps", "duration_s")}
+
+
+def swept_axes(grid_dir: Path, cells: list[GridCell]) -> list[str]:
+    """The axes the operator swept, in grid-file order: the grid file's own (present even while
+    only one combination has run), else the varying variables that are not derived from another
+    varying one (kbps from bpp, width/height from resolution)."""
+    decl = declared_axes(read_grid_yaml(grid_dir))
+    regular = [c for c in cells if c.kind != "control"]
+    if decl:
+        return [a for a in decl if not regular or any(a in c.variables for c in regular)]
+    varying = grid_axes(grid_dir, cells)
+    return [a for a in varying if not any(src in varying for src in DERIVED_FROM.get(a, ()))]
+
+
 def grid_axes(grid_dir: Path, cells: list[GridCell]) -> list[str]:
     """Variables that vary across the grid's (non-control) cells, in grid-file order when known."""
-    order: list[str] = []
-    gy = grid_dir / "grid.yaml"
-    if gy.is_file():
-        try:
-            import yaml  # Host A only; the report runs on A
-            doc = yaml.safe_load(gy.read_text(encoding="utf-8")) or {}
-            if isinstance(doc.get("axes"), dict):
-                order = list(doc["axes"])
-            elif isinstance(doc.get("pairs"), list):
-                order = list(dict.fromkeys(k for p in doc["pairs"] if isinstance(p, dict) for k in p))
-        except Exception:  # noqa: BLE001 — a broken grid.yaml must not stop the report
-            order = []
+    order = declared_axes(read_grid_yaml(grid_dir))
     pool = ([c for c in cells if c.kind != "control" and c.metrics is not None]
             or [c for c in cells if c.metrics is not None] or cells)
     varying = []
@@ -231,6 +323,10 @@ def grid_axes(grid_dir: Path, cells: list[GridCell]) -> list[str]:
 
 
 def short_label(c: GridCell) -> str:
+    if c.combo and c.combo != "controls" and c.rep_dir is not None:
+        return f"{c.combo}/r{c.rep_dir}"
+    if c.combo == "controls":
+        return f"controls/{c.dir.name}"
     gid = str(c.manifest.get("grid_id") or "")
     lab = c.label
     return lab[len(gid) + 1:] if gid and lab.startswith(gid + "-") else lab
@@ -242,7 +338,7 @@ def short_label(c: GridCell) -> str:
 
 def write_metrics_csv(path: Path, cells: list[GridCell]) -> int:
     var_names = sorted({k for c in cells for k in c.variables})
-    head = ["grid_id", "label", "index", "repeat", "kind", "status", "excluded"] + var_names + \
+    head = ["grid_id", "label", "combo", "index", "repeat", "kind", "status", "excluded"] + var_names + \
            ["metric_path", "statistic", "value"]
     n = 0
 
@@ -252,8 +348,9 @@ def write_metrics_csv(path: Path, cells: list[GridCell]) -> int:
             w = csv.writer(f)
             w.writerow(head)
             for c in cells:
-                base = [c.manifest.get("grid_id", ""), c.label, c.manifest.get("index", ""),
-                        c.manifest.get("repeat", ""), c.kind, c.status, int(c.excluded)]
+                rp = c.repeat
+                base = [c.manifest.get("grid_id", ""), c.label, c.combo or "", c.manifest.get("index", ""),
+                        "" if rp is None else rp, c.kind, c.status, int(c.excluded)]
                 vs = [_csv_val(c.variables.get(k)) for k in var_names]
                 for mp in sorted(c.flat):
                     for st, v in c.flat[mp].items():
@@ -489,10 +586,10 @@ def _html_data(grid_id: str, cells: list[GridCell], axes: list[str]) -> dict:
     out_cells = []
     for c in cells:
         gates, failed = c.gates()
-        rel = os.path.relpath(c.dir / "report.html", c.dir.parent.parent / "comparison")
+        rel = os.path.relpath(c.dir / "report.html", c.dir.parent.parent / "comparison").replace(os.sep, "/")
         out_cells.append({
             "label": c.label, "short": short_label(c), "index": c.manifest.get("index"),
-            "repeat": c.manifest.get("repeat"), "kind": c.kind, "status": c.status,
+            "repeat": c.repeat, "combo": c.combo, "kind": c.kind, "status": c.status,
             "excluded": c.excluded, "hollow": c.hollow, "reasons": c.reasons(),
             "vars": {k: _csv_val(c.variables.get(k)) for k in var_names},
             "encoder": c.encoder, "nvenc": c.nvenc, "band_a": c.band("a"), "band_b": c.band("b"),
@@ -752,18 +849,80 @@ def build_html(grid_id: str, cells: list[GridCell], axes: list[str]) -> str:
 # entry point
 # ======================================================================================
 
-def render(grid_dir) -> Path:
-    """Write comparison/metrics.csv, comparison.html, comparison.pdf; returns the comparison dir."""
+def _stale(combo_dir: Path) -> bool:
+    """summary.pdf missing, or older than a repeat's metrics.json / manifest.json."""
+    pdf = combo_dir / "summary.pdf"
+    if not pdf.is_file() or not (combo_dir / "summary.html").is_file():
+        return True
+    t = pdf.stat().st_mtime
+    for d in combo_dir.iterdir():
+        if d.is_dir() and REPEAT_DIR.match(d.name):
+            for f in ("metrics.json", "manifest.json"):
+                q = d / f
+                if q.is_file() and q.stat().st_mtime > t:
+                    return True
+    return False
+
+
+def _render_summary(combo_dir: str) -> str | None:
+    """One combination's summary; returns an error string instead of raising."""
+    import traceback  # noqa: PLC0415
+    try:
+        from . import combo  # noqa: PLC0415
+        combo.render(Path(combo_dir))
+        return None
+    except Exception as e:  # noqa: BLE001 -- one bad combination must not stop the comparison
+        try:
+            with open(Path(combo_dir) / "summary-errors.log", "a", encoding="utf-8") as f:
+                f.write(traceback.format_exc() + "\n")
+        except OSError:
+            pass
+        return f"{Path(combo_dir).name}: {type(e).__name__}: {e}"
+
+
+def refresh_summaries(grid_dir: Path, *, force: bool = False) -> list[str]:
+    """(Re)render <combo>/summary.pdf + summary.html where missing or stale, one by one (the
+    post-processing worker also calls report.combo.render per cell, so normally nothing is
+    stale here); returns error strings."""
+    todo = [d for d in combo_dirs(grid_dir) if force or _stale(d)]
+    return [e for e in (_render_summary(str(d)) for d in todo) if e]
+
+
+def plan_info(grid_dir: Path) -> dict:
+    """What grid.yaml planned: regular cells and repeats (for 'n of N' on the analysis page)."""
+    doc = read_grid_yaml(grid_dir)
+    cells = doc.get("cells") if isinstance(doc.get("cells"), list) else None
+    out = {}
+    if cells:
+        out["cells"] = sum(1 for c in cells if isinstance(c, dict) and c.get("kind", "cell") != "control")
+        out["controls"] = sum(1 for c in cells if isinstance(c, dict) and c.get("kind") == "control")
+    rep = (doc.get("defaults") or {}).get("repeats") if isinstance(doc.get("defaults"), dict) else None
+    if isinstance(rep, int):
+        out["repeats"] = rep
+    return out
+
+
+def render(grid_dir, *, summaries: bool = True) -> Path:
+    """Write comparison/metrics.csv, comparison.html, comparison.pdf and analysis.html, after
+    re-rendering stale combination summaries (summaries=False skips that); returns the
+    comparison dir."""
+    from . import analysis  # noqa: PLC0415
     gd = Path(grid_dir)
     out = gd / "comparison"
     out.mkdir(parents=True, exist_ok=True)
+    if summaries:
+        for err in refresh_summaries(gd):
+            print(f"report.combo failed: {err}")
     cells = load_cells(gd)
     grid_id = next((str(c.manifest["grid_id"]) for c in cells if c.manifest.get("grid_id")), gd.name)
     axes = grid_axes(gd, cells)
     write_metrics_csv(out / "metrics.csv", cells)
     doc = build_html(grid_id, cells, axes)
     H.atomic_write(out / "comparison.html", lambda t: t.write_text(doc, encoding="utf-8"))
-    figs = build_pdf_figures(grid_id, cells, axes)
+    page = analysis.build(gd, cells, swept_axes(gd, cells), plan_info(gd))
+    H.atomic_write(out / "analysis.html", lambda t: t.write_text(page, encoding="utf-8"))
+    with plt.rc_context({"figure.max_open_warning": 0}):     # every page is open until the PDF is written
+        figs = build_pdf_figures(grid_id, cells, axes)
 
     def write_pdf(tmp: Path) -> None:
         with PdfPages(tmp) as pdf:

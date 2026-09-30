@@ -12,3 +12,4 @@ tcpdump: "sudo -n /usr/bin/tcpdump"   # B: "/usr/bin/tcpdump" (setcap)
 results_root: /home/USER/teleop-runs
 display: ":0"               # B only: the subscriber renders here
 repo: /home/USER/code/rust-sdks
+# b_keep_after_pull: false   # A only. true keeps B's copy of each cell after A pulls and verifies it

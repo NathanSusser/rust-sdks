@@ -111,12 +111,17 @@ def read_hops(path, epoch: float) -> list[dict]:
 
 
 def read_webrtc_stats(path, epoch: float) -> dict:
-    """A's WebRTC stats jsonl -> per-poll video_out series and the run_metadata record."""
-    polls, meta = [], None
+    """A's WebRTC stats jsonl -> per-poll video_out series, the run_metadata record and the
+    control-path probe round trips, in one streaming pass (the file is read once per cell).
+
+    probes: [(t, rtt_ms)] from every poll's probe.rtt_us_interval (the round trips completed
+    since the previous poll; t = that poll, s since epoch). probe_section: any poll had a probe
+    object (False = a harness without the control path, not "no round trips")."""
+    polls, meta, probes, probe_section = [], None, [], False
     try:
         f = open(path)
     except (FileNotFoundError, TypeError):
-        return {"polls": [], "meta": None}
+        return {"polls": [], "meta": None, "probes": [], "probe_section": False}
     with f:
         for line in f:
             line = line.strip()
@@ -126,14 +131,24 @@ def read_webrtc_stats(path, epoch: float) -> dict:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(d, dict):
+                continue
             if d.get("record") == "run_metadata":
                 meta = d
                 continue
             vo = d.get("video_out")
             if vo and d.get("t_unix_us"):
                 polls.append({"t": d["t_unix_us"] / 1e6 - epoch, **vo})
+            pr = d.get("probe")
+            if isinstance(pr, dict) and d.get("t_unix_us"):
+                probe_section = True
+                t = d["t_unix_us"] / 1e6 - epoch
+                for us in pr.get("rtt_us_interval") or ():
+                    if isinstance(us, (int, float)) and not isinstance(us, bool) and math.isfinite(us):
+                        probes.append((t, us / 1000.0))
     polls.sort(key=lambda p: p["t"])
-    return {"polls": polls, "meta": meta}
+    probes.sort()
+    return {"polls": polls, "meta": meta, "probes": probes, "probe_section": probe_section}
 
 
 def encoder_per_second(polls: list[dict]) -> dict[int, dict]:

@@ -1,0 +1,28 @@
+# Tonight's grid (2026-09-29/30): codec x fps x bits-per-pixel at the test clip's native
+# 1600x1300, 3 repeats = 60 cells. kbps is derived per cell (1600*1300*fps*bpp/1000).
+# Layout v2: each combination is one directory (h265-30fps-b0040/r1 .. r3).
+id: tonight
+description: h265/av1 x 30/25 fps x bpp 0.04..0.14 at 1600x1300, 180 s cells, data-track control path
+defaults:
+  resolution: 1600x1300
+  duration_s: 180
+  repeats: 3
+  lead_s: 45
+  cooldown_s: 30
+  vbv_frames: 1
+  padding: on
+  pin_bitrate: on
+  target_quality: off
+  intra_refresh: 0
+  control_transport: data_track_buf1
+  control_rx_buffer: 64         # B's --control-buffer-frames (depth 1 dropped ~26% in the SDK queue)
+  clip: /home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4
+axes:
+  codec: [h265, av1]
+  fps: [30, 25]
+  bpp: [0.04, 0.06, 0.08, 0.10, 0.14]
+order: shuffle
+# Disk is the binding constraint on A: raw captures are zstd-compressed after each cell reduces.
+compress_raw: true
+expect:
+  band: n41

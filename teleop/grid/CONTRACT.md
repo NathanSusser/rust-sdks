@@ -530,3 +530,226 @@ and "QP per frame" (QP vs time with p50/p95/p99/max, histogram; the codec's QP s
 subtitle) when per-frame QP exists. `report/grid.py` adds `encoder.qp_per_frame` to the KPIs of
 record after `encoder.qp`; comparison/metrics.csv always carries its rows (empty when a cell's
 metrics.json predates it).
+
+## Layout v2, one-way storage, control path (2026-09-30, binding; supersedes conflicting lines above)
+
+### Directory layout
+```
+$RESULTS_ROOT/<grid-id>/
+  grid.yaml  grid.log  state.json
+  <combo>/                      one per combination of the SWEPT variables (e.g. 20 for 2x2x5)
+    r1/ r2/ r3/                 one per repeat = the former cells/<label>/ directory, unchanged inside:
+                                manifest.json hosta/ hostb/ reduced/ metrics.json report.pdf report.html
+    summary.pdf  summary.html   the repeats of this combination aggregated (see report)
+  controls/x00/ x01/ ...        control cells, if the grid has any
+  comparison/
+    metrics.csv                 long format, as before, plus columns combo, repeat
+    analysis.html               the large self-contained comparison page
+    comparison.pdf
+```
+`<combo>` = the swept variables in axis order, each rendered short: codec as-is, `<fps>fps`,
+`b<bpp*1000 zero-padded to 4>` (0.04 -> b0040), `<kbps>k`, `<W>x<H>`, `v<vbv>`, `p<0|1>`,
+`tq<qp|off>`, other variables `<name><value>`; joined with `-`, e.g. `h265-30fps-b0040`.
+A grid with no axes uses `all`. The repeat directory is `r<n>`.
+The LiveKit room name and file prefix stay the full label (`<id>-c<NN>-...-r<n>`), recorded in
+manifest.json. The orchestrator computes the relative path `<combo>/r<n>` (or `controls/x<NN>`)
+and passes it to both agents; nothing else derives it.
+
+### Storage: Host A keeps everything, Host B keeps nothing
+No A->B push. After a cell closes: A pulls `hostb/` from B, verifies every file against B's
+SHA256SUMS, records the result in the manifest, and only then calls B's agent `purge` for that
+relative path. `purge` deletes that one directory on B after checking it resolves inside B's
+results_root and that the orchestrator passed the verified checksum-file sha256 (so a stale or
+partial pull can never trigger a delete). A failed verify leaves B's copy and marks the cell
+INCOMPLETE with the reason.
+
+### Control path (data track)
+Grid variable `control_transport` (data_track_buf1 | dc_reliable | dc_lossy), default
+data_track_buf1, recorded in the manifest like any variable, passed as `--control-transport`.
+A passes `--publisher-seq-log <cell>/hosta/control-pub.jsonl`; each line
+`{"seq","t_send_unix_us","t_send_monotonic_us","probe"}`.
+B's subscriber, when its `--help` lists `--control-log`, is started with
+`--control-log <cell>/hostb/control.csv`; columns
+`seq,t_send_unix_us,t_recv_unix_us,owd_us,probe_token,transport`. B echoes probes on topic
+`teleop-probe-echo`; A's harness jsonl already carries probe RTTs.
+metrics.json gains `control`: delivered_pct (received distinct seq / published seq, excluding
+the first and last 2 s), gaps {count, max_consecutive_lost}, owd:Summary (ms), jitter_sd_ms,
+interarrival:Summary (ms), rtt:Summary (ms, from probes), transport.
+
+### Screenshots removed
+The `screenshots` variable, subscriber frame sampling, reduce/screens.py and the Screenshots
+page are removed. The per-frame decoder QP log (`hostb/frames-qp.csv`,
+LK_DECODER_FRAME_LOG) and `encoder.qp_per_frame` stay.
+
+## Added by control plane v2
+
+<!-- added by control plane v2 (grid, agent, orchestrator, cli, preflight, capture, hostcfg).
+     Implements "Layout v2, one-way storage, control path" above; additive where that section is silent. -->
+
+**Layout.** `Cell.rel_path` (grid.py) is the only derivation of a cell directory: `<combo>/r<n>`, or
+`controls/x<NN>` where `x<NN>` is the label's run-order field (so `controls/x09` holds
+`<id>-x09-...`; a control cell's `repeat` is its occurrence number). `Cell.combo` is the directory name
+(`"controls"` for a control cell), from `grid.combo_name(values, Grid.swept)`; `Grid.swept` = the axes in
+axis order (`pairs:` = their keys in first-appearance order). `resolution` renders as the resolved `WxH`,
+bools as 0/1, `clip` as its file stem, `target_quality` as `tq<qp|off>`; any character outside
+`[A-Za-z0-9_.]` inside one token becomes `_`. Two combinations that render to the same name, or a name that
+is reserved (`controls`, `comparison`, `postproc`, `cells`, grid files), reject the grid.
+`grid.find_cell_dirs(grid_dir)` lists every cell directory with a manifest (v2, and `cells/*` of older grids).
+Both agents get `--cell-dir <grid-id>/<rel_path> --label <label>`; the agent requires the last component to
+be the label's `r<n>` (last field) or `x<NN>` (second field) and the grid id two levels above it.
+Resume refuses a grid directory that has `cells/` (started before v2).
+
+**manifest.json additions:** `combo`, `rel_path` (relative to the grid directory), `control_log_enabled`
+(bool; null when B's agent predates it), `control_rx_buffer_applied` (the `--control-buffer-frames` B was
+started with, or null), `storage {b_keep_after_pull, pull {ok, at, files, bytes, sums_sha256, reason, problems,
+elapsed_s}, purge {done, at, files, bytes, already_absent, pruned} | {done: false, reason}}`,
+`raw_compressed {at, tool, files: [{path, zst, bytes_before, bytes_after}], bytes_before, bytes_after, problems,
+ok}` (paths relative to the cell directory). `timeline` adds `purged`, `compressed`; `steps` adds `pull_b`,
+`purge_b` (the old `mirror` step is gone: there is no A->B push). `integrity.mirror_verified` now means "A's copy
+of hostb/ verified". `variables` adds `control_transport`, `control_rx_buffer`; `screenshots`/`sample_every`
+are gone. A verify failure is INCOMPLETE with `hostb/ not verified on A (...); B's copy kept`; a refused purge
+is logged and recorded but does not change the status (A's copy is verified).
+
+**Variables.** `control_transport` (enum, default `data_track_buf1`) -> harness `--control-transport`.
+`control_rx_buffer` (int 1..256, default 64) -> B's `--control-buffer-frames`, only together with
+`--control-log`. Neither is in the label. A grid file that still sets `screenshots` is rejected by name.
+
+**Grid key `compress_raw`** (bool, default true), recorded in the expanded `grid.yaml`, which also gains
+`swept`, the sweep at top level (`axes:` or `pairs:`, deprecated names mapped) and each cell's `combo`,
+`rel_path`.
+
+**Agent.** `pull` replies `sums_sha256` (sha256 of the pulled `hostb/SHA256SUMS`, only when every file
+verified: size and sha256) and `verified.bytes`. New command `purge` (Host B only), args
+`{rel: "<grid-id>/<combo>/r<n>" | "<grid-id>/controls/x<NN>", sums_sha256}`: refuses unless rel is exactly
+three components with a valid grid id and an `r<n>`/`x<NN>` leaf, resolves inside
+`<results_root>/<grid-id>/` without passing a symlink, `hostb/SHA256SUMS` here hashes to `sums_sha256`, no
+recorded subscriber/capture pid is alive, and the files are exactly what SHA256SUMS lists at the listed sizes
+(`*.tmp` excepted; any file outside `hostb/` refuses). Then it deletes that directory, removes the combo
+directory if it became empty, and replies `{deleted: {path, files, bytes, listing}, pruned}`; an absent
+directory replies `already_absent: true`. A's harness always gets `--publisher-seq-log hosta/control-pub.jsonl`.
+B's subscriber gets `--control-log hostb/control.csv` only when its `--help` lists it, and
+`--control-buffer-frames <control_rx_buffer>` only when both are listed; `publish` replies `control_log`,
+`control_buffer_frames`. `--help` output is cached per binary (path, size, mtime) in
+`<results_root>/<grid-id>/.binary-help.json` on each host, i.e. once per grid run.
+
+**host.yaml** optional `b_keep_after_pull` (bool, default false), read on A: true skips the purge (logged).
+
+**Background post-processing (Host A).** `<grid>/postproc/`: `pending/<seq>.json`, `running.json`,
+`done/<seq>.json`, `worker.json`, `worker.lock`, `worker.log`, `CLOSE`. A job is
+`{id, rel_path, label, combo, kind, status, cell_steps, compress_raw}`. ONE worker
+(`python3 -m teleop.grid.orchestrator postproc-worker --grid-dir D`, nice 19 + idle I/O class, own session,
+flock) runs jobs oldest first, strictly one at a time, logging `[postproc]` lines to grid.log: for OK and
+INCOMPLETE cells `reduce_cell`, `metrics.build`, `report.cell.render` (each recorded, none fatal; tracebacks
+in `postprocess-errors.log`; `timeline.reduced/reported`), then the compression below, then (not for a control
+cell) `teleop.grid.report.combo.render(<grid>/<combo>)` when that module exists, then
+`report.grid.render(<grid>)` -- deferred while more jobs are queued. Each step has a 1 h deadline. The grid run
+never waits for the queue except to judge a control cell (it waits for that cell's own job) and at the end of
+a complete grid: drain, then the final `report.grid.render`. On any other ending the worker finishes the queue
+in the background. `grid run --resume` re-queues finished cells whose `timeline.reported` is unset.
+`grid status` shows the queue (`postproc {depth, queued, running, done, failed, worker_pid}`) and each cell's
+combo, repeat, B copy (purged/kept) and compression.
+
+**Compression (`compress_raw`).** Only after reduce, metrics AND the cell report all succeeded: every `*.dlf`
+and `*.pcap` under `hosta/` and `hostb/` -> `<name>.zst` (`zstd -3 -T2`), `zstd -t` on it, and only then the
+original is removed; any failure keeps the original. `SHA256SUMS` is kept as written (the originals);
+`SHA256SUMS.zst` beside it lists the `.zst` files in the same format. To re-reduce a compressed cell,
+`zstd -d` its raw files first (reduce looks for `<label>*.dlf` and `*.pcap`).
+
+**Whole-grid disk gate** (`preflight.gate_grid_disk`, before the first cell, over the cells still to run):
+`per cell = 2 x 4.5 MB/s x span_s x 1.1 + 2 x pcap`, pcap per host = span_s x (kbps x 125 / 1100 + 500) pkt/s
+x 144 B; the grid total x 0.75 when `compress_raw` is on. Refused when it exceeds free - 20 GB under A's
+results_root, with both numbers and what to change (fewer repeats, shorter lead_s, compress_raw, free space);
+a refused new grid leaves no directory behind. `grid check` prints the uncompressed and compressed projection
+and counts the gate in READY.
+
+## Added by reports v2
+
+<!-- added by reports v2 (reduce/qp.py, reduce/control.py, frames.read_webrtc_stats, metrics.py,
+     report/{cell,combo,grid,analysis}.py). Implements "Layout v2 ... control path" for reduction,
+     metrics and reports; additive where that section is silent. -->
+
+**Reduce.** `reduce/screens.py` is gone; per-frame QP lives in `reduce/qp.py` (`read_qp_log`,
+`attach_qp`, `QpLog.summary`). `reduce.json` gains `qp_log` = `{rows, with_qp, joined, qp: Summary,
+codec, implementation}` (null when `hostb/frames-qp.csv` is absent); metrics takes
+`encoder.qp_per_frame` from it and never re-reads the log (only a reduce.json without the key falls back
+to the log). Every raw input is read once per cell: the probe round trips are collected by
+`frames.read_webrtc_stats` in its one pass over A's stats jsonl.
+`reduce/control.py` runs inside `reduce_cell` after frames.csv; a failure costs the control tables, never
+the cell, and absent logs are notes, not `missing` (so they never make `captures_complete` false):
+- **the window**: the publisher's own span minus 2 s at each end, by send time — [first published
+  `t_send` + 2 s, last published `t_send` − 2 s] (B's `t_send` range when A's log is absent; no window when
+  the log spans under 4 s). Every control statistic below uses it.
+- `reduced/control.csv` (written when either log exists), one row per seq A published or B received, in
+  seq order: `seq, t_s` (send, A clock, s since epoch, µs), `sent` (1 in A's log, 0 only B saw it, empty
+  without A's log), `received` (1/0, empty without B's log), `t_recv_s` (first arrival, B clock), `owd_ms`
+  (B's `owd_us` of the first arrival, else t_recv − t_send), `ia_ms` (time since the previous first arrival
+  in receive order, window only), `probe` (0/1), `dups` (extra arrivals), `in_window` (0/1), `transport`.
+- `reduced/probes.csv` `t, rtt_ms`: every `probe.rtt_us_interval` value of A's jsonl, t = its poll (s since
+  epoch); written when any poll has a `probe` object.
+- `reduce.json["control"]` = `{pub_log, recv_log, published_total, received_total, duplicates,
+  bad_lines {pub, recv}, window_s [lo, hi] | null, published, received` (in the window)`, recv_not_published,
+  t_send_mismatch, transport, reason, probe_section, probe_rtts}`. A seq whose send time differs by more
+  than 1 ms between the two logs counts in `t_send_mismatch` and is noted (another publisher in the room?).
+
+**metrics.json.** `config.screenshots` is removed. `control` =
+`{delivered_pct, gaps {count, max_consecutive_lost}, owd: Summary, jitter_sd_ms, interarrival: Summary,
+rtt: Summary, transport, published, received, duplicates, window_s, reason}`: delivered_pct = 100 ×
+received distinct seq / published seq, both in the window, the denominator from A's log only (never
+estimated); a gap is a maximal run of consecutive published seq (seq order) B never received; owd,
+jitter_sd_ms (population sd of owd) and interarrival come from B's first arrivals; rtt from probes.csv rows
+whose poll lies in the window. Unmeasurable fields are null (Summaries n=0) and `reason` says why
+(`hosta/control-pub.jsonl absent ...`, `hostb/control.csv absent ...`, `no probe section ...`, `... no probe
+round trip inside the window`, `reduce.json has no control block ...`); `reason` is null when all was measured.
+
+**Cell report.** No Screenshots page and no screenshot markers on "QP per frame". New page 4 "Control
+path (data track)", always present (a banner says what is missing): one-way per sample over the cell by
+send time (lost samples as ticks, outside the window shaded), delivered % per second, one-way and probe
+round-trip histograms, and a table of one-way, interarrival, probe round trip, gap length and per-second
+delivered % with mean/p50/p95/p99/max/min/n. A cell report is 9 pages + "QP per frame" (when per-frame QP
+exists) + late-frame continuations.
+
+**Combination summary** — `teleop.grid.report.combo.render(combo_dir) -> Path` writes
+`<combo>/summary.pdf` (2 pages) and `<combo>/summary.html`: flags per repeat (status, encoder/NVENC, PTP,
+codec requested → negotiated, flags), every KPI of the analysis page with mean/p50/p95/p99/max per repeat
+and the median across counted repeats, the scalars likewise, and small multiples over time (network
+one-way, e2e, QP per frame, control one-way; one column per repeat, y shared along a row). Repeats that
+grid.yaml plans (`defaults.repeats`) but that have no directory are listed "not run". Everywhere in the
+reports a repeat is **counted** when it has metrics.json, status OK and is not excluded; the median across
+repeats is `stats.summ(values)["p50"]` (nearest rank, as stats.percentile).
+
+**Grid report** — `report.grid.render(grid_dir, *, summaries=True)` reads layout v2 (`<combo>/r<n>/`,
+`controls/*/`) and still `cells/*/`; a repeat directory with neither manifest.json nor metrics.json (not
+started) is ignored. First it re-renders every `<combo>/summary.*` that is missing or older than one of
+its repeats' metrics.json / manifest.json (errors appended to `<combo>/summary-errors.log`, never raised);
+the post-processing worker's own per-cell `report.combo.render` call normally leaves nothing stale.
+- `comparison/metrics.csv` columns: `grid_id,label,combo,index,repeat,kind,status,excluded,<variables,
+  sorted>,metric_path,statistic,value`; `combo` = the combination directory (`controls` for a control cell,
+  empty in the old layout), `repeat` = n of `r<n>` (else the manifest's). Every cell has the `control.*`
+  rows (empty when its metrics.json predates the control path), as for `encoder.qp_per_frame`.
+- `comparison.pdf` gains two KPI pages: control one-way (p95/p99/max) and control delivered %.
+- **`comparison/analysis.html`** (report/analysis.py): self-contained (inline CSS, JS and JSON; no
+  network), light and dark (`prefers-color-scheme` plus a theme selector), built from metrics.json and
+  manifest.json only. Sections: Overview (tiles: repeats present of planned, counted, PTP locked,
+  combinations, flagged; swept axes, fixed and derived variables, encoder per codec, serving band, control
+  cells; for each KPI of record a line set **computed** at p99 (value for scalars): best and worst
+  combination with difference and ratio, the change from the lowest to the highest bpp along each line, and
+  the paired median difference for every two-valued axis over matched settings), KPI curves (x = bpp, else
+  the first numeric swept axis; one line per combination of the other swept axes = median of counted
+  repeats; a dot per repeat, hollow when not counted; statistic selector mean/p50/p95/p99/max; QP only
+  within a codec), Radar (one polygon per bpp for one line; spokes e2e p50, e2e p99, owd p99, jitter sd,
+  QP p50, QP p99, control owd p99; range or ratio scaling), Matrix (combination × KPI with the chosen
+  statistic, sortable, tinted per column, links `../<combo>/summary.pdf` and `../<combo>/r<n>/report.pdf`),
+  Every repeat. Swept axes = grid.yaml `swept`, else its `axes`/`pairs`, else `definition`, else the
+  varying variables that are not derived (kbps from bpp, width/height from resolution).
+- KPIs of record on the page: `latency.e2e`, `latency.owd`, `jitter.owd_sd_ms`,
+  `jitter.interarrival_rfc3550_ms`, `encoder.qp_per_frame` (per codec; a codec without per-frame QP in any
+  repeat falls back to `encoder.qp`, labelled), `frame.size_spread_pct`, `derived.fps_delivered_pct`
+  (= 100 × `frame.fps_delivered` / `variables.fps`, computed by the page and the summary, never written to
+  metrics.json or metrics.csv), `network.packets_lost`, `control.owd`, `control.delivered_pct`. Repeat
+  flags: INCOMPLETE / SKIPPED / ABORTED, excluded, no metrics.json, not NVENC, PTP not locked / not
+  recorded, codec fallback (negotiated ≠ requested codec, compared as h264/h265/av1), gate failed, no
+  control-path data.
+
+**Tests.** `tests/test_screens.py` is replaced by `tests/test_qp.py`; new `test_control.py`,
+`test_combo.py`; `tests/synth.py` builds layout-v2 grids through the real reduce/control.py and
+metrics.build (nothing is committed).

@@ -412,5 +412,192 @@ class WriteExpanded(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "grid.yaml.tmp")))
 
 
+# ---------------------------------------------------------------- control plane v2
+TONIGHT = Path(G.TELEOP_DIR) / "config" / "grids" / "tonight.yaml"
+SMOKE2 = Path(G.TELEOP_DIR) / "config" / "grids" / "smoke2.yaml"
+
+
+class TonightGrid(unittest.TestCase):
+    """config/grids/tonight.yaml: codec x fps x bpp = 20 combinations x 3 repeats."""
+
+    def setUp(self):
+        self.g = G.load(TONIGHT, seed=7)
+        self.cells = self.g.expand()
+
+    def test_sixty_cells_twenty_combos(self):
+        self.assertEqual(self.g.id, "tonight")
+        self.assertEqual(len(self.cells), 60)
+        self.assertEqual(self.g.swept, ["codec", "fps", "bpp"])
+        want = [f"{c}-{f}fps-b{b}" for c in ("h265", "av1") for f in (30, 25)
+                for b in ("0040", "0060", "0080", "0100", "0140")]
+        self.assertEqual(self.g.combo_names(), want)
+        self.assertEqual(len(set(want)), 20)
+        self.assertIn("h265-30fps-b0040", want)
+        by_combo = {}
+        for c in self.cells:
+            by_combo.setdefault(c.combo, []).append(c.repeat)
+        self.assertEqual(sorted(by_combo), sorted(want))
+        self.assertTrue(all(sorted(r) == [1, 2, 3] for r in by_combo.values()))
+
+    def test_layout_paths(self):
+        paths = [c.rel_path for c in self.cells]
+        self.assertEqual(len(set(paths)), 60)
+        for c in self.cells:
+            self.assertEqual(c.rel_path, f"{c.combo}/r{c.repeat}")
+            self.assertTrue(c.label.startswith(f"tonight-{c.run_token}-"))
+            self.assertTrue(c.label.endswith(f"-r{c.repeat}"))
+            d = c.to_dict()
+            self.assertEqual((d["combo"], d["rel_path"]), (c.combo, c.rel_path))
+        c = next(c for c in self.cells if c.combo == "av1-25fps-b0140" and c.repeat == 2)
+        self.assertEqual(c.rel_path, "av1-25fps-b0140/r2")
+        self.assertEqual(c.values["kbps"], 7280)
+        self.assertRegex(c.label, r"^tonight-c\d{2}-av1-1600x1300-25fps-b0140-7280k-v1-p1-r2$")
+
+    def test_defaults(self):
+        for c in self.cells:
+            v = c.values
+            self.assertEqual((v["resolution"], v["duration_s"], v["lead_s"], v["cooldown_s"]), ("1600x1300", 180, 45, 30))
+            self.assertEqual((v["vbv_frames"], v["padding"], v["pin_bitrate"], v["target_quality"], v["intra_refresh"]),
+                             (1, True, True, "off", 0))
+            self.assertEqual(v["control_transport"], "data_track_buf1")
+            self.assertEqual(v["control_rx_buffer"], 64)
+            self.assertEqual(v["kbps"], round(1600 * 1300 * v["fps"] * v["bpp"] / 1000))
+            a = c.harness_args()
+            self.assertEqual(a[a.index("--control-transport") + 1], "data_track_buf1")
+            self.assertEqual(c.span_s, 255)
+        self.assertEqual(self.g.order, "shuffle")
+        self.assertEqual(self.g.expect, {"band": "n41"})
+        self.assertTrue(self.g.compress_raw)
+        self.assertEqual(self.cells[0].values["clip"],
+                         "/home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4")
+
+    def test_rounds_by_repeat(self):
+        reps = [c.repeat for c in self.cells]
+        self.assertEqual(reps, sorted(reps))
+
+    def test_smoke2(self):
+        g = G.load(SMOKE2, seed=1)
+        cells = g.expand()
+        self.assertEqual([c.rel_path for c in cells], ["h265/r1", "av1/r1"])
+        self.assertEqual({c.values["kbps"] for c in cells}, {6240})
+        self.assertEqual({(c.duration_s, c.values["lead_s"], c.values["cooldown_s"]) for c in cells}, {(30, 30, 10)})
+        self.assertEqual({c.values["control_transport"] for c in cells}, {"data_track_buf1"})
+
+
+class Layout(unittest.TestCase):
+    def test_combo_tokens(self):
+        vals = {"codec": "av1", "fps": 25, "bpp": 0.04, "kbps": 2500, "resolution": "auto", "width": 1008,
+                "height": 816, "vbv_frames": 5, "padding": False, "target_quality": "off", "intra_refresh": 30,
+                "control_transport": "dc_lossy", "pin_bitrate": True, "clip": "/m/depal-face.lower.mp4"}
+        self.assertEqual(G.combo_name(vals, ["codec", "fps", "bpp", "kbps", "resolution", "vbv_frames", "padding",
+                                             "target_quality"]),
+                         "av1-25fps-b0040-2500k-1008x816-v5-p0-tqoff")
+        self.assertEqual(G.combo_name(dict(vals, target_quality=30), ["target_quality"]), "tq30")
+        self.assertEqual(G.combo_name(vals, ["intra_refresh", "control_transport", "pin_bitrate", "clip"]),
+                         "intra_refresh30-control_transportdc_lossy-pin_bitrate1-clipdepal_face.lower")
+        self.assertEqual(G.combo_name(vals, []), "all")
+
+    def test_no_axes_is_all(self):
+        raw = base(defaults={"clip": CLIP, "repeats": 2, "kbps": 2500, "codec": "h264"})
+        raw.pop("axes")
+        cells = G.parse(raw).expand()
+        self.assertEqual([c.rel_path for c in cells], ["all/r1", "all/r2"])
+
+    def test_pairs_swept_in_first_appearance_order(self):
+        raw = base()
+        raw.pop("axes")
+        raw["pairs"] = [{"codec": "h264", "kbps": 512}, {"kbps": 8000, "codec": "av1", "vbv_frames": 3}]
+        g = G.parse(raw)
+        self.assertEqual(g.swept, ["codec", "kbps", "vbv_frames"])
+        self.assertEqual([c.rel_path for c in g.expand()], ["h264-512k-v1/r1", "av1-8000k-v3/r1"])
+
+    def test_colliding_combo_names_rejected(self):
+        with self.assertRaisesRegex(G.GridError, "both render to the directory name 'h264-b0100'"):
+            G.parse(base(defaults=fixed("1600x1300"), axes={"codec": ["h264"], "bpp": [0.1, 0.1001]}))
+
+    def test_control_cells(self):
+        g = G.parse(base(axes={"codec": ["h264"], "kbps": [500, 600, 700]},
+                         control={"every": 2, "cell": {"codec": "h264", "kbps": 2500}}))
+        cells = g.expand()
+        ctl = [c for c in cells if c.kind == "control"]
+        self.assertEqual([c.rel_path for c in ctl], ["controls/x00", "controls/x03"])
+        for c in ctl:
+            self.assertEqual(c.combo, "controls")
+            self.assertEqual(c.label.split("-")[1], c.rel_path.split("/")[1])
+        self.assertEqual([c.rel_path for c in cells if c.kind == "cell"], ["h264-500k/r1", "h264-600k/r1", "h264-700k/r1"])
+
+    def test_find_cell_dirs(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            for rel in ("h265-30fps-b0040/r1", "h265-30fps-b0040/r2", "controls/x00", "cells/old-c00-x-r1",
+                        "h265-30fps-b0040/r3", "comparison/r9", "postproc/done"):
+                (d / rel).mkdir(parents=True)
+            for rel in ("h265-30fps-b0040/r1", "h265-30fps-b0040/r2", "controls/x00", "cells/old-c00-x-r1",
+                        "comparison/r9"):
+                (d / rel / "manifest.json").write_text("{}")
+            got = [p.relative_to(d).as_posix() for p in G.find_cell_dirs(d)]
+            self.assertEqual(got, ["cells/old-c00-x-r1", "controls/x00", "h265-30fps-b0040/r1", "h265-30fps-b0040/r2"])
+
+
+class Variables(unittest.TestCase):
+    def test_control_transport(self):
+        c = G.parse(base()).expand()[0]
+        self.assertEqual(c.values["control_transport"], "data_track_buf1")
+        for t in ("dc_reliable", "dc_lossy"):
+            c = G.parse(base(defaults={"clip": CLIP, "repeats": 1, "control_transport": t})).expand()[0]
+            a = c.harness_args()
+            self.assertEqual(a[a.index("--control-transport") + 1], t)
+            self.assertEqual(c.manifest_variables()["control_transport"], t)
+        with self.assertRaisesRegex(G.GridError, "control_transport"):
+            G.parse(base(defaults={"clip": CLIP, "control_transport": "carrier_pigeon"}))
+
+    def test_control_transport_sweep_names_the_combo(self):
+        g = G.parse(base(axes={"codec": ["h264"], "kbps": [2500], "control_transport": ["data_track_buf1", "dc_lossy"]}))
+        self.assertEqual([c.rel_path for c in g.expand()],
+                         ["h264-2500k-control_transportdata_track_buf1/r1", "h264-2500k-control_transportdc_lossy/r1"])
+
+    def test_control_rx_buffer(self):
+        c = G.parse(base()).expand()[0]
+        self.assertEqual(c.values["control_rx_buffer"], 64)
+        self.assertEqual(c.subscriber_args(), {"duration_s": 60, "control_transport": "data_track_buf1",
+                                               "control_rx_buffer": 64})
+        self.assertEqual(c.manifest_variables()["control_rx_buffer"], 64)
+        # B's receive depth only: the publisher (--publish-only) has no receive queue to size
+        self.assertFalse({"--control-buffer-frames", "--control-buffer-size"} & set(c.harness_args()))
+        c = G.parse(base(defaults={"clip": CLIP, "repeats": 1, "control_rx_buffer": 1})).expand()[0]
+        self.assertEqual(c.subscriber_args()["control_rx_buffer"], 1)
+        for bad in (0, 257):
+            with self.assertRaises(G.GridError):
+                G.parse(base(defaults={"clip": CLIP, "control_rx_buffer": bad}))
+
+    def test_screenshots_removed(self):
+        self.assertFalse(hasattr(G, "sample_every"))
+        with self.assertRaisesRegex(G.GridError, "'screenshots' removed .*delete it from the grid file"):
+            G.parse(base(defaults={"clip": CLIP, "repeats": 1, "screenshots": 6}))
+        c = G.parse(base()).expand()[0]
+        self.assertNotIn("screenshots", c.values)
+        self.assertNotIn("screenshots", c.manifest_variables())
+        self.assertNotIn("sample_every", c.manifest_variables())
+        self.assertNotIn("screenshots", G.load_variables())
+
+    def test_compress_raw(self):
+        self.assertTrue(G.parse(base()).compress_raw)
+        self.assertFalse(G.parse(base(compress_raw=False)).compress_raw)
+        self.assertFalse(G.parse(base(compress_raw="off")).compress_raw)
+        with self.assertRaisesRegex(G.GridError, "compress_raw"):
+            G.parse(base(compress_raw="sometimes"))
+
+    def test_expanded_records_layout(self):
+        import yaml
+        g = G.load(TONIGHT, seed=3)
+        with tempfile.TemporaryDirectory() as d:
+            data = yaml.safe_load(g.write_expanded(d).read_text())
+        self.assertTrue(data["compress_raw"])
+        self.assertEqual(data["swept"], ["codec", "fps", "bpp"])
+        self.assertEqual(list(data["axes"]), ["codec", "fps", "bpp"])
+        self.assertEqual([c["rel_path"] for c in data["cells"]], [c.rel_path for c in g.expand()])
+        self.assertEqual({c["combo"] for c in data["cells"]}, set(g.combo_names()))
+
+
 if __name__ == "__main__":
     unittest.main()
