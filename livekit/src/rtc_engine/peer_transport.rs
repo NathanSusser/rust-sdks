@@ -162,7 +162,8 @@ impl PeerTransport {
         }
         drop(inner);
 
-        let mut offer = self.peer_connection.create_offer(OfferOptions::default()).await?;
+        let options = self.receiving_offer_options(OfferOptions::default());
+        let mut offer = self.peer_connection.create_offer(options).await?;
         let mut sdp = offer.to_string();
 
         // Apply inactive→recvonly munging for single PC mode
@@ -255,6 +256,33 @@ impl PeerTransport {
     ///
     /// We intentionally limit this to RTP m-sections, so non-RTP sections (for example
     /// data-channel `m=application` sections) are not rewritten.
+    /// Sets `offer_to_receive_*` for every media kind that already has a receiving
+    /// transceiver.
+    ///
+    /// `false` is not "unspecified": libwebrtc treats it as the legacy
+    /// `offerToReceive*: 0` and turns those recvonly transceivers inactive. An inactive
+    /// m-section is offered only the codecs this host can both send and receive, so a
+    /// decode-only codec (e.g. H.265 on a host without an H.265 encoder) disappears from
+    /// the offer, and the inactive->recvonly munging below cannot bring it back. `true`
+    /// adds a transceiver only when none of that kind is receiving, which never applies
+    /// here.
+    fn receiving_offer_options(&self, mut options: OfferOptions) -> OfferOptions {
+        for transceiver in self.peer_connection.transceivers() {
+            if !matches!(
+                transceiver.direction(),
+                RtpTransceiverDirection::RecvOnly | RtpTransceiverDirection::SendRecv
+            ) {
+                continue;
+            }
+            match transceiver.receiver().track() {
+                Some(MediaStreamTrack::Audio(_)) => options.offer_to_receive_audio = true,
+                Some(MediaStreamTrack::Video(_)) => options.offer_to_receive_video = true,
+                None => {}
+            }
+        }
+        options
+    }
+
     fn munge_inactive_to_recvonly_for_media(sdp: &str) -> String {
         // Detect what line ending the original SDP uses
         let uses_crlf = sdp.contains("\r\n");
@@ -529,6 +557,8 @@ impl PeerTransport {
             return Ok(());
         }
 
+        let options =
+            if inner.single_pc_mode { self.receiving_offer_options(options) } else { options };
         let mut offer = self.peer_connection.create_offer(options).await?;
         let mut sdp = offer.to_string();
 
