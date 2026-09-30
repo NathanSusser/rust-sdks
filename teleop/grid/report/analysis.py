@@ -665,17 +665,25 @@ SECTIONS = _sec(
 <div id="charts-explore" class="charts"></div></details>
 </section>
 """ + _sec(
-    "radar", "Radar", "Seven KPIs at once, one polygon per bpp", "Pick one codec × fps line. A smaller polygon is better.",
-    "Each polygon is one bpp (darker = higher), its vertices the median across counted repeats of seven "
-    "lower-is-better KPIs. Every spoke is scaled on its own to the values shown: in <b>range</b> scaling the worst "
-    "polygon on that spoke touches the outer ring and the best sits at the centre ring, which exaggerates small "
-    "differences; <b>ratio</b> scaling puts 0 at the centre and the worst value at the ring, so a spoke's length "
-    "is proportional to its value. The table under the radar has the numbers. A missing KPI leaves the outline "
-    "open at that spoke.") + """
-<div class="ctl-row"><span class="lbl">line</span><span class="seg" id="radar-series" role="group" aria-label="radar line"></span>
-<label class="lbl">scaling <select id="radar-scale"><option value="range">range: best at centre, worst at edge</option>
+    "radar", "Radar", "Compare combinations across seven KPIs",
+    "Choose one variable to compare; the others are held at the values you pick. A smaller polygon is better.",
+    "<b>Compare</b> picks the variable whose values become the polygons; every other swept variable is held at "
+    "the value chosen on its row, so the polygons differ only in the compared variable (for example av1 vs h265 "
+    "at 30 fps and bpp 0.08). Each vertex is the median across counted repeats of a lower-is-better KPI. When the "
+    "polygons span codecs the QP spokes are left out: AV1's q-index (0–255) and H.265's QP (0–51) are different "
+    "scales. <b>Colours</b>: a codec comparison uses each codec's colour from the rest of the page; any other "
+    "comparison uses the held codec's hue, lighter for the lower value and darker for the higher, with dashes for "
+    "frame rate. Every spoke is scaled on its own: <b>range</b> puts the best polygon at the centre ring and the "
+    "worst at the edge when the worst is at least 20 % off the best (a smaller spread stays near the centre, as "
+    "in the matrix tint); <b>ratio</b> puts 0 at the centre and the worst at "
+    "the edge, so a spoke's length is proportional to its value. Click a legend entry to hide or show a polygon; "
+    "hover it to pick it out. The table has the numbers, the best in each column in bold, and for two polygons "
+    "their difference.") + """
+<div id="radar-ctl" class="radar-ctl"></div>
+<div class="ctl-row"><label class="lbl">scaling <select id="radar-scale"><option value="range">range: best at centre, worst at edge</option>
 <option value="ratio">ratio: 0 at centre, worst at edge</option></select></label></div>
-<div class="radar-wrap"><div id="radar-svg"></div><div class="radar-side"><div id="radar-legend" class="legend col"></div>
+<div class="radar-wrap"><div id="radar-svg"></div><div class="radar-side"><div id="radar-cap" class="radar-cap"></div>
+<div id="radar-legend" class="legend col"></div>
 <div id="radar-table" class="tbl"></div></div></div>
 </section>
 """ + _sec(
@@ -821,11 +829,29 @@ svg.ch .nodata { fill: var(--muted); font-size: 12px; }
 #tip .tv { font-weight: 700; text-align: right; }
 #tip .tn { grid-column: 2 / 4; color: var(--ink2); font-size: 11px; margin-bottom: 3px; }
 .radar-wrap { display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: flex-start; }
-#radar-svg { flex: 1 1 380px; max-width: 540px; }
+#radar-svg { flex: 1 1 400px; max-width: 600px; }
 .radar-side { flex: 1 1 300px; min-width: 0; }
 #radar-svg svg text { fill: var(--ink2); font-size: 11px; }
 #radar-svg svg .ring { fill: none; stroke: var(--grid); }
 #radar-svg svg .spoke { stroke: var(--base); }
+#radar-svg g.poly { transition: opacity .15s ease; }
+#radar-svg g.poly.fade { opacity: .14; }
+.radar-ctl { display: grid; gap: 8px; margin: 0 0 12px; }
+.radar-ctl .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.radar-ctl .rl { min-width: 88px; font-size: 12px; font-weight: 600; color: var(--ink2); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex: none; }
+.radar-cap { font-size: 13px; font-weight: 650; margin: 0 0 8px; }
+.legend button.item { font: inherit; font-size: 12px; background: none; border: 1px solid transparent; border-radius: 5px;
+  color: var(--ink2); cursor: pointer; padding: 3px 6px; margin-left: -6px; text-align: left; }
+.legend button.item:hover, .legend button.item.hot { border-color: var(--base); color: var(--ink); }
+.legend button.item[aria-pressed="false"] { opacity: .5; text-decoration: line-through; }
+.legend button.item:disabled { cursor: default; }
+.legend button.item:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+table.t td.best { font-weight: 700; }
+table.t tr.diff td { border-top: 1px solid var(--base); color: var(--ink2); font-weight: 600; }
+table.t td.gd, table.t tr.diff td.gd { color: var(--good); }
+table.t td.bd, table.t tr.diff td.bd { color: var(--crit); }
+@media (prefers-reduced-motion: reduce) { #radar-svg g.poly { transition: none; } }
 table.mx { border-collapse: separate; border-spacing: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
 table.mx th, table.mx td { padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 table.mx th { position: sticky; top: 0; background: var(--surface); color: var(--ink2); font-weight: 600;
@@ -1387,48 +1413,115 @@ function renderRanking() {
   });
 }
 
-// ---- radar
-const RAMP_LIGHT = ['#86b6ef', '#6da7ec', '#5598e7', '#3987e5', '#2a78d6', '#256abf', '#1c5cab', '#184f95', '#104281'];
-const RAMP_DARK = ['#184f95', '#1c5cab', '#256abf', '#2a78d6', '#3987e5', '#5598e7', '#6da7ec', '#86b6ef', '#9ec5f4'];
+// ---- radar: compare the values of one variable, every other variable held at a chosen value
+// One-hue ordinal ramps, validated with the dataviz validator (--ordinal, light and dark):
+// monotone lightness, adjacent gaps >= 0.06, light end >= 2:1 on the surface. Matched step for
+// step in lightness; a codec's ramp is its categorical slot's hue, so orange still means h265.
+const RAMPS = {
+  light: [['#86b6ef', '#5598e7', '#2a78d6', '#1c5cab', '#104281'],     // slot 1 blue (steps 250-650)
+          ['#ff8557', '#f26121', '#cb4800', '#9e3601', '#752600'],     // slot 2 orange
+          ['#26ca8e', '#03b079', '#048f62', '#026f4b', '#005136']],    // slot 3 aqua
+  dark: [['#184f95', '#256abf', '#3987e5', '#6da7ec', '#9ec5f4'],
+         ['#8b2d00', '#b53e00', '#e0510d', '#ff7440', '#ffa98b'],
+         ['#016042', '#017f58', '#029f6f', '#31bf8a', '#59dea7']],
+};
 function isDark() {
   const t = document.documentElement.getAttribute('data-theme');
   if (t === 'dark') return true; if (t === 'light') return false;
   return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
-function rampColor(i, n) {
-  const R = isDark() ? RAMP_DARK : RAMP_LIGHT;
-  if (n <= 1) return R[4];
-  const lo = n <= 5 ? 1 : 0, hi = n <= 5 ? 7 : 8;
-  return R[Math.round(lo + (hi - lo) * i / (n - 1))];
+function codecSlot(codec) {
+  const i = D.codec_axis ? (D.values[D.codec_axis] || []).indexOf(codec) : -1;
+  return i >= 0 && i < 3 ? i : 0;
 }
-const RD = {series: (prefs.radar && series.some(q => q.key === prefs.radar)) ? prefs.radar : (series[0] || {}).key};
-function renderRadarSeg() {
-  const seg = $('radar-series'); seg.replaceChildren();
-  series.forEach(sr => {
-    const b = h('button', {type: 'button', 'aria-pressed': String(sr.key === RD.series)}, lineKey(sr, 22), ' ' + sr.label);
-    b.addEventListener('click', () => { RD.series = sr.key; prefs.radar = sr.key; savePrefs(); renderRadarSeg(); renderRadar(); });
+function rampPick(slot, i, n) {
+  const R = (isDark() ? RAMPS.dark : RAMPS.light)[slot];
+  if (n <= 1) return R[2];
+  return R[Math.round(i * (R.length - 1) / (n - 1))];     // light = the lowest value compared
+}
+const RD = {cmp: null, hold: {}, hidden: new Set(), hot: null};
+const multi = (a) => (D.values[a] || []).length > 1;
+(function () {
+  const axes = D.axes.filter(multi);
+  RD.cmp = (prefs.rdCmp && axes.includes(prefs.rdCmp)) ? prefs.rdCmp : (X && axes.includes(X) ? X : axes[0] || null);
+  D.axes.forEach(a => {
+    const saved = (prefs.rdHold || {})[a];
+    RD.hold[a] = (D.values[a] || []).includes(saved) ? saved : (D.values[a] || [])[0];
+  });
+})();
+function dot(color) { const d = h('i', {class: 'dot'}); d.style.background = color; return d; }
+function renderRadarCtl() {
+  const host = $('radar-ctl'); host.replaceChildren();
+  const axes = D.axes.filter(multi);
+  if (!axes.length) return;
+  const row = h('div', {class: 'row'}, h('span', {class: 'rl', text: 'Compare'}));
+  const seg = h('span', {class: 'seg', role: 'group', 'aria-label': 'variable to compare'});
+  axes.forEach(a => {
+    const b = h('button', {type: 'button', 'aria-pressed': String(a === RD.cmp), text: a});
+    b.addEventListener('click', () => { RD.cmp = a; RD.hidden.clear(); prefs.rdCmp = a; savePrefs(); renderRadarCtl(); renderRadar(); });
     seg.append(b);
   });
+  row.append(seg); host.append(row);
+  axes.filter(a => a !== RD.cmp).forEach(a => {
+    const r = h('div', {class: 'row'}, h('span', {class: 'rl', text: 'Hold ' + a}));
+    const sg = h('span', {class: 'seg', role: 'group', 'aria-label': 'hold ' + a + ' at'});
+    (D.values[a] || []).forEach(v => {
+      const b = h('button', {type: 'button', 'aria-pressed': String(v === RD.hold[a])},
+        a === D.codec_axis ? dot(codecColor(String(v))) : null, varFmt(a, v));
+      b.addEventListener('click', () => {
+        RD.hold[a] = v; RD.hidden.clear();
+        prefs.rdHold = Object.assign({}, prefs.rdHold || {}, {[a]: v}); savePrefs();
+        renderRadarCtl(); renderRadar();
+      });
+      sg.append(b);
+    });
+    r.append(sg); host.append(r);
+  });
+}
+function radarSet() {
+  const cmp = RD.cmp;
+  const held = D.axes.filter(a => a !== cmp);
+  const vals = cmp ? (D.values[cmp] || []) : [null];
+  const polys = vals.map((v, i) => ({v, i, key: JSON.stringify(v),
+    cb: D.combos.find(c => (cmp == null || c.vars[cmp] === v) && held.every(a => c.vars[a] === RD.hold[a]))}));
+  const shapeAxis = SA[1];                      // the axis drawn with dashes on the trend charts
+  polys.forEach(p => {
+    if (cmp && cmp === D.codec_axis) p.color = codecColor(String(p.v));
+    else p.color = rampPick(codecSlot(String(D.codec_axis && RD.hold[D.codec_axis] != null ? RD.hold[D.codec_axis] : (p.cb ? p.cb.codec : ''))), p.i, polys.length);
+    p.dash = (cmp && cmp === shapeAxis) ? (DASH[p.i % DASH.length] || null) : null;
+    p.label = cmp ? varFmt(cmp, p.v) : (p.cb ? p.cb.label : '');
+  });
+  return {cmp, held, polys};
+}
+function setHot(key) {
+  RD.hot = key;
+  document.querySelectorAll('#radar-svg g.poly').forEach(g => g.classList.toggle('fade', key != null && g.dataset.key !== key));
+  document.querySelectorAll('#radar-legend button.item').forEach(b => b.classList.toggle('hot', b.dataset.key === key));
 }
 function renderRadar() {
-  const sr = series.find(q => q.key === RD.series) || series[0];
-  const host = $('radar-svg'), leg = $('radar-legend'), tab = $('radar-table');
-  host.replaceChildren(); leg.replaceChildren(); tab.replaceChildren();
-  if (!sr) { host.append(h('p', {class: 'note', text: 'no combination'})); return; }
+  const host = $('radar-svg'), leg = $('radar-legend'), tab = $('radar-table'), cap = $('radar-cap');
+  host.replaceChildren(); leg.replaceChildren(); tab.replaceChildren(); cap.replaceChildren();
+  const set = radarSet();
+  const withData = set.polys.filter(p => p.cb);
+  const multiCodec = new Set(withData.map(p => p.cb.codec)).size > 1;
+  const spokes = D.radar.map(sp => Object.assign({}, sp, {k: KPI[sp.kpi]})).filter(sp => sp.k && !(multiCodec && sp.k.per_codec));
+  const heldTxt = set.held.filter(multi).map(a => varFmt(a, RD.hold[a])).join(' · ');
+  cap.append(h('span', {text: set.polys.map(p => p.label).join(' vs ')}), heldTxt ? h('span', {class: 'muted', text: ' · held at ' + heldTxt}) : null);
+  if (!withData.length) { host.append(h('p', {class: 'note', text: 'No combination has data for this selection.'})); return; }
   const scale = $('radar-scale').value;
-  const spokes = D.radar.map(sp => Object.assign({}, sp, {k: KPI[sp.kpi]}));
-  const cbs = X ? xVals.map(xv => sr.combos.find(cb => cb.vars[X] === xv)).filter(Boolean) : sr.combos.slice();
-  const vals = cbs.map(cb => spokes.map(sp => comboVal(cb, sp.k, sp.stat)));
-  const W = 520, Hh = 440, cx = W / 2, cy = Hh / 2 + 6, R = 158;
+  const vals = new Map(withData.map(p => [p.key, spokes.map(sp => comboVal(p.cb, sp.k, sp.stat))]));
+  const W = 600, Hh = 440, cx = W / 2, cy = Hh / 2 + 6, R = 158;
   const sv = document.createElementNS(SVGNS, 'svg'); sv.setAttribute('viewBox', `0 0 ${W} ${Hh}`); sv.setAttribute('width', '100%');
-  sv.setAttribute('role', 'img'); sv.setAttribute('aria-label', 'radar of seven latency and quality KPIs, one polygon per bpp');
+  sv.setAttribute('role', 'img'); sv.setAttribute('aria-label', `radar of ${spokes.length} KPIs: ${set.polys.map(p => p.label).join(' vs ')}` + (heldTxt ? `, held at ${heldTxt}` : ''));
   const ang = (i) => -Math.PI / 2 + 2 * Math.PI * i / spokes.length;
   [0.25, 0.5, 0.75, 1].forEach(f => {
     const d = spokes.map((_, i) => `${i ? 'L' : 'M'}${cx + R * f * Math.cos(ang(i))},${cy + R * f * Math.sin(ang(i))}`).join('') + 'Z';
     s('path', {d, class: 'ring'}, sv);
   });
-  const worst = spokes.map((_, j) => Math.max(...vals.map(v => v[j]).filter(isNum)));
-  const best = spokes.map((_, j) => Math.min(...vals.map(v => v[j]).filter(isNum)));
+  // each spoke scaled over every polygon with data (hiding one does not rescale the others)
+  const all = [...vals.values()];
+  const worst = spokes.map((_, j) => Math.max(...all.map(v => v[j]).filter(isNum)));
+  const best = spokes.map((_, j) => Math.min(...all.map(v => v[j]).filter(isNum)));
   spokes.forEach((sp, i) => {
     s('line', {x1: cx, y1: cy, x2: cx + R * Math.cos(ang(i)), y2: cy + R * Math.sin(ang(i)), class: 'spoke'}, sv);
     const lx = cx + (R + 16) * Math.cos(ang(i)), ly = cy + (R + 16) * Math.sin(ang(i));
@@ -1439,45 +1532,79 @@ function renderRadar() {
     stxt(sv, lx, y1, sp.label + (noData ? ' (no data)' : ''), {'text-anchor': anchor});
     if (!noData) stxt(sv, lx, y2, `edge ${fval(worst[i], sp.k.unit)}`, {'text-anchor': anchor, style: 'font-size:10px;fill:var(--muted)'});
   });
+  // range: best at the centre ring, worst at the edge, but only at full strength when the worst is
+  // >= 20 % off the best (as the matrix tint), so a 0.01 ms jitter difference stays near the centre
   const rOf = (v, j) => {
     if (!isNum(v) || !isFinite(worst[j])) return null;
     if (scale === 'ratio') return worst[j] > 0 ? Math.max(0, v / worst[j]) : 0;
     const span = worst[j] - best[j];
-    return span > 0 ? 0.1 + 0.9 * (v - best[j]) / span : 1;
+    if (!(span > 0)) return withData.length > 1 ? 0.1 : 1;
+    const gain = Math.min(1, (span / Math.max(Math.abs(worst[j]), Math.abs(best[j]), 1e-9)) / 0.2);
+    return 0.1 + 0.9 * gain * (v - best[j]) / span;
   };
-  cbs.forEach((cb, i) => {
-    const col = rampColor(i, cbs.length);
-    const rs = vals[i].map((v, j) => rOf(v, j));
+  withData.forEach(p => {
+    if (RD.hidden.has(p.key)) return;
+    const g = s('g', {class: 'poly', 'data-key': p.key}, sv);
+    const rs = vals.get(p.key).map((v, j) => rOf(v, j));
     const complete = rs.every(r => r != null);
     let d = '', pen = false;
     rs.forEach((r, j) => { if (r == null) { pen = false; return; } d += (pen ? 'L' : 'M') + (cx + R * r * Math.cos(ang(j))).toFixed(1) + ',' + (cy + R * r * Math.sin(ang(j))).toFixed(1); pen = true; });
     if (complete) d += 'Z';
-    if (d) s('path', {d, fill: complete ? col : 'none', 'fill-opacity': 0.10, stroke: col, 'stroke-width': 2, 'stroke-linejoin': 'round'}, sv);
+    if (d) {
+      const path = s('path', {d, class: 'shape', fill: complete ? p.color : 'none', 'fill-opacity': 0.12, stroke: p.color, 'stroke-width': 2.2, 'stroke-linejoin': 'round', 'stroke-dasharray': p.dash}, g);
+      path.addEventListener('pointerenter', () => setHot(p.key)); path.addEventListener('pointerleave', () => setHot(null));
+    }
     rs.forEach((r, j) => {
       if (r == null) return;
-      const c = s('circle', {cx: cx + R * r * Math.cos(ang(j)), cy: cy + R * r * Math.sin(ang(j)), r: 4, fill: col, stroke: 'var(--surface)', 'stroke-width': 2}, sv);
-      c.addEventListener('pointermove', ev => showTip(ev, h('div', {}, h('div', {class: 'th', text: `${cb.label}`}), h('div', {text: `${spokes[j].label}: ${fval(vals[i][j], spokes[j].k.unit)}`}))));
-      c.addEventListener('pointerleave', hideTip);
+      const c = s('circle', {cx: cx + R * r * Math.cos(ang(j)), cy: cy + R * r * Math.sin(ang(j)), r: 4, fill: p.color, stroke: 'var(--surface)', 'stroke-width': 2}, g);
+      c.addEventListener('pointermove', ev => { setHot(p.key); showTip(ev, h('div', {}, h('div', {class: 'th', text: p.cb.label}), h('div', {text: `${spokes[j].label}: ${fval(vals.get(p.key)[j], spokes[j].k.unit)}`}))); });
+      c.addEventListener('pointerleave', () => { hideTip(); setHot(null); });
     });
-    const sw = document.createElementNS(SVGNS, 'svg'); sw.setAttribute('width', 26); sw.setAttribute('height', 12);
-    s('rect', {x: 1, y: 2, width: 24, height: 8, rx: 2, fill: col, 'fill-opacity': 0.25, stroke: col, 'stroke-width': 2}, sw);
-    leg.append(h('span', {class: 'item'}, sw, X ? varFmt(X, cb.vars[X]) : cb.label));
   });
   host.append(sv);
-  if (cbs.length === 1) leg.append(h('span', {class: 'note', text: 'one setting only: every spoke is at the edge.'}));
-  leg.append(h('span', {class: 'note', text: scale === 'range' ? 'centre ring = best shown, edge = worst shown' : 'centre = 0, edge = worst shown'}));
-  // numbers
+  // legend: click to hide or show a polygon, hover to pick it out
+  set.polys.forEach(p => {
+    const sw = document.createElementNS(SVGNS, 'svg'); sw.setAttribute('width', 28); sw.setAttribute('height', 12); sw.setAttribute('aria-hidden', 'true');
+    s('rect', {x: 1, y: 2, width: 26, height: 8, rx: 2, fill: p.color, 'fill-opacity': 0.25, stroke: p.color, 'stroke-width': 2, 'stroke-dasharray': p.dash}, sw);
+    const on = !RD.hidden.has(p.key);
+    const b = h('button', {type: 'button', class: 'item', 'data-key': p.key, 'aria-pressed': String(on && !!p.cb), disabled: p.cb ? null : 'disabled',
+      title: p.cb ? (on ? 'click to hide' : 'click to show') : 'no combination with these settings'}, sw, p.label + (p.cb ? '' : ' (no data)'));
+    if (p.cb) {
+      b.addEventListener('click', () => { if (RD.hidden.has(p.key)) RD.hidden.delete(p.key); else RD.hidden.add(p.key); renderRadar(); });
+      b.addEventListener('pointerenter', () => setHot(p.key)); b.addEventListener('pointerleave', () => setHot(null));
+      b.addEventListener('focus', () => setHot(p.key)); b.addEventListener('blur', () => setHot(null));
+    }
+    leg.append(b);
+  });
+  const notes = [scale === 'range' ? 'centre ring = best shown; the edge = worst shown when it is 20 % or more off the best (smaller spreads stay near the centre)'
+    : 'centre = 0, edge = worst shown'];
+  if (multiCodec && D.radar.some(sp => KPI[sp.kpi] && KPI[sp.kpi].per_codec)) notes.push('QP is left out: each codec has its own QP scale (' + withData.map(p => p.cb.codec).filter((c, i, a) => a.indexOf(c) === i).map(c => D.qp_scale[c] || c).join(', ') + ')');
+  if (withData.length === 1) notes.push('one combination only: every spoke is at the edge');
+  notes.forEach(n => leg.append(h('span', {class: 'note', text: n})));
+  // numbers: the best in each column in bold; with two polygons, their difference
   const t = h('table', {class: 't'});
-  const hr = h('tr', {}, h('th', {text: X || 'combination'}));
+  const hr = h('tr', {}, h('th', {text: set.cmp || 'combination'}));
   spokes.forEach(sp => hr.append(h('th', {class: 'num', text: sp.label})));
   t.append(h('thead', {}, hr));
   const tb = h('tbody');
-  cbs.forEach((cb, i) => {
-    const tr = h('tr', {}, h('td', {text: X ? varFmt(X, cb.vars[X]) : cb.label}));
-    vals[i].forEach((v, j) => tr.append(h('td', {class: 'num', text: fval(v, spokes[j].k.unit)})));
+  withData.forEach(p => {
+    const lab = p.cb.summary_pdf ? h('a', {href: p.cb.summary_pdf, title: p.cb.name + ' summary.pdf'}, p.label) : h('span', {text: p.label});
+    const tr = h('tr', {}, h('td', {}, dot(p.color), lab));
+    vals.get(p.key).forEach((v, j) => tr.append(h('td', {class: 'num' + (isNum(v) && withData.length > 1 && v === best[j] ? ' best' : ''), text: fval(v, spokes[j].k.unit)})));
     tb.append(tr);
   });
+  if (withData.length === 2) {
+    const [a, b] = withData;
+    const tr = h('tr', {class: 'diff'}, h('td', {text: `${b.label} − ${a.label}`}));
+    spokes.forEach((sp, j) => {
+      const va = vals.get(a.key)[j], vb = vals.get(b.key)[j];
+      const d = isNum(va) && isNum(vb) ? vb - va : null;
+      tr.append(h('td', {class: 'num' + (d == null || Math.abs(d) < 1e-12 ? '' : d < 0 ? ' gd' : ' bd'), text: d == null ? '–' : fdiff(d, sp.k.unit)}));
+    });
+    tb.append(tr);
+  }
   t.append(tb); tab.append(t);
+  if (withData.length === 2) tab.append(h('p', {class: 'note', text: `Last row: ${withData[1].label} minus ${withData[0].label}. Green = ${withData[1].label} is lower (better) on that KPI.`}));
 }
 (function () {
   $('radar-scale').value = prefs.radarScale || 'range';
@@ -1633,7 +1760,7 @@ function renderStatSeg() {
     if (d.open) document.querySelectorAll('details.how[open]').forEach(o => { if (o !== d) o.open = false; });
   }));
 })();
-function renderAll() { renderStatSeg(); renderRankTabs(); renderRanking(); renderEffects(); renderLegend(); renderCharts(); renderRadarSeg(); renderRadar(); renderMatrix(); renderRepeats(); }
+function renderAll() { renderStatSeg(); renderRankTabs(); renderRanking(); renderEffects(); renderLegend(); renderCharts(); renderRadarCtl(); renderRadar(); renderMatrix(); renderRepeats(); }
 renderAll();
 })();
 """

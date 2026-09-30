@@ -660,6 +660,9 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreaterEqual(dom.count('<table class="rank">'), 1)               # the ranking
         self.assertIn('class="rbar"', dom)
         self.assertEqual(dom.count('class="ring"'), 4)                              # the radar's four rings
+        self.assertEqual(dom.count('class="poly"'), 5)          # default: compare bpp, codec and fps held
+        self.assertIn('aria-label="variable to compare"', dom)
+        self.assertIn('aria-label="hold codec at"', dom)
         self.assertIn("gsynth-c", dom)                                              # the repeats table
         self.assertGreater(n_kpi, 10)
 
