@@ -128,8 +128,14 @@ std::vector<webrtc::SdpVideoFormat> VideoDecoderFactory::GetSupportedFormats()
       webrtc::LibaomAv1EncoderSupportedScalabilityModes()));
 
   // Fallback H265 decoder for hosts whose platform factories (e.g. NVDEC)
-  // do not already provide one.
-  const webrtc::SdpVideoFormat h265(webrtc::kH265CodecName);
+  // do not already provide one. The level is explicit: a bare "H265" answers
+  // level-id=93 (3.1, ~1 Mpixel), below the 1600x1300 streams this decodes;
+  // VA-API and FFmpeg's software decoder both handle level 6.0.
+  const webrtc::SdpVideoFormat h265(webrtc::kH265CodecName,
+                                    {{"profile-id", "1"},
+                                     {"tier-flag", "0"},
+                                     {"level-id", "180"},
+                                     {"tx-mode", "SRST"}});
   if (ffmpeg_h265_decoder_works_ && !h265.IsCodecInList(formats)) {
     formats.push_back(h265);
   }

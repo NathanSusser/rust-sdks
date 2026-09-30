@@ -1387,6 +1387,7 @@ impl SessionInner {
                     .unwrap()
                     .create_anwser(offer_sdp, AnswerOptions::default())
                     .await?;
+                log::debug!("sending subscriber answer: {:?}", answer);
 
                 self.signal_client
                     .send(proto::signal_request::Message::Answer(proto::SessionDescription {
