@@ -83,6 +83,7 @@ class NvidiaH265EncoderImpl : public VideoEncoder {
   void ReportError();
   bool has_reported_init_ = false;
   bool has_reported_error_ = false;
+  bool filler_ = false;
   const SdpVideoFormat format_;
   bool current_encoding_is_keyframe_ = false;
 };

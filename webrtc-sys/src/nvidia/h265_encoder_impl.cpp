@@ -6,6 +6,7 @@
 #include <string>
 
 #include "i420_buffer_cuda.h"
+#include "nvenc_rate_control.h"
 #include "absl/strings/match.h"
 #include "absl/types/optional.h"
 #include "api/video/video_codec_constants.h"
@@ -154,13 +155,39 @@ int32_t NvidiaH265EncoderImpl::InitEncode(
   nv_encode_config_.rcParams.version = NV_ENC_RC_PARAMS_VER;
   nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
   nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
+  // Same frame-size controls as the H.264 and AV1 paths; see nvenc_rate_control.h.
+  // Without them H.265 cells ran with a 5-frame VBV and no padding, so their frame
+  // sizes were not comparable with the other two codecs at the same bits per pixel.
+  const uint32_t vbv_frames = ReadNvencVbvFramesFromEnv();
+  encoder_->SetVbvFrames(vbv_frames);
   nv_encode_config_.rcParams.vbvBufferSize =
       (nv_encode_config_.rcParams.averageBitRate *
        nv_initialize_params_.frameRateDen /
        nv_initialize_params_.frameRateNum) *
-      5;
+      vbv_frames;
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+  nv_encode_config_.rcParams.lowDelayKeyFrameScale = 1;
+  filler_ = ReadNvencFillerFromEnv();
+  nv_encode_config_.encodeCodecConfig.hevcConfig.enableFillerDataInsertion =
+      filler_ ? 1 : 0;
+
+  // See kNvencTargetQualityEnv: quality mode lets size float under the cap, so
+  // padding is turned off there.
+  const uint8_t target_quality = ReadNvencTargetQualityFromEnv();
+  if (target_quality != 0) {
+    nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+    nv_encode_config_.rcParams.targetQuality = target_quality;
+    nv_encode_config_.rcParams.targetQualityLSB = 0;
+    nv_encode_config_.rcParams.maxBitRate = configuration_.target_bps;
+    filler_ = false;
+    nv_encode_config_.encodeCodecConfig.hevcConfig.enableFillerDataInsertion = 0;
+  }
+  RTC_LOG(LS_WARNING) << "NVENC H265 frame-size cap: VBV " << vbv_frames
+                      << " frame(s) = " << nv_encode_config_.rcParams.vbvBufferSize
+                      << " bits, filler " << (filler_ ? "on" : "off")
+                      << ", keyframe scale 1, target quality "
+                      << (target_quality ? std::to_string(target_quality) : std::string("off"));
 
   try {
     encoder_->CreateEncoder(&nv_initialize_params_);
@@ -332,6 +359,9 @@ VideoEncoder::EncoderInfo NvidiaH265EncoderImpl::GetEncoderInfo() const {
   info.implementation_name = "NVIDIA H265 Encoder";
   info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
   info.is_hardware_accelerated = true;
+  // See the H.264 encoder: NVENC CBR holds frames to budget, so WebRTC's frame
+  // dropper would only discard frames ahead of the encoder.
+  info.has_trusted_rate_controller = true;
   info.supports_simulcast = false;
   info.preferred_pixel_formats = {VideoFrameBuffer::Type::kI420};
   return info;
