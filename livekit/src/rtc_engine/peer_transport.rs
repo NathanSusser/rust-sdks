@@ -250,12 +250,6 @@ impl PeerTransport {
         Some(start_kbps.min(target_kbps).min(Self::max_start_bitrate_kbps()))
     }
 
-    /// Munge SDP to change a=inactive to a=recvonly for RTP media m-lines in single PC mode.
-    /// This is needed because WebRTC can generate inactive direction even when transceivers
-    /// were configured as recvonly.
-    ///
-    /// We intentionally limit this to RTP m-sections, so non-RTP sections (for example
-    /// data-channel `m=application` sections) are not rewritten.
     /// Sets `offer_to_receive_*` for every media kind that already has a receiving
     /// transceiver.
     ///
@@ -283,6 +277,12 @@ impl PeerTransport {
         options
     }
 
+    /// Munge SDP to change a=inactive to a=recvonly for RTP media m-lines in single PC mode.
+    /// This is needed because WebRTC can generate inactive direction even when transceivers
+    /// were configured as recvonly.
+    ///
+    /// We intentionally limit this to RTP m-sections, so non-RTP sections (for example
+    /// data-channel `m=application` sections) are not rewritten.
     fn munge_inactive_to_recvonly_for_media(sdp: &str) -> String {
         // Detect what line ending the original SDP uses
         let uses_crlf = sdp.contains("\r\n");
