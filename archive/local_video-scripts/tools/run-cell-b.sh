@@ -177,9 +177,10 @@ trap on_interrupt INT TERM HUP
 # waits for tcpdump to close the pcap, copies to A, verifies every sha256, then deletes
 # B's copy. On any failure B's copy stays and ~/teleop/ship.log says FAILED.
 ship() {
-  local dest=${A_RESULTS:-} f t extra=()
-  [ -n "$dest" ] || dest=$(timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 "$A_HOST" \
-                             "echo \$HOME/code/rust-sdks/results/$ROOM" 2>/dev/null)
+  # All results live under ~/teleop-runs on A since the restructure (not results/ in the repo).
+  local dest f t extra=()
+  dest=$(timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 "$A_HOST" \
+           "echo \$HOME/teleop-runs/manual/$ROOM" 2>/dev/null)
   if [ -z "$dest" ]; then
     say "SHIP FAILED: Host A unreachable -- data stays on B in $CELL"; return
   fi
