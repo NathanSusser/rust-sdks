@@ -8,7 +8,8 @@ Host A's agent is run as a local subprocess the same way, so a hung step on eith
 timeout here, never a hang.
 
 Statuses: OK | SKIPPED (a gate failed; nothing published) | INCOMPLETE (ran, but a capture,
-liveness, close or pull/verify step failed -- kept, excluded from comparison) | ABORTED
+liveness, close or pull/verify step failed, or B rendered under half the frames the cell should
+carry -- kept, excluded from comparison) | ABORTED
 (operator stop). Two consecutive SKIPPED on the same gate PAUSE the grid (it exits, resumable
 with --resume), since the cause is environmental. A control cell that fails its thresholds
 (or does not complete) stops the grid.
@@ -56,9 +57,21 @@ from .capture import (CODE_ROOT, SUMS_NAME, ZST_SUMS_NAME, pid_alive, read_json,
 LIVENESS_S = 25          # publish-cell.sh: first snapshot within 25 s of the epoch, or the cell is dead
 POLL_S = 10
 MIN_REMAIN_S = 15        # paired-cell.sh: do not walk into at-epoch's refusal
+# Below half of fps x duration, B was not watching the stream the cell measured. The H.265
+# smoke cell of 2026-09-30 ran clean on A and rendered 0 frames on B, and still said OK.
+MIN_RENDERED_FRACTION = 0.5
 TIMEOUTS = {"identity": 90, "preflight": 60, "arm": 120, "publish": 45, "status": 45, "checksums": 1200,
             "pull": 1800, "purge": 300, "stop": 180}
 FINAL = ("OK", "SKIPPED", "INCOMPLETE", "ABORTED")
+
+
+def rendered_frames(hostb: Path) -> int | None:
+    """Data rows in B's subscriber.csv, one per frame B rendered; None if the file is missing."""
+    try:
+        with (hostb / "subscriber.csv").open("rb") as f:
+            return max(sum(1 for line in f if line.strip()) - 1, 0)
+    except OSError:
+        return None
 
 
 def utc_iso(t: float | None = None, ms: bool = False) -> str:
@@ -1030,6 +1043,15 @@ class CellRun:
         if not verified:
             reason = ((self.man.get("storage") or {}).get("pull") or {}).get("reason") or "not attempted"
             self.problems.append(f"hostb/ not verified on A ({reason}); B's copy kept")
+        else:
+            got = rendered_frames(self.dir / "hostb")
+            want = int(self.cell.values["fps"]) * self.cell.duration_s
+            self.man["frames_rendered_b"] = {"rows": got, "expected": want}
+            if not got:
+                self.problems.append("B rendered no video frames (hostb/subscriber.csv "
+                                     + ("missing)" if got is None else "has no rows)"))
+            elif got < MIN_RENDERED_FRACTION * want:
+                self.problems.append(f"B rendered only {got} of ~{want} frames")
         self.man["integrity"] = {"captures_complete": bool(closed_ok), "mirror_verified": bool(verified),
                                  "problems": list(self.problems)}
         if self.problems:

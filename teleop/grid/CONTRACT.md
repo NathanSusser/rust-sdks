@@ -609,6 +609,9 @@ ok}` (paths relative to the cell directory). `timeline` adds `purged`, `compress
 of hostb/ verified". `variables` adds `control_transport`, `control_rx_buffer`; `screenshots`/`sample_every`
 are gone. A verify failure is INCOMPLETE with `hostb/ not verified on A (...); B's copy kept`; a refused purge
 is logged and recorded but does not change the status (A's copy is verified).
+Once `hostb/` verifies, the manifest adds `frames_rendered_b {rows, expected}`: data rows in B's
+`subscriber.csv` against fps x duration_s. No rows is INCOMPLETE with `B rendered no video frames (...)`, and fewer
+than half is INCOMPLETE with `B rendered only N of ~M frames`, because a cell B did not watch measured nothing.
 
 **Variables.** `control_transport` (enum, default `data_track_buf1`) -> harness `--control-transport`.
 `control_rx_buffer` (int 1..256, default 64) -> B's `--control-buffer-frames`, only together with

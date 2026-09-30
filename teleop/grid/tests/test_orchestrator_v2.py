@@ -61,7 +61,8 @@ def make_hostb(cell: Path, label: str, extra: dict | None = None) -> Path:
     hb = cell / "hostb"
     hb.mkdir(parents=True, exist_ok=True)
     files = {f"{label}.wwan0.pcap": b"\xd4\xc3\xb2\xa1" + os.urandom(3000), f"{label}.dlf": os.urandom(5000),
-             "subscriber.csv": b"frame_id,t\n1,2\n", "frames-qp.csv": b"frame_id,qp\n1,30\n",
+             "subscriber.csv": b"frame_id,t\n" + b"".join(b"%d,%d\n" % (i, i) for i in range(900)),
+             "frames-qp.csv": b"frame_id,qp\n1,30\n",
              "control.csv": b"seq,t_send_unix_us\n1,2\n", "captures.json": b"{}\n"}
     files.update(extra or {})
     for name, data in files.items():
@@ -413,7 +414,7 @@ class Rig:
     roots, canned replies for everything that would need hardware. Records every call."""
 
     def __init__(self, tmp: Path, clock: FakeTime, *, bad_pull: set | None = None, after_pull=None,
-                 control_log=True, on_purge=None):
+                 control_log=True, on_purge=None, hostb_files: dict | None = None):
         self.root_a, self.root_b = tmp / "a-runs", tmp / "b-runs"
         self.cfg_a, self.cfg_b = cfg_for("a", self.root_a), cfg_for("b", self.root_b)
         self.clock = clock
@@ -421,6 +422,7 @@ class Rig:
         self.after_pull = after_pull
         self.on_purge = on_purge
         self.control_log = control_log
+        self.hostb_files = hostb_files or {}       # label -> {name: bytes} B writes instead of the defaults
         self.calls: list[tuple] = []
         self.published: dict = {}
         self.lock = threading.Lock()
@@ -452,7 +454,7 @@ class Rig:
             hd = root / rel / ("hosta" if h == "a" else "hostb")
             hd.mkdir(parents=True, exist_ok=True)
             if h == "b":
-                make_hostb(root / rel, label)
+                make_hostb(root / rel, label, self.hostb_files.get(label))
             else:
                 (hd / f"{label}.wwan0.pcap").write_bytes(os.urandom(2000))
                 (hd / f"{label}.dlf").write_bytes(os.urandom(4000))
@@ -699,6 +701,35 @@ class GridRunTest(Tmp):
         self.assertIn("B's copy KEPT", (gdir / "grid.log").read_text())
         # an INCOMPLETE cell is still reduced (it ran)
         self.assertIn(str(gdir / "av1/r1"), [e["arg"] for e in self.events() if e["kind"] == "reduce"])
+
+    def test_b_rendering_nothing_or_too_little_is_incomplete(self):
+        """The H.265 smoke of 2026-09-30: A published cleanly, B decoded nothing, and it said OK."""
+        g = G.load(grid_file(self.tmp, repeats=1))
+        h265, av1 = (c.label for c in g.expand())
+        head = b"sample,elapsed_ms,frame_id\n"
+        rig = Rig(self.tmp, self.clock, hostb_files={
+            h265: {"subscriber.csv": head},
+            av1: {"subscriber.csv": head + b"".join(b"%d,0,%d\n" % (i, i) for i in range(100))}})
+        run = self.gridrun(grid_file(self.tmp, repeats=1), rig=rig)
+        self.assertEqual(run.run(), "done")
+        gdir = rig.root_a / "v2test"
+        man = capture.read_json(gdir / "h265/r1/manifest.json")
+        self.assertEqual(man["status"], "INCOMPLETE")
+        self.assertIn("B rendered no video frames (hostb/subscriber.csv has no rows)", man["status_reason"])
+        self.assertEqual(man["frames_rendered_b"], {"rows": 0, "expected": 900})
+        self.assertTrue(man["integrity"]["mirror_verified"], "storage still verified and purged")
+        man = capture.read_json(gdir / "av1/r1/manifest.json")
+        self.assertEqual(man["status"], "INCOMPLETE")
+        self.assertIn("B rendered only 100 of ~900 frames", man["status_reason"])
+
+    def test_rendered_frames_counts_data_rows(self):
+        hb = self.tmp / "hb"
+        hb.mkdir()
+        self.assertIsNone(O.rendered_frames(hb))
+        (hb / "subscriber.csv").write_text("a,b\n")
+        self.assertEqual(O.rendered_frames(hb), 0)
+        (hb / "subscriber.csv").write_text("a,b\n1,2\n3,4\n\n")
+        self.assertEqual(O.rendered_frames(hb), 2)
 
     def test_refused_purge_keeps_b_but_not_the_status(self):
         def grow(rig, rel, label):        # B's pcap grows after A pulled it
