@@ -33,10 +33,10 @@ STATS = ("mean", "p50", "p95", "p99", "max")
 KPIS = [
     ("e2e", "latency.e2e", "Glass-to-glass (e2e)", "ms", "summary", "lower", False, True,
      "Capture on A to GPU-complete on B, per frame (the subscriber's e2e_to_gpu_complete_ms)."),
-    ("owd", "latency.owd", "Network one-way (owd)", "ms", "summary", "lower", False, True,
-     "A packetize to B webrtc receive, per frame, on PTP-locked host clocks."),
-    ("jit_sd", "jitter.owd_sd_ms", "Jitter: one-way sd", "ms", "value", "lower", False, True,
-     "Standard deviation of the per-frame one-way latency."),
+    ("owd", "latency.owd", "Network", "ms", "summary", "lower", False, True,
+     "One direction across the network: A packetize to B webrtc receive, per frame, on PTP-locked host clocks."),
+    ("jit_sd", "jitter.owd_sd_ms", "Jitter: network sd", "ms", "value", "lower", False, True,
+     "Standard deviation of the per-frame network latency."),
     ("jit_ia", "jitter.interarrival_rfc3550_ms", "Jitter: RFC 3550 interarrival", "ms", "summary", "lower", False,
      True, "RFC 3550 6.4.1 running interarrival jitter, S = packetize on A, R = receive on B."),
     ("qp", "encoder.qp_per_frame", "QP per frame", "QP", "summary", "lower", True, True,
@@ -48,7 +48,7 @@ KPIS = [
      "frame.fps_delivered (frames reaching webrtc_receive on B per second) / the fps the cell asked for."),
     ("lost", "network.packets_lost", "Packets lost at B", "packets", "value", "lower", False, True,
      "The subscriber's packets_lost (max over the cell)."),
-    ("c_owd", "control.owd", "Control path one-way", "ms", "summary", "lower", False, True,
+    ("c_owd", "control.owd", "Control path network", "ms", "summary", "lower", False, True,
      "Data-track control samples, A send to B receive, inside the window (publisher span minus 2 s each end)."),
     ("c_del", "control.delivered_pct", "Control path delivered", "%", "value", "higher", False, True,
      "Distinct control seq B received / seq A published, inside the window."),
@@ -60,8 +60,8 @@ KPIS = [
      "Frames that reached webrtc_receive on B per second (the % of target is the KPI of record)."),
     ("e2e100", "tail.e2e_over_100.share", "Frames over 100 ms e2e", "share", "value", "lower", False, False,
      "Share of frames whose glass-to-glass exceeded 100 ms."),
-    ("owd100", "tail.owd_over_100.share", "Frames over 100 ms one-way", "share", "value", "lower", False, False,
-     "Share of frames whose one-way exceeded 100 ms."),
+    ("owd100", "tail.owd_over_100.share", "Frames over 100 ms on the network", "share", "value", "lower", False, False,
+     "Share of frames whose network latency exceeded 100 ms."),
     ("c_rtt", "control.rtt", "Control probe round trip", "ms", "summary", "lower", False, False,
      "The harness's probe: A to B and back over the control transport, plus scheduling (about 2x network RTT)."),
     ("c_gap", "control.gaps.max_consecutive_lost", "Control longest gap", "samples", "value", "lower", False, False,
@@ -77,9 +77,9 @@ KPI_BY_ID = {k[0]: k for k in KPIS}
 PRIMARY = [k[0] for k in KPIS if k[7]]
 
 # radar spokes (kpi id, statistic, label) -- all lower-is-better
-RADAR = [("e2e", "p50", "e2e p50"), ("e2e", "p99", "e2e p99"), ("owd", "p99", "owd p99"),
+RADAR = [("e2e", "p50", "e2e p50"), ("e2e", "p99", "e2e p99"), ("owd", "p99", "network p99"),
          ("jit_sd", "value", "jitter sd"), ("qp", "p50", "QP p50"), ("qp", "p99", "QP p99"),
-         ("c_owd", "p99", "control owd p99")]
+         ("c_owd", "p99", "control network p99")]
 
 QP_SCALE = {"h264": "H.264 QP 0–51", "h265": "H.265 QP 0–51", "av1": "AV1 q-index 0–255"}
 FLAG_TEXT = {
@@ -310,7 +310,7 @@ def build_model(grid_dir: Path, cells, axes: list[str], plan: dict | None = None
         "kpis": kpis, "radar": [{"kpi": k, "stat": s, "label": lab} for k, s, lab in RADAR],
         "stats": list(STATS), "flag_text": FLAG_TEXT, "serious_flags": sorted(SERIOUS_FLAGS),
         "combos": combos, "controls": controls,
-        "paths": [{"path": p, "kind": path_kind[p]} for p in all_paths],
+        "paths": [{"path": p, "name": S.path_name(p), "kind": path_kind[p]} for p in all_paths],
         "plan": plan or {},
     }
     model["overview"] = overview(model)
@@ -553,7 +553,7 @@ def overview_html(model: dict, cells) -> str:
             rows.append(f"<tr><td>{lab}</td><td>{H.esc(e['status'])}</td><td class='num'>{H.esc(S.fmt(p99))}</td>"
                         f"<td class='num'>{H.esc(S.fmt(lost))}</td></tr>")
         ctl = ("<h3>Control cells</h3><table class='t'><thead><tr><th>cell</th><th>status</th>"
-               "<th class='num'>owd p99 ms</th><th class='num'>packets lost</th></tr></thead><tbody>"
+               "<th class='num'>network p99 ms</th><th class='num'>packets lost</th></tr></thead><tbody>"
                + "".join(rows) + "</tbody></table>")
     return f"""
 <section id="overview"><h2>Overview</h2>
@@ -657,7 +657,7 @@ repeats side by side); r1, r2, r3 link to each repeat's report.pdf; a warning si
 <section id="repeats"><h2>Every repeat</h2>
 <details class="how"><summary>How to read this</summary><div>
 Each repeat directory found, with its status and flags: <b>not NVENC</b> (the encoder that ran is not NVIDIA's),
-<b>PTP not locked</b> (cross-host one-way numbers are not trustworthy), <b>codec fallback</b> (the negotiated codec
+<b>PTP not locked</b> (cross-host network numbers are not trustworthy), <b>codec fallback</b> (the negotiated codec
 differs from the requested one), <b>INCOMPLETE</b>/<b>SKIPPED</b> (not counted in medians). A combination whose
 repeat directory does not exist yet is simply not listed.
 </div></details>
@@ -1053,13 +1053,13 @@ function renderExplore() {
   const host = $('charts-explore'); host.replaceChildren();
   const p = $('xp-path').value; if (!p) return;
   const meta = D.paths.find(q => q.path === p);
-  const k = {id: 'xp', path: p, label: p, unit: '', kind: meta ? meta.kind : 'value', better: null, per_codec: /qp/.test(p), help: p};
+  const k = {id: 'xp', path: p, label: meta && meta.name ? meta.name : p, unit: '', kind: meta ? meta.kind : 'value', better: null, per_codec: /qp/.test(p), help: 'metrics key ' + p};
   const st = $('xp-stat').value || 'p99';
   card(k, k.kind === 'summary' ? st : 'value', host, k.per_codec && new Set(D.combos.map(cb => cb.codec)).size > 1);
 }
 (function () {
   const ps = $('xp-path'), ss = $('xp-stat');
-  D.paths.forEach(q => ps.append(new Option(q.path + (q.kind === 'summary' ? '' : ' (value)'), q.path)));
+  D.paths.forEach(q => ps.append(new Option((q.name || q.path) + (q.kind === 'summary' ? '' : ' (value)'), q.path)));
   ['mean', 'p50', 'p95', 'p99', 'max', 'min', 'n'].forEach(x => ss.append(new Option(x, x)));
   ps.value = D.paths.some(q => q.path === 'latency.in_flight') ? 'latency.in_flight' : (D.paths[0] || {}).path || '';
   ss.value = 'p99';
@@ -1247,7 +1247,7 @@ $('mx-more').addEventListener('change', renderMatrix);
 // ---- every repeat
 function renderRepeats() {
   const t = h('table', {class: 't'});
-  t.append(h('thead', {}, h('tr', {}, ...['combination', 'repeat', 'status', 'flags', 'e2e p99', 'owd p99', 'control owd p99', 'encoder', 'report', 'label'].map((x, i) => h('th', {class: (i >= 4 && i <= 6) ? 'num' : null, text: x})))));
+  t.append(h('thead', {}, h('tr', {}, ...['combination', 'repeat', 'status', 'flags', 'e2e p99', 'network p99', 'control network p99', 'encoder', 'report', 'label'].map((x, i) => h('th', {class: (i >= 4 && i <= 6) ? 'num' : null, text: x})))));
   const tb = h('tbody');
   const all = D.combos.flatMap(cb => cb.repeats.map(r => ({cb, r}))).concat(D.controls.map(r => ({cb: {label: 'control ' + r.name, codec: ''}, r})));
   all.forEach(({cb, r}) => {

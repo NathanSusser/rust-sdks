@@ -10,8 +10,8 @@ have not run yet (listed as "not run").
 Page 1: flags per repeat (INCOMPLETE, not NVENC, PTP not locked, codec fallback, ...) and every
 KPI with mean/p50/p95/p99/max per repeat and the median across the counted repeats (status OK,
 not excluded -- the same rule as analysis.html). Page 2: small multiples over time, one column
-per repeat, one row each for network one-way, glass-to-glass, QP per frame and the control
-path's one-way, the y axis shared along a row.
+per repeat, one row each for network, glass-to-glass, QP per frame and the control
+path's network, the y axis shared along a row.
 """
 from __future__ import annotations
 
@@ -277,10 +277,10 @@ def _series(r: Repeat, what: str):
     return t.col("t_s"), t.col(what)
 
 
-ROWS = [("owd", "Network one-way (owd)", "ms", "latency.owd"),
+ROWS = [("owd", "Network", "ms", "latency.owd"),
         ("e2e", "Glass-to-glass (e2e)", "ms", "latency.e2e"),
         ("qp", "QP per frame", "QP", "encoder.qp_per_frame"),
-        ("control", "Control path one-way", "ms", "control.owd")]
+        ("control", "Control path network", "ms", "control.owd")]
 
 
 def page_multiples(reps: list[Repeat], title: str, codec: str):

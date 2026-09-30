@@ -41,15 +41,15 @@ TABLE_STATS = ("mean", "p50", "p95", "p99", "max")
 KPIS_OF_RECORD = [
     ("Quality — encoder QP (higher is worse)", [("encoder.qp", TAIL)], "QP"),
     ("Quality — QP per frame, B's decoder (higher is worse)", [("encoder.qp_per_frame", TAIL)], "QP"),
-    ("Latency — one-way (packetize → receive)", [("latency.owd", TAIL)], "ms"),
+    ("Latency — network (packetize → receive)", [("latency.owd", TAIL)], "ms"),
     ("Latency — end to end", [("latency.e2e", TAIL)], "ms"),
-    ("Jitter — one-way sd and RFC 3550 interarrival", [("jitter.owd_sd_ms", ("value",)),
+    ("Jitter — network sd and RFC 3550 interarrival", [("jitter.owd_sd_ms", ("value",)),
                                                       ("jitter.interarrival_rfc3550_ms", ("p99",))], "ms"),
     ("Frame size", [("frame.size_kb", TAIL)], "kB"),
     ("Delivered frame rate", [("frame.fps_delivered", ("value",))], "fps"),
     ("Loss — packets lost at B", [("network.packets_lost", ("value",))], "packets"),
-    ("Tail — share of frames over 100 ms one-way", [("tail.owd_over_100.share", ("value",))], "share"),
-    ("Control path — one-way over the data track", [("control.owd", TAIL)], "ms"),
+    ("Tail — share of frames over 100 ms on the network", [("tail.owd_over_100.share", ("value",))], "share"),
+    ("Control path — network over the data track", [("control.owd", TAIL)], "ms"),
     ("Control path — delivered share of published samples", [("control.delivered_pct", ("value",))], "%"),
 ]
 
@@ -527,7 +527,8 @@ def build_pdf_figures(grid_id: str, cells: list[GridCell], axes: list[str]) -> l
         title, series, unit = kpi
         panels = [(path, st) for path, sts in series for st in sts]
         fig = plt.figure(figsize=S.PAGE_SIZE)
-        _page_band(fig, title, " · ".join(f"{p} {st}" for p, st in panels) + f" · {unit}")
+        _page_band(fig, title, " · ".join(S.path_name(p) + ("" if st == "value" else f" {st}") for p, st in panels)
+                   + f" · {unit}")
         chart_top, chart_bot = 0.885, 0.46
         nr = len(ax_rows)
         rh = (chart_top - chart_bot) / nr
@@ -541,7 +542,8 @@ def build_pdf_figures(grid_id: str, cells: list[GridCell], axes: list[str]) -> l
                 ax = fig.add_axes([0.06 + k * cw, chart_top - (r + 1) * rh + 0.05, cw - 0.05, rh - 0.08])
                 h, miss = _panel(ax, plotted, axis, facet, path, st, unit)
                 missing_total = max(missing_total, miss)
-                ax.set_title(f"{st} {path}" if len(series) > 1 else st, fontsize=8, pad=3)
+                ax.set_title(S.path_name(path) + ("" if st == "value" else f" {st}") if len(series) > 1 else st,
+                             fontsize=8, pad=3)
                 if k == 0:
                     ax.set_ylabel(unit)
                 row_handles = row_handles or h
@@ -601,7 +603,7 @@ def _html_data(grid_id: str, cells: list[GridCell], axes: list[str]) -> dict:
     kpi_record = [p for _, series, _ in KPIS_OF_RECORD for p, _ in series]
     ordered = [p for p in kpi_record if p in paths] + sorted(p for p in paths if p not in kpi_record)
     return {"grid_id": grid_id, "axes": axes, "variables": var_names,
-            "kpis": [{"path": p, "stats": paths[p]} for p in ordered],
+            "kpis": [{"path": p, "name": S.path_name(p), "stats": paths[p]} for p in ordered],
             "kpis_of_record": kpi_record, "cells": out_cells,
             "slots": list(S.SLOTS)}
 
@@ -667,7 +669,7 @@ const kSel = $('kpi'), sSel = $('stat'), xSel = $('xvar'), fSel = $('facet');
 const rec = new Set(D.kpis_of_record);
 const g1 = document.createElement('optgroup'); g1.label = 'KPIs of record';
 const g2 = document.createElement('optgroup'); g2.label = 'all metrics';
-D.kpis.forEach(k => { const o = new Option(k.path, k.path); (rec.has(k.path) ? g1 : g2).appendChild(o); });
+D.kpis.forEach(k => { const o = new Option(k.name || k.path, k.path); (rec.has(k.path) ? g1 : g2).appendChild(o); });
 kSel.append(g1, g2);
 const xOpts = D.axes.length ? D.axes.concat(D.variables.filter(v => !D.axes.includes(v))) : D.variables;
 xSel.append(new Option('cell (label)', '__cell__'));

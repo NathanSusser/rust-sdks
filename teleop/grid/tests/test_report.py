@@ -495,7 +495,7 @@ class AnalysisTests(unittest.TestCase):
         prim = [k["id"] for k in m["kpis"] if k["primary"]]
         self.assertEqual(prim, ["e2e", "owd", "jit_sd", "jit_ia", "qp", "spread", "fps", "lost", "c_owd", "c_del"])
         self.assertEqual([r["label"] for r in m["radar"]],
-                         ["e2e p50", "e2e p99", "owd p99", "jitter sd", "QP p50", "QP p99", "control owd p99"])
+                         ["e2e p50", "e2e p99", "network p99", "jitter sd", "QP p50", "QP p99", "control network p99"])
         self.assertEqual(m["qp_scale"]["av1"], "AV1 q-index 0–255")
         self.assertEqual(set(m["qp_path"].values()), {"encoder.qp_per_frame"})
 

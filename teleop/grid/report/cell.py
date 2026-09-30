@@ -1,7 +1,7 @@
 """Per-cell report: report.pdf and report.html from reduced/*.csv, metrics.json and manifest.json.
 
 Ported from archive/local_video-scripts/generate_frame_report.py. Its four pages are kept
-(overview with the frame funnel, per-segment breakdown, one-way network latency and
+(overview with the frame funnel, per-segment breakdown, network latency and
 jitter, modem activity on both hosts) and fed from the reduced tables instead of raw CSVs;
 pages are added (the control path over the data track, frame size, wire rates, QP and codec
 timing, late-frame breakdown). When B's decoder logged per-frame QP a "QP per frame" page
@@ -389,7 +389,7 @@ class Cell:
         return None
 
     def spike_rows(self) -> list[dict]:
-        """Every frame over LATE_MS one-way, from spikes.csv or derived from frames.csv."""
+        """Every frame over LATE_MS on the network, from spikes.csv or derived from frames.csv."""
         out = []
         if self.spikes is not None and len(self.spikes):
             t = self.spikes
@@ -655,7 +655,7 @@ def page_overview(c: Cell) -> Page:
             y -= lh
     y_tab = y0 - lh * max(len(left[:14]), len(right[:14])) - 0.012
     rows = [
-        stat_row("one-way (packetize → receive)", c.summ("latency.owd", "owd_ms"), "ms"),
+        stat_row("network (packetize → receive)", c.summ("latency.owd", "owd_ms"), "ms"),
         stat_row("end to end (to GPU complete)", c.summ("latency.e2e", "e2e_ms"), "ms"),
         stat_row("frame size", c.summ("frame.size_kb") if dig(c.metrics, "frame.size_kb.n")
                  else stats.summ((c.fcol("size_bytes") / 1000).tolist()), "kB"),
@@ -671,7 +671,7 @@ def page_overview(c: Cell) -> Page:
         s_all = stats.summ(np.concatenate([owd[np.isfinite(owd)], e2e[np.isfinite(e2e)]]).tolist())
         cap = max(1.0, (s_all["p99"] or 1) * 1.4)
         o1 = _series(ax, t, e2e, S.E2E, "end to end", ycap=cap)
-        o2 = _series(ax, t, owd, S.OWD, "one-way", ycap=cap)
+        o2 = _series(ax, t, owd, S.OWD, "network", ycap=cap)
         rec = c.fcol("received")
         lost_t = t[(rec == 0) & np.isfinite(t)]
         if len(lost_t):
@@ -739,7 +739,7 @@ def page_segments(c: Cell) -> Page:
     names = [("capture → packetize (A app)", "latency.capture_to_packetize", "capture_to_packetize_ms"),
              ("encode", "encoder.encode_ms", "encode_ms")]
     names += [(S.SEGMENT_LABEL[n], f"latency.{n}", f"{n}_ms") for n, _ in S.SEGMENTS]
-    names += [("one-way (packetize → receive)", "latency.owd", "owd_ms"),
+    names += [("network (packetize → receive)", "latency.owd", "owd_ms"),
               ("end to end", "latency.e2e", "e2e_ms")]
     rows, seg_means = [], []
     for label, mp, colname in names:
@@ -752,7 +752,7 @@ def page_segments(c: Cell) -> Page:
         if S.is_num(s.get("mean")):
             seg_means.append((n, lab, s["mean"], s.get("p50")))
     y = p.table(0.03, 0.895, 0.94, STAT_HEAD, rows, STAT_W, fs=7.4, lh=0.027,
-                highlight=[r[0].startswith(("one-way", "end to end")) for r in rows])
+                highlight=[r[0].startswith(("network", "end to end")) for r in rows])
     if not rows:
         p.text(0.03, 0.86, "no segment data in metrics.json or frames.csv", color=S.MUTED)
     bar_h = max(0.10, min(0.22, y - 0.13))
@@ -787,7 +787,7 @@ def page_segments(c: Cell) -> Page:
 
 
 def page_network(c: Cell) -> Page:
-    p = Page(c, "One-way network latency and jitter", "Host A packetize → Host B webrtc receive")
+    p = Page(c, "Network latency and jitter", "Host A packetize → Host B webrtc receive")
     locked, detail = c.ptp_locked()
     if locked is True:
         p.text(0.03, 0.895, f"Manifest records PTP as locked ({detail}); the hosts' common offset from UTC cancels "
@@ -796,7 +796,7 @@ def page_network(c: Cell) -> Page:
         p.html_blocks.append(f'<p class="note">Manifest records PTP as locked ({H.esc(detail)}).</p>')
     else:
         msg = ("PTP NOT LOCKED per manifest" if locked is False else "PTP STATE NOT RECORDED in manifest") + \
-              f" ({detail}) — cross-host one-way numbers on this page are not trustworthy."
+              f" ({detail}) — cross-host network numbers on this page are not trustworthy."
         p.banner(0.862, msg)
         y = 0.845
         p.html_blocks.append(f'<div class="banner">{H.esc(msg)}</div>')
@@ -806,15 +806,15 @@ def page_network(c: Cell) -> Page:
     sd = dig(c.metrics, "jitter.owd_sd_ms")
     if not S.is_num(sd):
         sd = stats.sd(c.fcol("owd_ms").tolist())
-    rows = [stat_row("one-way", owd_s, "ms"), stat_row("interarrival jitter RFC 3550", ia, "ms"),
+    rows = [stat_row("network", owd_s, "ms"), stat_row("interarrival jitter RFC 3550", ia, "ms"),
             stat_row("frame interval at B", fib, "ms")]
     y = p.table(0.03, y, 0.94, STAT_HEAD, rows, STAT_W, fs=7.4, lh=0.025)
     tl = c.metrics.get("tail") or {}
-    bits = [f"one-way sd {S.fmt(sd)} ms"]
+    bits = [f"network sd {S.fmt(sd)} ms"]
     for k in ("owd_over_100", "owd_over_150", "e2e_over_100", "e2e_over_150"):
         v = tl.get(k) or {}
         if S.is_num(v.get("count")):
-            bits.append(f"{k.replace('_', ' ')}: {v['count']:,} ({S.pct(v.get('share'))})")
+            bits.append(f"{k.replace('owd', 'network').replace('_', ' ')}: {v['count']:,} ({S.pct(v.get('share'))})")
     p.text(0.03, y - 0.008, "   ·   ".join(bits), color=S.INK, fontsize=7.4, va="top")
     top = y - 0.05
     owd = c.fcol("owd_ms")
@@ -834,7 +834,7 @@ def page_network(c: Cell) -> Page:
             ax.text(0.99, 0.80, f"{over:,} frames > {hi:.0f} ms in last bin\nmax {owd_f.max():.0f} ms",
                     transform=ax.transAxes, ha="right", va="top", fontsize=6.5, color=S.INK_2)
     else:
-        _no_data(ax, "no one-way latency")
+        _no_data(ax, "no network latency")
     ax = p.axes([0.55, top - 0.30, 0.42, 0.27], "CCDF (share of frames above x)", "share", "ms")
     if len(owd_f):
         xs = np.sort(owd_f)
@@ -844,19 +844,19 @@ def page_network(c: Cell) -> Page:
         ax.set_ylim(max(1.0 / len(xs) / 2, 1e-5), 1.05)
         ax.axvline(LATE_MS, color=S.MUTED, lw=0.6, ls="--")
     else:
-        _no_data(ax, "no one-way latency")
+        _no_data(ax, "no network latency")
     ax = p.axes([0.07, 0.08, 0.90, top - 0.43], "Over the cell", "ms", "seconds since epoch")
     t = c.fcol("t_s")
     if len(owd_f):
         cap = max(1.0, (owd_s.get("p99") or 1) * 1.4)
-        over = _series(ax, t, owd, S.OWD, "one-way", ycap=cap)
+        over = _series(ax, t, owd, S.OWD, "network", ycap=cap)
         ax.axhline(LATE_MS, color=S.MUTED, lw=0.6, ls="--")
         ax.set_ylim(0, cap * 1.05)
         if over:
             ax.text(0.995, 0.97, f"{over:,} frames above {cap:.0f} ms drawn at the top", transform=ax.transAxes,
                     ha="right", va="top", fontsize=6.5, color=S.INK_2)
     else:
-        _no_data(ax, "no one-way latency")
+        _no_data(ax, "no network latency")
     p.html_blocks.append(stat_html(rows) + f'<p class="note">{H.esc("   ·   ".join(bits))}</p>')
     return p
 
@@ -865,7 +865,7 @@ def page_modem(c: Cell) -> Page:
     p = Page(c, "Modem activity, both hosts", "per-second DIAG record counts (not grant sizes)")
     p.text(0.03, 0.895, "Per-second DIAG RECORD COUNTS, not grant sizes: this shows WHEN the modem's scheduling "
                         "activity changed, never the grant in bytes. Red ticks mark seconds holding a frame over "
-                        f"{LATE_MS:.0f} ms one-way.", color=S.INK_2, fontsize=7.2, va="top")
+                        f"{LATE_MS:.0f} ms on the network.", color=S.INK_2, fontsize=7.2, va="top")
     owd, t = c.fcol("owd_ms"), c.fcol("t_s")
     late_secs = sorted({int(math.floor(x)) for x, o in zip(t, owd) if math.isfinite(x) and math.isfinite(o) and o > LATE_MS})
     html = []
@@ -963,7 +963,7 @@ def _modem_code_rows(c: Cell, late_secs: list[int]) -> tuple[list[list], str]:
     if not mods:
         return rows, "no DLF rates for either host"
     if not late_secs:
-        verdict = f"no frame over {LATE_MS:.0f} ms one-way: nothing to compare"
+        verdict = f"no frame over {LATE_MS:.0f} ms on the network: nothing to compare"
     lead = mods[0]
     span = max(1, len(lead.totals()))
     if late_secs and len(late_secs) / span > 0.5:
@@ -1161,7 +1161,7 @@ def _spike_table_rows(spikes: list[dict]) -> list[list]:
              r["size_ratio"], "key" if r.get("keyframe") == 1 else "delta", r["kind"]] for r in spikes]
 
 
-SPIKE_HEAD = ["t (s)", "frame", "one-way ms", "e2e ms", "dominant segment", "size / median", "type", "kind"]
+SPIKE_HEAD = ["t (s)", "frame", "network ms", "e2e ms", "dominant segment", "size / median", "type", "kind"]
 SPIKE_W = [0.8, 0.9, 1.0, 0.9, 1.5, 1.0, 0.7, 0.9]
 
 
@@ -1174,7 +1174,7 @@ def _fmt_spike(row: list) -> list:
 def pages_late(c: Cell) -> list[Page]:
     spikes = c.spike_rows()
     n = len(spikes)
-    p = Page(c, f"Frames over {LATE_MS:.0f} ms one-way", f"{n:,} frames")
+    p = Page(c, f"Frames over {LATE_MS:.0f} ms on the network", f"{n:,} frames")
     owd = c.fcol("owd_ms")
     late = np.nan_to_num(owd, nan=-1) > LATE_MS
     steady = np.isfinite(owd) & ~late
@@ -1217,7 +1217,7 @@ def pages_late(c: Cell) -> list[Page]:
         sp.set_visible(False)
     rows = _spike_table_rows(spikes)
     if not rows:
-        p.text(0.03, 0.60, f"No frame exceeded {LATE_MS:.0f} ms one-way.", fontsize=9, color=S.GOOD_TEXT, weight="bold", va="top")
+        p.text(0.03, 0.60, f"No frame exceeded {LATE_MS:.0f} ms on the network.", fontsize=9, color=S.GOOD_TEXT, weight="bold", va="top")
     else:
         p.text(0.03, 0.62, "Every frame over the threshold, in time order", fontsize=9, weight="bold", va="top")
         p.table(0.03, 0.595, 0.94, SPIKE_HEAD, [_fmt_spike(r) for r in rows[:SPIKE_ROWS_FIRST]], SPIKE_W,
@@ -1228,7 +1228,7 @@ def pages_late(c: Cell) -> list[Page]:
     while rest and k < SPIKE_MAX_CONT_PAGES:
         chunk, rest = rest[:SPIKE_ROWS_CONT], rest[SPIKE_ROWS_CONT:]
         k += 1
-        q = Page(c, f"Frames over {LATE_MS:.0f} ms one-way (continued {k})", f"{n:,} frames")
+        q = Page(c, f"Frames over {LATE_MS:.0f} ms on the network (continued {k})", f"{n:,} frames")
         half = SPIKE_ROWS_CONT // 2
         q.table(0.03, 0.895, 0.455, SPIKE_HEAD, [_fmt_spike(r) for r in chunk[:half]], SPIKE_W, num_from=0, fs=6.2, lh=0.0205)
         if chunk[half:]:
@@ -1238,7 +1238,7 @@ def pages_late(c: Cell) -> list[Page]:
         pages[-1].text(0.03, 0.05, f"{len(rest):,} further frames not printed: the full list is in report.html "
                        "and reduced/spikes.csv.", fontsize=7.5, color=S.CRITICAL, weight="bold")
     p.html_blocks.append(
-        f"<h3>Every frame over {LATE_MS:.0f} ms one-way ({n:,})</h3>"
+        f"<h3>Every frame over {LATE_MS:.0f} ms on the network ({n:,})</h3>"
         + (H.table(SPIKE_HEAD, [_fmt_spike(r) for r in rows], num_cols={0, 1, 2, 3, 5}) if rows else
            '<p class="note">none</p>'))
     return pages
@@ -1398,14 +1398,14 @@ def page_control(c: Cell) -> Page:
     locked, detail = c.ptp_locked()
     if locked is not True and v:
         msg = ("PTP NOT LOCKED" if locked is False else "PTP STATE NOT RECORDED") + \
-              f" ({detail}): control one-way is B's clock minus A's clock and is not trustworthy."
+              f" ({detail}): control network latency is B's clock minus A's clock and is not trustworthy."
         p.banner(y - 0.033, msg)
         notes_html.append(f'<div class="banner">{H.esc(msg)}</div>')
         y -= 0.05
     gl = v.get("gap_lengths") or []
     ps = v.get("per_second") or (np.array([]), np.array([]))
     s_gap = stats.summ(gl)
-    rows = [stat_row("one-way (A send → B receive)", v.get("owd_s") or c.summ("control.owd"), "ms"),
+    rows = [stat_row("network (A send → B receive)", v.get("owd_s") or c.summ("control.owd"), "ms"),
             stat_row("interarrival at B", v.get("ia_s") or c.summ("control.interarrival"), "ms"),
             stat_row("probe round trip (A → B → A)", v.get("rtt_s") or c.summ("control.rtt"), "ms"),
             stat_row("gap length (consecutive lost)", s_gap, "samples"),
@@ -1421,18 +1421,18 @@ def page_control(c: Cell) -> Page:
             f"gaps {S.fmt(gaps.get('count'))}, longest {S.fmt(gaps.get('max_consecutive_lost'))} samples"
             + (f" ({gaps['max_consecutive_lost'] * step:.0f} ms)" if S.is_num(gaps.get("max_consecutive_lost")) and step
                else ""),
-            f"duplicates {S.fmt(m.get('duplicates'))}", f"jitter (one-way sd) {S.fmt(m.get('jitter_sd_ms'))} ms"]
+            f"duplicates {S.fmt(m.get('duplicates'))}", f"jitter (network sd) {S.fmt(m.get('jitter_sd_ms'))} ms"]
     if step:
         bits.append(f"one sample every {step:.1f} ms")
     p.text(0.03, y - 0.006, "   ·   ".join(bits), fontsize=7.0, va="top")
     top = y - 0.045
     h_ts = max(0.12, (top - 0.10) * 0.40)
-    ax = p.axes([0.07, top - h_ts, 0.90, h_ts], "One-way over the cell (per sample, by send time)", "ms")
+    ax = p.axes([0.07, top - h_ts, 0.90, h_ts], "Network over the cell (per sample, by send time)", "ms")
     t, owd = v.get("t", np.array([])), v.get("owd", np.array([]))
     owd_s = v.get("owd_s") or {}
     if len(t) and np.isfinite(owd).any():
         cap = max(1.0, (owd_s.get("p99") or float(np.nanmax(owd))) * 1.4)
-        over = _series(ax, t, owd, S.OWD, "one-way", ycap=cap, marker=True, size=1.5)
+        over = _series(ax, t, owd, S.OWD, "network", ycap=cap, marker=True, size=1.5)
         lt = v.get("lost_t", np.array([]))
         if len(lt):
             ax.vlines(lt, 0, cap * 0.05, color=S.CRITICAL, lw=0.6, label=f"lost ({len(lt):,})")
@@ -1450,7 +1450,7 @@ def page_control(c: Cell) -> Page:
         ax.text(0.005, 0.02, "grey: outside the window (first and last 2 s)", transform=ax.transAxes, fontsize=6.3,
                 color=S.INK_2)
     else:
-        _no_data(ax, "no control one-way (hostb/control.csv absent or empty)")
+        _no_data(ax, "no control network data (hostb/control.csv absent or empty)")
     top2 = top - h_ts - 0.055
     h_d = max(0.08, (top - 0.10) * 0.20)
     ax = p.axes([0.07, top2 - h_d, 0.90, h_d], "Delivered per second (published samples B received)", "%",
@@ -1469,7 +1469,7 @@ def page_control(c: Cell) -> Page:
         _no_data(ax, "delivered % needs both logs (A's publisher log and B's receive log)")
     h_h = top2 - h_d - 0.08 - 0.08
     for i, (arr, s_, lab, colr) in enumerate(((owd[np.isfinite(owd) & v.get("in_window", np.zeros(len(owd), bool))]
-                                               if len(owd) else np.array([]), owd_s, "One-way distribution (window)",
+                                               if len(owd) else np.array([]), owd_s, "Network distribution (window)",
                                                S.OWD),
                                               (v.get("rtt", np.array([])), v.get("rtt_s") or {},
                                                "Probe round trip distribution", S.SLOTS[1]))):
@@ -1530,7 +1530,7 @@ def build_pages(c: Cell) -> list[Page]:
 FOOTNOTES = {
     "Overview": "Red ticks at the bottom mark frames A sent that never reached webrtc_receive on B.",
     "Latency by segment": "Summaries from metrics.json; each from stats.summ over the frames where the segment was measured.",
-    "One-way network latency and jitter": "Host A packetize to Host B webrtc receive, joined per frame.",
+    "Network latency and jitter": "Host A packetize to Host B webrtc receive, joined per frame.",
     "Modem activity, both hosts": "Per-second DIAG record counts, not grant sizes. Decoding the records themselves needs QCAT.",
     "Control path (data track)": "Every statistic over the window: the publisher's span minus 2 s at each end. "
                                  "Round trip = the harness's probe, A → SFU → B → SFU → A plus scheduling.",

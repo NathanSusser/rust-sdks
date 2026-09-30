@@ -43,6 +43,28 @@ OTHER = "#898781"
 HOST_A = SLOTS[0]
 HOST_B = SLOTS[1]
 OWD = SLOTS[0]
+
+# Readable names for metric paths wherever a page shows a path instead of a KPI label. The data
+# keys keep "owd" (metrics.json, metrics.csv); people read "network".
+PATH_NAMES = {
+    "latency.owd": "network",
+    "latency.e2e": "end to end",
+    "control.owd": "control network",
+    "jitter.owd_sd_ms": "network sd",
+    "jitter.interarrival_rfc3550_ms": "RFC 3550 interarrival",
+    "tail.owd_over_100.share": "share over 100 ms on the network",
+    "encoder.qp": "encoder QP",
+    "encoder.qp_per_frame": "QP per frame",
+    "frame.size_kb": "frame size",
+    "frame.fps_delivered": "delivered fps",
+    "network.packets_lost": "packets lost",
+    "control.delivered_pct": "control delivered",
+}
+
+
+def path_name(path: str) -> str:
+    """How a metric path reads on a page: its PATH_NAMES entry, else the path with owd shown as network."""
+    return PATH_NAMES.get(path) or path.replace("owd", "network")
 E2E = SLOTS[1]
 
 # --- status (reserved; never a series colour) --------------------------------------
