@@ -228,9 +228,12 @@ def _value_order(vals):
     return sorted(vals, key=str)
 
 
-def build_model(grid_dir: Path, cells, axes: list[str], plan: dict | None = None) -> dict:
+def build_model(grid_dir: Path, cells, axes: list[str], plan: dict | None = None,
+                out_dir: Path | None = None) -> dict:
+    """The page's data. Every link in it is relative to out_dir (the directory the page is
+    written to: comparison/ by default, the grid root for index.html)."""
     gd = Path(grid_dir)
-    out_dir = gd / "comparison"
+    out_dir = Path(out_dir) if out_dir is not None else gd / "comparison"
     groups = _combos(cells, axes)
     values = {a: _value_order([c.variables.get(a) for g in groups for c in g["cells"]]) for a in axes}
     x = "bpp" if "bpp" in axes else next((a for a in axes if values[a] and all(
@@ -308,6 +311,7 @@ def build_model(grid_dir: Path, cells, axes: list[str], plan: dict | None = None
             path_kind.setdefault(p, "summary" if "p50" in sts else "value")
     model = {
         "grid_id": next((str(c.manifest.get("grid_id")) for c in cells if c.manifest.get("grid_id")), gd.name),
+        "name": gd.name,
         "generated": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "axes": axes, "x": x, "series_axes": series_axes, "values": {a: values.get(a, []) for a in axes + ([x] if x and x not in axes else [])},
         "codec_axis": codec_axis, "qp_path": qp_path, "qp_scale": QP_SCALE,
@@ -595,8 +599,12 @@ def overview_html(model: dict, cells) -> str:
 </section>"""
 
 
-def build(grid_dir, cells, axes, plan: dict | None = None) -> str:
-    model = build_model(Path(grid_dir), cells, axes, plan)
+def build(grid_dir, cells, axes, plan: dict | None = None, out_dir: Path | None = None) -> str:
+    """The page for out_dir (default comparison/). Links are relative, so the grid folder can be
+    moved or uploaded whole and the page still opens every summary.pdf and report.pdf."""
+    gd = Path(grid_dir)
+    out_dir = Path(out_dir) if out_dir is not None else gd / "comparison"
+    model = build_model(gd, cells, axes, plan, out_dir)
     n_rep = model["overview"]["repeats"]
     def axis_text(a):
         vs = model["values"].get(a, [])
@@ -606,17 +614,26 @@ def build(grid_dir, cells, axes, plan: dict | None = None) -> str:
         return f"{a} {', '.join(str(v) for v in vs)}"
     swept = " × ".join(axis_text(a) for a in axes)
     sub = (f"{swept or 'a single combination'} · {n_rep} repeat{'s' if n_rep != 1 else ''} in "
-           f"{len(model['combos'])} combination{'s' if len(model['combos']) != 1 else ''} · generated {model['generated']}")
-    body = TOOLBAR + overview_html(model, cells) + SECTIONS + '<div id="tip" role="tooltip"></div>'
-    return H.page(f"{model['grid_id']} · analysis", sub, body, extra_css=CSS,
+           f"{len(model['combos'])} combination{'s' if len(model['combos']) != 1 else ''}"
+           + (f" · grid id {model['grid_id']}" if model["grid_id"] != model["name"] else "")
+           + f" · generated {model['generated']}")
+    cmp_dir = _rel(gd / "comparison", out_dir)
+    body = _toolbar("" if cmp_dir == "." else cmp_dir + "/") + overview_html(model, cells) + SECTIONS \
+        + '<div id="tip" role="tooltip"></div>'
+    return H.page(f"{model['name']} · analysis", sub, body, extra_css=CSS,
                   script=H.json_script(model, "analysis-data") + f"<script>{JS}</script>")
+
+
+def _toolbar(cmp: str) -> str:
+    """The sticky bar; cmp is the relative prefix of the comparison/ directory from the page."""
+    return TOOLBAR.replace("{cmp}", H.esc(cmp))
 
 
 TOOLBAR = """
 <nav class="bar" aria-label="sections and controls">
   <div class="links"><a href="#overview">Summary</a><a href="#curves">Trends</a><a href="#radar">Radar</a>
     <a href="#matrix">Matrix</a><a href="#repeats">Repeats</a>
-    <span class="dl"><a href="comparison.pdf">PDF</a><a href="metrics.csv">CSV</a><a href="comparison.html">explorer</a></span></div>
+    <span class="dl"><a href="{cmp}comparison.pdf">PDF</a><a href="{cmp}metrics.csv">CSV</a><a href="{cmp}comparison.html">explorer</a></span></div>
   <div class="ctl">
     <span class="lbl">statistic</span><span class="seg" id="stat" role="group" aria-label="statistic"></span>
     <label class="chk"><input type="checkbox" id="incl"> count INCOMPLETE</label>

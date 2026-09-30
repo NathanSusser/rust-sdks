@@ -1,4 +1,6 @@
-"""Grid comparison: comparison/metrics.csv, comparison.html, comparison.pdf and analysis.html.
+"""Grid comparison: comparison/metrics.csv, comparison.html, comparison.pdf and analysis.html, plus
+index.html at the grid root: the same analysis page with links relative to the root, the entry
+point when the grid folder is moved or uploaded whole.
 
 Reads every repeat directory of layout v2 (<grid>/<combo>/r<n>/, control cells in
 controls/<x..>/) and, for grids written before it, cells/<label>/. A repeat directory with
@@ -905,9 +907,10 @@ def plan_info(grid_dir: Path) -> dict:
 
 
 def render(grid_dir, *, summaries: bool = True) -> Path:
-    """Write comparison/metrics.csv, comparison.html, comparison.pdf and analysis.html, after
-    re-rendering stale combination summaries (summaries=False skips that); returns the
-    comparison dir."""
+    """Write comparison/metrics.csv, comparison.html, comparison.pdf and analysis.html, and the
+    grid root's index.html, after re-rendering stale combination summaries (summaries=False skips
+    that); returns the comparison dir. Pages are titled with the folder's name, which is the grid
+    id unless the folder was renamed after the run."""
     from . import analysis  # noqa: PLC0415
     gd = Path(grid_dir)
     out = gd / "comparison"
@@ -917,14 +920,18 @@ def render(grid_dir, *, summaries: bool = True) -> Path:
             print(f"report.combo failed: {err}")
     cells = load_cells(gd)
     grid_id = next((str(c.manifest["grid_id"]) for c in cells if c.manifest.get("grid_id")), gd.name)
+    name = gd.name        # titles the pages: the grid id, unless the folder was renamed after the run
     axes = grid_axes(gd, cells)
     write_metrics_csv(out / "metrics.csv", cells)
-    doc = build_html(grid_id, cells, axes)
+    doc = build_html(name, cells, axes)
     H.atomic_write(out / "comparison.html", lambda t: t.write_text(doc, encoding="utf-8"))
-    page = analysis.build(gd, cells, swept_axes(gd, cells), plan_info(gd))
+    sw, plan = swept_axes(gd, cells), plan_info(gd)
+    page = analysis.build(gd, cells, sw, plan)
     H.atomic_write(out / "analysis.html", lambda t: t.write_text(page, encoding="utf-8"))
+    root = analysis.build(gd, cells, sw, plan, out_dir=gd)
+    H.atomic_write(gd / "index.html", lambda t: t.write_text(root, encoding="utf-8"))
     with plt.rc_context({"figure.max_open_warning": 0}):     # every page is open until the PDF is written
-        figs = build_pdf_figures(grid_id, cells, axes)
+        figs = build_pdf_figures(name, cells, axes)
 
     def write_pdf(tmp: Path) -> None:
         with PdfPages(tmp) as pdf:
@@ -932,7 +939,7 @@ def render(grid_dir, *, summaries: bool = True) -> Path:
                 _footer(fig, i, len(figs), note)
                 pdf.savefig(fig)
                 plt.close(fig)
-            pdf.infodict()["Title"] = f"Grid {grid_id} comparison"
+            pdf.infodict()["Title"] = f"Grid {name} comparison"
 
     H.atomic_write(out / "comparison.pdf", write_pdf)
     return out

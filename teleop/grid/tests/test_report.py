@@ -561,6 +561,51 @@ class AnalysisTests(unittest.TestCase):
             if not h.startswith("#"):
                 self.assertTrue((base / h).exists(), h)
 
+    def page_links(self, page: Path) -> list[str]:
+        """Every link a page can open: its static hrefs and the report/summary links its script builds."""
+        text = page.read_text(encoding="utf-8")
+        m = re.search(r'<script type="application/json" id="analysis-data">(.*?)</script>', text, re.S)
+        model = json.loads(m.group(1).replace("<\\/", "</"))
+        links = [h for h in hrefs(text) if not h.startswith("#")]
+        for cb in model["combos"]:
+            links += [cb[k] for k in ("summary_pdf", "summary_html") if cb[k]]
+            links += [r[k] for r in cb["repeats"] for k in ("report_pdf", "report_html") if r[k]]
+        links += [r[k] for r in model["controls"] for k in ("report_pdf", "report_html") if r[k]]
+        return links
+
+    def test_root_index_is_portable(self):
+        """index.html at the grid root opens every summary and report by a path relative to the root."""
+        page = self.grid / "index.html"
+        self.assertTrue(page.is_file())
+        m = analysis_model(page)
+        for cb in m["combos"]:
+            self.assertEqual(cb["summary_pdf"], f"{cb['name']}/summary.pdf")
+        links = self.page_links(page)
+        self.assertIn("comparison/comparison.pdf", links)
+        self.assertIn("comparison/metrics.csv", links)
+        for h in links:
+            self.assertFalse(h.startswith(("/", "file:", "http")), h)
+            self.assertNotIn("..", h)
+            self.assertTrue((self.grid / h).exists(), h)
+        # comparison/analysis.html keeps its own relative links
+        self.assertIn("comparison.pdf", self.page_links(self.out / "analysis.html"))
+
+    def test_moved_and_renamed_folder(self):
+        """Copy the grid under another name: re-rendered pages carry the new name, keep the grid id,
+        and every link still resolves inside the moved folder."""
+        moved = self.tmp / "elsewhere" / "09302026_Test_Sweep_BPP"
+        shutil.copytree(self.grid, moved)
+        report_grid.render(moved, summaries=False)
+        m = analysis_model(moved / "index.html")
+        self.assertEqual(m["name"], "09302026_Test_Sweep_BPP")
+        self.assertEqual(m["grid_id"], self.model["grid_id"])
+        text = (moved / "index.html").read_text(encoding="utf-8")
+        self.assertIn("<title>09302026_Test_Sweep_BPP · analysis</title>", text)
+        self.assertIn(f"grid id {self.model['grid_id']}", text)
+        for page in (moved / "index.html", moved / "comparison" / "analysis.html"):
+            for h in self.page_links(page):
+                self.assertTrue((page.parent / h).exists(), f"{page.name}: {h}")
+
     def test_metrics_csv_v2(self):
         with (self.out / "metrics.csv").open() as f:
             rows = list(csv.DictReader(f))

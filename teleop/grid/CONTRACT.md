@@ -756,3 +756,10 @@ the post-processing worker's own per-cell `report.combo.render` call normally le
 **Tests.** `tests/test_screens.py` is replaced by `tests/test_qp.py`; new `test_control.py`,
 `test_combo.py`; `tests/synth.py` builds layout-v2 grids through the real reduce/control.py and
 metrics.build (nothing is committed).
+
+### Portable entry point (index.html)
+`report.grid.render` also writes `<grid>/index.html`: the analysis page with every link relative to
+the grid root (`<combo>/summary.pdf`, `<combo>/r<n>/report.pdf`, `comparison/…`). No page holds an
+absolute path, so the grid folder can be renamed, moved or uploaded whole and index.html still
+opens every PDF. Pages are titled with the folder's name; the grid id recorded in each manifest,
+the cell labels and every file name inside the cells are unchanged by a rename.
