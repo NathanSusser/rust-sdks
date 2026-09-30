@@ -4,6 +4,8 @@ Ported from archive/local_video-scripts/generate_frame_report.py. Its four pages
 (overview with the frame funnel, per-segment breakdown, one-way network latency and
 jitter, modem activity on both hosts) and fed from the reduced tables instead of raw CSVs;
 four pages are added (frame size, wire rates, QP and codec timing, late-frame breakdown).
+When B sampled decoded frames (reduced/screens.csv) a "Screenshots" page shows them, and when
+B's decoder logged per-frame QP a "QP per frame" page follows.
 
 Every distribution shown carries mean, p50, p95, p99, max, min and n from stats.summ.
 Never writes anywhere but the cell directory.
@@ -214,6 +216,8 @@ class Cell:
     frames: Table | None
     seconds: Table | None
     spikes: Table | None
+    screens: Table | None = None
+    qp_frames: tuple | None = None           # (t_s, qp) arrays, per decoded frame
     modem: dict[str, ModemRates | None] = field(default_factory=dict)
     bands: dict[str, Table | None] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -225,8 +229,9 @@ class Cell:
         man = _read_json(cd / "manifest.json")
         met = _read_json(cd / "metrics.json")
         c = cls(cd, man, met, _read_csv(red / "frames.csv"), _read_csv(red / "seconds.csv"),
-                _read_csv(red / "spikes.csv"))
+                _read_csv(red / "spikes.csv"), _read_csv(red / "screens.csv"))
         epoch = c.epoch
+        c.qp_frames = _load_qp_frames(c)
         for h in ("a", "b"):
             p = red / f"dlf-rates-{h}.csv"
             c.modem[h] = read_modem_rates(p, h, epoch) if p.is_file() else None
@@ -371,6 +376,7 @@ class Page:
         self.fig = plt.figure(figsize=S.PAGE_SIZE)
         self.name = name
         self.html_blocks: list[str] = []
+        self.html_fig = True       # False: html_blocks already show everything (screenshots)
         f = self.fig
         f.patches.append(Rectangle((0, 0.925), 1, 0.075, transform=f.transFigure, color=S.BAND, zorder=-1))
         title = cell.label
@@ -1188,6 +1194,174 @@ def pages_late(c: Cell) -> list[Page]:
     return pages
 
 
+# --------------------------------------------------------------------------------------
+# screenshots and per-frame QP (reduce/screens.py)
+# --------------------------------------------------------------------------------------
+
+QP_SCALE = {"h264": "H.264 QP 0–51", "h265": "H.265 QP 0–51", "av1": "AV1 q-index 0–255"}
+SHOTS_PER_PAGE = 6            # 2 rows x 3
+SHOT_PDF_MAX_W = 800          # px: downscaled before drawing so the PDF stays small
+SHOT_HTML_MAX_W = 640         # px: the HTML embeds each PNG at this width
+
+
+def qp_scale(c: Cell) -> str:
+    codec = str(c.variables.get("codec") or c.cfg("negotiated.codec") or "").lower()
+    return QP_SCALE.get(codec, "QP scale depends on the codec (H.264/H.265 0–51, AV1 0–255)")
+
+
+def _load_qp_frames(c: Cell):
+    """Per-frame QP: reduced/frames.csv `qp` when reduce joined it, else hostb/frames-qp.csv
+    placed on the epoch by its capture timestamp. None when neither has a QP."""
+    if c.frames is not None and c.frames.has("qp"):
+        return c.fcol("t_s"), c.fcol("qp")
+    log = c.dir / "hostb" / "frames-qp.csv"
+    t = _read_csv(log)
+    if t is None or not t.has("qp") or c.epoch is None:
+        return None
+    return t.col("capture_timestamp_us") / 1e6 - c.epoch, t.col("qp")
+
+
+def _downscale(img: np.ndarray, max_w: int) -> np.ndarray:
+    """Block-mean to at most max_w wide (integer factor, so no resampling artefacts)."""
+    k = int(math.ceil(img.shape[1] / max_w))
+    if k <= 1:
+        return img
+    h, w = (img.shape[0] // k) * k, (img.shape[1] // k) * k
+    x = img[:h, :w].astype(np.float32)
+    x = x.reshape(h // k, k, w // k, k, *img.shape[2:]).mean(axis=(1, 3))
+    return np.clip(x + 0.5, 0, 255).astype(np.uint8) if img.dtype == np.uint8 else x.astype(img.dtype)
+
+
+def _png_b64(img: np.ndarray) -> str:
+    import base64
+    import io
+    import matplotlib.image as mimg
+    buf = io.BytesIO()
+    mimg.imsave(buf, img, format="png")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _shot_caption(r: dict) -> str:
+    def f(v, spec):
+        return spec.format(v) if S.is_num(v) else "–"
+    kb = r["bytes"] / 1000 if S.is_num(r["bytes"]) else None
+    return (f"#{f(r['frame_id'], '{:.0f}')}  t {f(r['t_s'], '{:.1f}')} s  QP {f(r['qp'], '{:.0f}')}  "
+            f"{f(kb, '{:.1f}')} kB  one-way {f(r['owd'], '{:.0f}')} ms")
+
+
+def _shot_rows(c: Cell) -> list[dict]:
+    t = c.screens
+    if t is None or not len(t):
+        return []
+    cols = {k: t.col(k) for k in ("frame_id", "t_s", "qp", "bytes", "owd", "e2e")}
+    png = t.text("png")
+    out = []
+    for i in range(len(t)):
+        r = {k: (float(v[i]) if math.isfinite(v[i]) else None) for k, v in cols.items()}
+        r["png"] = c.dir / "reduced" / png[i] if png[i] else None
+        out.append(r)
+    return sorted(out, key=lambda r: r["frame_id"] if r["frame_id"] is not None else 1e18)
+
+
+def pages_screens(c: Cell) -> list[Page]:
+    """Decoded frames B sampled, 2 x 3 per page, each captioned from screens.csv."""
+    import matplotlib.image as mimg
+    rows = _shot_rows(c)
+    if not rows:
+        return []
+    every = c.variables.get("sample_every")
+    sub = (f"decoded on B, every {every}th frame ID" if every else "decoded on B") + f"  ·  {qp_scale(c)}"
+    pages = []
+    cols, nrows = 3, 2
+    cw, top, bot = 0.94 / cols, 0.905, 0.05
+    rh = (top - bot) / nrows
+    for start in range(0, len(rows), SHOTS_PER_PAGE):
+        chunk = rows[start:start + SHOTS_PER_PAGE]
+        name = "Screenshots" + (f" ({start // SHOTS_PER_PAGE + 1})" if len(rows) > SHOTS_PER_PAGE else "")
+        p = Page(c, name, sub)
+        p.html_fig = False
+        figs = []
+        for k, r in enumerate(chunk):
+            x = 0.03 + (k % cols) * cw
+            y = top - (k // cols + 1) * rh
+            ax = p.fig.add_axes([x + 0.005, y + 0.03, cw - 0.01, rh - 0.045])
+            ax.set_axis_off()
+            img = None
+            try:
+                img = mimg.imread(str(r["png"])) if r["png"] is not None else None
+            except (OSError, ValueError, SyntaxError):
+                img = None
+            if img is None:
+                _no_data(ax, "PNG missing")
+            else:
+                if img.dtype != np.uint8:
+                    img = np.clip(img * 255 + 0.5, 0, 255).astype(np.uint8)
+                img = img[..., :3] if img.ndim == 3 else img
+                ax.imshow(_downscale(img, SHOT_PDF_MAX_W), interpolation="antialiased")
+            cap = _shot_caption(r)
+            # in axes coordinates, so the caption follows the image box once imshow letterboxes it
+            ax.text(0.5, -0.015, cap, transform=ax.transAxes, ha="center", va="top", fontsize=7.2, color=S.INK)
+            src = (f'<img alt="{H.esc(cap)}" src="data:image/png;base64,{_png_b64(_downscale(img, SHOT_HTML_MAX_W))}" '
+                   f'style="width:100%;height:auto;display:block;border-radius:4px">' if img is not None
+                   else '<p class="note">PNG missing</p>')
+            figs.append(f'<figure style="margin:0">{src}<figcaption class="note" style="font-size:12px;'
+                        f'color:var(--ink2);margin-top:4px">{H.esc(cap)}</figcaption></figure>')
+        p.html_blocks.append(f'<p class="note">{H.esc(sub)}. QP is the frame\'s own (B\'s decoder); '
+                             f'kB is the frame on A\'s wire; one-way is packetize → receive.</p>'
+                             '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));'
+                             f'gap:12px">{"".join(figs)}</div>')
+        pages.append(p)
+    return pages
+
+
+def page_qp_frames(c: Cell) -> Page:
+    """Per-frame QP from B's decoder log: over time with the tail lines, and its histogram."""
+    scale = qp_scale(c)
+    p = Page(c, "QP per frame", f"every decoded frame, from B's decoder  ·  {scale}  ·  higher is worse")
+    t, qp = c.qp_frames
+    s_qp = c.summ("encoder.qp_per_frame")
+    if not s_qp.get("n"):
+        s_qp = stats.summ(qp.tolist())
+    s_sec = c.summ("encoder.qp", "qp_mean", table="seconds")
+    rows = [stat_row("QP per frame (B decoder)", s_qp), stat_row("QP per second (A stats)", s_sec)]
+    y = p.table(0.03, 0.895, 0.94, STAT_HEAD, rows, STAT_W, fs=7.4, lh=0.025)
+    p.text(0.03, y - 0.005, f"Scale: {scale}. Compare QP only within a codec.", fontsize=7.2, color=S.INK_2,
+           va="top")
+    top = y - 0.05
+    ax = p.axes([0.07, 0.08, 0.60, top - 0.08], "QP over the cell (per frame)", "QP", "seconds since epoch")
+    tt, qq = _finite(t, qp)
+    if len(qq):
+        _series(ax, tt, qq, S.SLOTS[0], "per frame", marker=True, size=5.0)
+        _stat_lines(ax, s_qp, fmtu="{:.0f}")
+        ax.set_ylim(max(0.0, float(qq.min()) - 3), float(qq.max()) + 3)
+        shots = [r for r in _shot_rows(c) if S.is_num(r["t_s"])]
+        for r in shots:
+            ax.axvline(r["t_s"], color=S.SLOTS[1], lw=1.1, zorder=1)
+            ax.text(r["t_s"], 1.0, f" #{r['frame_id']:.0f}", transform=ax.get_xaxis_transform(), rotation=90,
+                    ha="left", va="top", fontsize=6.2, color=S.SLOTS[1])
+        if shots:
+            ax.text(1.0, 1.01, "vertical lines: screenshot frames", transform=ax.transAxes, fontsize=6.5,
+                    ha="right", va="bottom", color=S.SLOTS[1])
+    else:
+        _no_data(ax, "no per-frame QP")
+    ax = p.axes([0.73, 0.08, 0.24, top - 0.08], "QP histogram", "frames", "QP")
+    if len(qq):
+        lo, hi = int(math.floor(qq.min())), int(math.ceil(qq.max()))
+        ax.hist(qq, bins=np.arange(lo - 0.5, hi + 1.5, 1.0 if hi - lo <= 80 else max(1.0, (hi - lo) / 80)),
+                color=S.SLOTS[0], edgecolor=S.SURFACE, linewidth=0.4)
+        ax.set_xlim(lo - 1, hi + max(8.0, (hi - lo) * 0.25))   # room for the max label
+        for k, ls in (("p50", ":"), ("p95", "--"), ("p99", "-."), ("max", "-")):
+            if S.is_num(s_qp.get(k)):
+                ax.axvline(s_qp[k], color=S.INK_2, lw=0.7, ls=ls)
+                ax.text(s_qp[k], 0.97 - 0.07 * ("p50", "p95", "p99", "max").index(k), f" {k} {s_qp[k]:.0f}",
+                        transform=ax.get_xaxis_transform(), fontsize=6.5, va="top", color=S.INK_2, clip_on=True)
+    else:
+        _no_data(ax, "no per-frame QP")
+    p.html_blocks.append(stat_html(rows) + f'<p class="note">{H.esc(scale)}. Compare QP only within a codec.</p>')
+    return p
+
+
+
 # ======================================================================================
 # html
 # ======================================================================================
@@ -1215,6 +1389,9 @@ def build_pages(c: Cell) -> list[Page]:
     S.apply_rc()
     pages = [page_overview(c), page_segments(c), page_network(c), page_modem(c),
              page_frame_size(c), page_rates(c), page_qp(c)]
+    pages += pages_screens(c)
+    if c.qp_frames is not None:
+        pages.append(page_qp_frames(c))
     pages += pages_late(c)
     return pages
 
@@ -1249,8 +1426,8 @@ def render(cell_dir) -> Path:
     sections = []
     for i, p in enumerate(pages, 1):
         body = "".join(p.html_blocks)
-        sections.append(f'<section id="p{i}"><h2>{i}. {H.esc(p.name)}</h2>{body}'
-                        f'{H.fig_img(p.fig, p.name)}</section>')
+        fig = H.fig_img(p.fig, p.name) if p.html_fig else ""
+        sections.append(f'<section id="p{i}"><h2>{i}. {H.esc(p.name)}</h2>{body}{fig}</section>')
         plt.close(p.fig)
     nav = " · ".join(f'<a href="#p{i}">{H.esc(p.name)}</a>' for i, p in enumerate(pages, 1))
     sub = f"{c.cfg('grid_id', '')}  ·  status {c.cfg('status', '–')}  ·  encoder {c.encoder}"

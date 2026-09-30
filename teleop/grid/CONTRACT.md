@@ -62,6 +62,7 @@ defaults:                       # any declared variable; overridden by the grid 
   clip: /home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4
   lead_s: 60
   cooldown_s: 30
+  screenshots: 0                # 0 (off) .. 20 decoded frames sampled on B per cell; not in the label
 axes:                           # cross product; OR `pairs:` a list of explicit dicts
   codec: [h264, av1]
   kbps: [512, 2500, 8000]
@@ -122,11 +123,14 @@ $RESULTS_ROOT/<grid-id>/
       clock.json  captures.json  SHA256SUMS
     hostb/                     written by B's agent, mirrored to A
       subscriber.csv  subscriber.log
+      frames-qp.csv            decoder per-frame log (LK_DECODER_FRAME_LOG); absent from an older subscriber
+      frames/index.csv  frames/<frame_id:08>.i420     only when screenshots > 0 (~3 MB each at 1600x1300)
       <label>.wwan0.pcap  <label>.dlf  <label>.qcsuper.log  <label>.hops.csv
       clock.json  captures.json  SHA256SUMS
     reduced/                   A only
       dlf-rates-a.csv  dlf-rates-b.csv  band-a.csv  band-b.csv
       frames.csv  seconds.csv  spikes.csv
+      screens.csv  screens/<frame_id>.png                only when hostb/frames/ exists
     metrics.json
     report.pdf  report.html
   comparison/
@@ -145,7 +149,8 @@ $RESULTS_ROOT/<grid-id>/
 {
   "label": "...", "grid_id": "...", "index": 7, "kind": "cell|control", "repeat": 2,
   "variables": {codec, kbps, fps, resolution, width, height, bpp, vbv_frames, padding,
-                target_quality, intra_refresh, pin_bitrate, duration_s, clip, lead_s},
+                target_quality, intra_refresh, pin_bitrate, duration_s, clip, lead_s,
+                screenshots, sample_every (only when screenshots > 0)},
   "requested": {"width": 1008, "height": 816},
   "negotiated": {"width", "height", "encoder_implementation", "codec"},
   "epoch": 1790384410,                       # host-clock unix second the publisher fired
@@ -174,7 +179,7 @@ frame       size_kb:Summary, packets_per_frame:Summary, fps_delivered (float), f
             frames_received, frames_rendered, dropped_pre_encode, dropped_post_encode, keyframes, size_spread_pct
 rate        bytes_per_s_a:Summary, packets_per_s_a:Summary, bytes_per_s_b:Summary, packets_per_s_b:Summary,
             kbps_target, kbps_achieved, padding_bytes_share
-encoder     qp:Summary (higher is worse), encode_ms:Summary, quality_limitation_s {none,bandwidth,cpu,other}
+encoder     qp:Summary (higher is worse), qp_per_frame:Summary, encode_ms:Summary, quality_limitation_s {none,bandwidth,cpu,other}
 latency     app_to_wire_a, emission_a, in_flight, arrival_b, wire_to_app_b, decode, render, e2e : Summary each
             owd:Summary (packetize -> webrtc_receive)
 jitter      owd_sd_ms (float), interarrival_rfc3550_ms:Summary, frame_interval_b_ms:Summary
@@ -480,3 +485,48 @@ re-renders every cell report. `grid status <id> --json`.
 the legacy one: `~/diag-capture/.<tty>.lock` when `~/diag-capture` exists, else beside the
 archived scripts; `DIAG_LOCK` overrides. Move both scripts into `teleop/grid/capture/` to retire
 this.
+
+## Added by screenshots
+
+<!-- added by screenshots (grid, agent, reduce/screens.py, metrics, report). Additive only. -->
+
+**Variable `screenshots`** (int 0..20, default 0 = off; META: never in the label or the harness
+args). When > 0 every Cell's `values` also carries `sample_every = max(1, floor(fps*duration_s/screenshots))`
+(`grid.sample_every()`; 25 fps x 300 s / 6 = 1250). `Cell.subscriber_args()` =
+`{duration_s, screenshots, sample_every}` is what the orchestrator passes to B's `publish`.
+
+**B's subscriber** (`agent.subscriber_command()`): env `LK_DECODER_FRAME_LOG=<cell>/hostb/frames-qp.csv`
+ALWAYS (a subscriber that predates it ignores the variable); argv adds
+`--sample-frames-dir <cell>/hostb/frames --sample-every <sample_every>` only when screenshots > 0.
+Both land inside `hostb/`, so they are in SHA256SUMS and the mirror like every other file
+(6 frames x ~3 MB at 1600x1300 per cell).
+
+**hostb files.**
+- `frames-qp.csv`: `rtp_timestamp,frame_id,capture_timestamp_us,qp,width,height,decode_ms,codec,implementation`,
+  one row per decoded frame. `qp` may be empty (h265). Every consumer treats the file as optional.
+- `frames/index.csv`: `frame_id,capture_timestamp_us,width,height,stride_y,stride_u,stride_v,bytes_written`;
+  `frames/<frame_id:08>.i420` = Y, U, V planes back to back at those strides. Sampling is by frame
+  ID (`frame_id % sample_every == 0`), so a lost sampled frame is a hole, not a renumbering.
+
+**reduced/ (reduce/screens.py, run last in `reduce_cell`; a failure is recorded in
+`reduce.json["screens"]` and never fails the cell).**
+- `screens/<frame_id>.png`: I420 -> RGB, BT.601 limited range, chroma repeated 2x2. The index
+  strides are used when they account for the file size, else one padded luma stride is inferred.
+- `screens.csv`: `frame_id, t_s, png, width, height, qp, qp_join, bytes, owd, e2e`. `t_s` =
+  capture_timestamp_us/1e6 - epoch; `png` is relative to `reduced/`; `qp` joined from frames-qp.csv
+  by frame_id, else the nearest capture timestamp within 15 ms, else an exact RTP timestamp
+  (`qp_join` = `frame_id|capture|rtp|` empty); `bytes` (A wire), `owd`, `e2e` from frames.csv by frame_id.
+- `frames.csv` gains a trailing `qp` column (same join) when frames-qp.csv exists; without it the
+  column is absent and reduce.json notes why.
+
+**metrics.json.** `encoder.qp_per_frame`: Summary over every frames-qp.csv `qp` (n=0 when the file
+is absent or qp is empty); `encoder.qp` (per second, A's stats) is unchanged. Per-frame QP is the
+bitstream's: H.264/H.265 0-51, AV1 q-index 0-255. `config.screenshots` = rows in screens.csv (PNGs
+written; 0 when none).
+
+**Reports.** The cell report adds "Screenshots" (2 x 3 per page, each captioned frame_id, t, QP,
+frame kB, one-way ms; the HTML embeds the PNGs base64 at <= 640 px wide) when screens.csv exists,
+and "QP per frame" (QP vs time with p50/p95/p99/max, histogram; the codec's QP scale in the
+subtitle) when per-frame QP exists. `report/grid.py` adds `encoder.qp_per_frame` to the KPIs of
+record after `encoder.qp`; comparison/metrics.csv always carries its rows (empty when a cell's
+metrics.json predates it).

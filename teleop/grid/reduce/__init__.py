@@ -7,6 +7,7 @@ in CONTRACT.md, and writes <cell>/reduced/:
 
     dlf-rates-a.csv dlf-rates-b.csv band-a.csv band-b.csv   (only when that host's DLF exists)
     frames.csv seconds.csv spikes.csv episodes.csv inflight.csv reduce.json
+    screens.csv screens/<frame_id>.png                      (only when hostb/frames/ exists)
 
 then updates manifest["band"], manifest["integrity"]["reduce_resyncs"] and
 manifest["integrity"]["reduce"] (see CONTRACT.md "added by reduce"). Nothing is written
@@ -21,7 +22,7 @@ import os
 import time
 from pathlib import Path
 
-from . import dlf_rates, frames as F, pcap_extract, segjoin
+from . import dlf_rates, frames as F, pcap_extract, screens, segjoin
 
 __all__ = ["reduce_cell"]
 
@@ -227,7 +228,21 @@ def reduce_cell(cell_dir) -> None:
                             dlf_a.get("x19ef") if dlf_a["present"] else None,
                             dlf_b.get("x19ef") if dlf_b["present"] else None, enc, seconds)
 
-    F.write_csv(out / "frames.csv", F.FRAME_COLS, rows)
+    # per-frame QP from B's decoder log (hostb/frames-qp.csv): optional, an older subscriber
+    # writes none. A failure here costs the qp column, never the cell.
+    frame_cols = F.FRAME_COLS
+    try:
+        qlog = screens.read_qp_log(hb / screens.QP_LOG)
+        if qlog is not None:
+            matched = screens.attach_qp(rows, qlog)
+            frame_cols = (*F.FRAME_COLS, "qp")
+            if len(qlog) and not matched:
+                notes.append(f"{screens.QP_LOG}: {len(qlog)} rows, none joined to a published frame")
+        elif hb.is_dir():
+            notes.append(f"{screens.QP_LOG} absent (subscriber without LK_DECODER_FRAME_LOG): no per-frame QP")
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"{screens.QP_LOG}: not joined ({type(e).__name__}: {e})")
+    F.write_csv(out / "frames.csv", frame_cols, rows)
     F.write_csv(out / "seconds.csv", F.SECONDS_COLS, sec_rows)
     F.write_csv(out / "spikes.csv", F.SPIKE_COLS, spikes)
     F.write_csv(out / "episodes.csv", F.EPISODE_COLS, episodes)
@@ -302,3 +317,14 @@ def reduce_cell(cell_dir) -> None:
     tmp = mpath.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(manifest, indent=2))
     os.replace(tmp, mpath)
+
+    # ---- screenshots, last: reads frames.csv back, and a failure must not fail the cell
+    try:
+        shot_notes: list[str] = []
+        n = screens.reduce_screens(cell, epoch, manifest, shot_notes)
+        if n or shot_notes:
+            red["screens"] = {"written": n, "notes": shot_notes}
+            (out / "reduce.json").write_text(json.dumps(red, indent=1, default=str))
+    except Exception as e:  # noqa: BLE001
+        red["screens"] = {"written": 0, "error": f"{type(e).__name__}: {e}"}
+        (out / "reduce.json").write_text(json.dumps(red, indent=1, default=str))

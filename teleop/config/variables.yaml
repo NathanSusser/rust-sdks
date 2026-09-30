@@ -87,3 +87,14 @@ cooldown_s:
   max: 600
   default: 30
   applies: gap after a cell closes before the next pre-flight
+screenshots:
+  type: int
+  min: 0
+  max: 20
+  default: 0                # off
+  applies: >-
+    subscriber --sample-frames-dir hostb/frames --sample-every N, N = max(1, floor(fps*duration_s/screenshots))
+    (recorded as sample_every in the cell's values). Not part of the label.
+  note: >-
+    sampling is by frame ID, so a cell yields about `screenshots` raw I420 frames (~3 MB each at
+    1600x1300), a hole where a sampled frame was lost. reduce writes reduced/screens/*.png.

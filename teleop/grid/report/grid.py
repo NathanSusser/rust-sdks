@@ -35,6 +35,7 @@ TABLE_STATS = ("mean", "p50", "p95", "p99", "max")
 # (page title, [(metric_path, statistics to plot)], unit)
 KPIS_OF_RECORD = [
     ("Quality — encoder QP (higher is worse)", [("encoder.qp", TAIL)], "QP"),
+    ("Quality — QP per frame, B's decoder (higher is worse)", [("encoder.qp_per_frame", TAIL)], "QP"),
     ("Latency — one-way (packetize → receive)", [("latency.owd", TAIL)], "ms"),
     ("Latency — end to end", [("latency.e2e", TAIL)], "ms"),
     ("Jitter — one-way sd and RFC 3550 interarrival", [("jitter.owd_sd_ms", ("value",)),
@@ -83,6 +84,10 @@ def flatten(metrics: dict) -> dict[str, dict[str, float | None]]:
         if group in SKIP_GROUPS:
             continue
         walk(group, node)
+    # A metrics.json from before per-frame QP still gets its (empty) rows in metrics.csv, so
+    # the column set does not depend on which cells were rebuilt.
+    if metrics and "encoder" in metrics:
+        out.setdefault("encoder.qp_per_frame", {k: (0 if k == "n" else None) for k in SUMMARY_STATS})
     return out
 
 

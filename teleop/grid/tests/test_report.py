@@ -261,9 +261,11 @@ def pdf_pages(path: Path) -> int:
 
 def expected_cell_pages(cd: Path) -> int:
     with (cd / "reduced" / "frames.csv").open() as f:
-        n = sum(1 for r in csv.DictReader(f) if (v := r.get("owd") or r.get("owd_ms")) and float(v) > 100)
+        rows = list(csv.DictReader(f))
+    n = sum(1 for r in rows if (v := r.get("owd") or r.get("owd_ms")) and float(v) > 100)
     extra = max(0, n - report_cell.SPIKE_ROWS_FIRST)
-    return 8 + min(report_cell.SPIKE_MAX_CONT_PAGES, math.ceil(extra / report_cell.SPIKE_ROWS_CONT))
+    qp_page = 1 if any(r.get("qp") for r in rows) else 0     # "QP per frame" when frames carry qp
+    return 8 + qp_page + min(report_cell.SPIKE_MAX_CONT_PAGES, math.ceil(extra / report_cell.SPIKE_ROWS_CONT))
 
 
 class ReportTests(unittest.TestCase):

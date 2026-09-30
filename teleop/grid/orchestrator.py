@@ -408,7 +408,7 @@ class CellRun:
             self.teardown("operator stop")
             return self.finish("ABORTED", "operator stop after arming")
         # B's subscriber joins the room first; the publisher fires at the epoch.
-        sb = self.call(g.b, "publish", {"duration_s": cell.duration_s})
+        sb = self.call(g.b, "publish", cell.subscriber_args())
         self.step("subscriber", bool(sb.get("ok")), sb.get("error") or f"pid {(sb.get('process') or {}).get('pid')}")
         if not sb.get("ok"):
             self.teardown("subscriber did not start")

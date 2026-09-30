@@ -46,10 +46,10 @@ ALIASES = {"geometry": "resolution"}
 # Set on every Cell by rate resolution (not declared in variables.yaml: never set by a grid).
 DERIVED_VARS = ("width", "height")
 # Variables a cell never labels or passes to the harness, but which the grid may set.
-META_VARS = ("repeats", "lead_s", "cooldown_s")
+META_VARS = ("repeats", "lead_s", "cooldown_s", "screenshots")
 # Variables that go into manifest.json "variables" (CONTRACT.md).
 MANIFEST_VARS = ("codec", "kbps", "fps", "resolution", "width", "height", "bpp", "vbv_frames", "padding",
-                 "target_quality", "intra_refresh", "pin_bitrate", "duration_s", "clip", "lead_s")
+                 "target_quality", "intra_refresh", "pin_bitrate", "duration_s", "clip", "lead_s", "screenshots")
 CAPTURE_TAIL_S = 30   # variables.yaml: capture span = lead_s + duration_s + 30
 # Defaults for variables that variables.yaml declares WITHOUT one (added by control-plane,
 # CONTRACT.md). fps 30 is the ARCHITECTURE §4 default; everything else must be given.
@@ -233,6 +233,15 @@ def resolution_warnings(w: int, h: int) -> list[str]:
     return out
 
 
+def sample_every(fps: int, duration_s: int, screenshots: int) -> int | None:
+    """The subscriber's --sample-every for `screenshots` frames over the cell: frame IDs are
+    sampled where id % N == 0, so N = floor(fps*duration_s/screenshots) spreads them evenly
+    (25 fps x 300 s / 6 = 1250). None when screenshots is 0 (off)."""
+    if not screenshots:
+        return None
+    return max(1, int(fps) * int(duration_s) // int(screenshots))
+
+
 # ---------------------------------------------------------------- Cell
 @dataclass
 class Cell:
@@ -301,7 +310,15 @@ class Cell:
         ]
 
     def manifest_variables(self) -> dict:
-        return {k: self.values[k] for k in MANIFEST_VARS}
+        out = {k: self.values.get(k) for k in MANIFEST_VARS}
+        if self.values.get("sample_every") is not None:
+            out["sample_every"] = self.values["sample_every"]
+        return out
+
+    def subscriber_args(self) -> dict:
+        """What the B agent's `publish` needs from the cell (sampling is off when screenshots is 0)."""
+        return {"duration_s": self.duration_s, "screenshots": int(self.values.get("screenshots") or 0),
+                "sample_every": self.values.get("sample_every")}
 
     def to_dict(self) -> dict:
         w, h = self.requested
@@ -342,6 +359,12 @@ class Grid:
         if missing:
             raise GridError(f"no value for {missing} (set in defaults, axes or pairs)")
         resolve_rate(vals)
+        # Derived, like width/height: recorded only when sampling is on, never labelled.
+        n = sample_every(vals["fps"], vals["duration_s"], vals.get("screenshots") or 0)
+        if n is not None:
+            vals["sample_every"] = n
+        else:
+            vals.pop("sample_every", None)
         for k in optional:
             vals.setdefault(k, None)
         return vals

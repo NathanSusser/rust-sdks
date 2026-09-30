@@ -7,6 +7,7 @@ defaults:
   fps: 25
   duration_s: 300
   repeats: 3
+  screenshots: 6              # 6 decoded frames per cell (every 1250th frame ID), ~3 MB each
   clip: /home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4
 axes:
   codec: [h264]

@@ -12,7 +12,7 @@ import math
 import re
 from pathlib import Path
 
-from .reduce import frames as F
+from .reduce import frames as F, screens
 from .reduce.segjoin import SEGMENTS
 from .stats import sd, summ
 
@@ -106,6 +106,7 @@ def build(cell_dir) -> dict:
         "encoder_is_nvenc": (("nvidia" in impl.lower() or "nvenc" in impl.lower()) if impl else None),
         "encoder_implementation": impl, "label": manifest.get("label"), "grid_id": manifest.get("grid_id"),
         "status": manifest.get("status"),
+        "screenshots": len(_rows(red_dir / "screens.csv")),
     }
 
     # ---------------- frame
@@ -144,8 +145,12 @@ def build(cell_dir) -> dict:
 
     # ---------------- encoder
     ql = enc.get("quality_limitation_s") or {}
+    # qp is per second from A's stats (unchanged); qp_per_frame is every frame B's decoder
+    # logged (hostb/frames-qp.csv). Absent log (older subscriber) or empty qp (h265) -> n=0.
+    qlog = screens.read_qp_log(cell / "hostb" / screens.QP_LOG)
     encoder = {
-        "qp": summ(_col(cs, "qp")), "encode_ms": summ(_col(fr, "encode_ms")),
+        "qp": summ(_col(cs, "qp")), "qp_per_frame": summ(qlog.qps() if qlog else []),
+        "encode_ms": summ(_col(fr, "encode_ms")),
         "quality_limitation_s": {k: ql.get(k) for k in ("none", "bandwidth", "cpu", "other")},
         "implementation": impl,
     }

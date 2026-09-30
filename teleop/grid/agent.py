@@ -279,13 +279,11 @@ class Agent:
         csv = self.host_dir / "subscriber.csv"
         if csv.exists():
             raise AgentError("subscriber.csv already exists for this cell")
-        envs = {"DISPLAY": self.cfg["display"], "RUST_LOG": "info"}
+        envs, argv = subscriber_command(sub, url, self.label, self.role, self.host_dir, self.cfg["display"], args)
         base = self._base_env()
         ca = self.repo / ".livekit-demo" / "corp-ca.pem"
         if "SSL_CERT_FILE" not in base and ca.is_file():
             envs["SSL_CERT_FILE"] = str(ca)   # the SFU is on an internal CA: UnknownIssuer otherwise
-        argv = [str(sub), "--url", url, "--room-name", self.label, "--identity", f"host-{self.role}-{self.label}",
-                "--low-latency", "--display-timestamp", "--log-csv", str(csv)]
         log = self.host_dir / "subscriber.log"
         launch = {"epoch": None, "cred": self.cfg["credentials_env"],
                   "argv": [f"{k}={v}" for k, v in sorted(envs.items())] + argv,
@@ -399,6 +397,32 @@ class Agent:
             return {"ok": False, "error": f"rsync rc {r.returncode}: {r.stderr.strip()[-300:]}"}
         v = capture.verify_checksums(local)
         return {"ok": v["ok"], "verified": v, "dir": str(local)}
+
+
+# ---------------------------------------------------------------- the subscriber's command line
+
+def subscriber_command(sub: Path, url: str, label: str, role: str, host_dir: Path, display: str,
+                       args: dict) -> tuple[dict, list[str]]:
+    """(env, argv) for B's subscriber. The decoder's per-frame log (LK_DECODER_FRAME_LOG,
+    hostb/frames-qp.csv) is ALWAYS requested: a subscriber built before it existed ignores the
+    variable, and reduce treats the file as optional. Frame sampling (raw I420 into
+    hostb/frames/, every sample_every-th frame ID) only when the cell asks for screenshots --
+    at ~3 MB a frame it is not free on disk or in the mirror."""
+    env = {"DISPLAY": display, "RUST_LOG": "info",
+           "LK_DECODER_FRAME_LOG": str(Path(host_dir) / "frames-qp.csv")}
+    argv = [str(sub), "--url", url, "--room-name", label, "--identity", f"host-{role}-{label}",
+            "--low-latency", "--display-timestamp", "--log-csv", str(Path(host_dir) / "subscriber.csv")]
+    shots = int(args.get("screenshots") or 0)
+    if shots > 0:
+        every = args.get("sample_every")
+        if not every:
+            # an orchestrator older than sample_every: derive it the way grid.sample_every does
+            fps, dur = args.get("fps"), args.get("duration_s")
+            if not (fps and dur):
+                raise AgentError("screenshots > 0 but neither sample_every nor fps/duration_s given")
+            every = max(1, int(fps) * int(dur) // shots)
+        argv += ["--sample-frames-dir", str(Path(host_dir) / "frames"), "--sample-every", str(int(every))]
+    return env, argv
 
 
 # ---------------------------------------------------------------- run.json from what ran
