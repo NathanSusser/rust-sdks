@@ -609,7 +609,26 @@ def subscriber_command(sub: Path, url: str, label: str, role: str, host_dir: Pat
 
 RUN_JSON_KEYS = ("encoder_implementation", "width", "height", "fps", "max_bitrate_bps", "codec", "started_at")
 CAP_RE = re.compile(r"NVENC (\w+) frame-size cap:.*")
-STALE_RE = re.compile(r"already has (\d+) participant\(s\)")
+STALE_RE = re.compile(r"already has (\d+) participant\(s\)\s*(\[[^\]]*\])?")
+
+
+def _strip_source_scheme(src):
+    """The harness reports a file source as `rtsp:<path>` (file clips are opened through its
+    ffmpeg/RTSP input path) or `file://<path>`; the grid names the bare path."""
+    if not src:
+        return src
+    return re.sub(r"^(?:file://|[a-z]+:(?!//))", "", str(src))
+
+
+def _unexpected_participants(stale, label):
+    """Participants already in the room when the publisher joined, minus the one the grid put
+    there on purpose: B's subscriber joins first, as identity host-b-<label>."""
+    if not stale:
+        return 0
+    names = re.findall(r'"([^"]+)"', stale.group(2) or "")
+    if not names:
+        return int(stale.group(1))
+    return sum(1 for n in names if n != f"host-b-{label}")
 GEOM_RE = re.compile(r"^geometry: (\d+)x(\d+)@(\d+)")
 
 
@@ -672,11 +691,13 @@ def derive_run_json(host_dir: Path, label: str, proc: dict) -> dict:
         "requested_codec": meta.get("requested_codec") or arg("--codec"),
         "codec_matches": (neg_codec == arg("--codec")) if neg_codec else None,
         "camera_source": meta.get("camera_source"),
-        "clip_matches": (meta.get("camera_source") in (None, clip, os.path.basename(clip or ""))) if meta else None,
+        "clip_matches": (_strip_source_scheme(meta.get("camera_source")) in (None, clip, os.path.basename(clip or "")))
+                        if meta else None,
         "started_at": proc.get("fired_at"),
         "room": arg("--room-name"),
         "frame_size_cap_line": cap.group(0).strip() if cap else None,
-        "stale_participants_at_join": int(stale.group(1)) if stale else 0,
+        "stale_participants_at_join": _unexpected_participants(stale, arg("--room-name")),
+        "participants_at_join": int(stale.group(1)) if stale else 0,
         "snapshots": sum(dims.values()),
     }
 

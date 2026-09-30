@@ -1034,3 +1034,22 @@ class Compression(Tmp):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostRunChecks(unittest.TestCase):
+    """Both smoke cells of 2026-09-30 06:26Z were marked INCOMPLETE by these two checks alone."""
+
+    def test_rtsp_prefixed_file_source_matches_clip(self):
+        from teleop.grid import agent
+        self.assertEqual(agent._strip_source_scheme("rtsp:/m/clip.mp4"), "/m/clip.mp4")
+        self.assertEqual(agent._strip_source_scheme("file:///m/clip.mp4"), "/m/clip.mp4")
+        self.assertEqual(agent._strip_source_scheme("rtsp://camera/stream"), "rtsp://camera/stream")
+
+    def test_hostb_subscriber_is_not_a_stale_participant(self):
+        from teleop.grid import agent
+        m = agent.STALE_RE.search('room L already has 1 participant(s) ["host-b-L"]; NOT deleting it.')
+        self.assertEqual(agent._unexpected_participants(m, "L"), 0)
+        m = agent.STALE_RE.search('room L already has 2 participant(s) ["host-b-L", "ghost"]')
+        self.assertEqual(agent._unexpected_participants(m, "L"), 1)
+        m = agent.STALE_RE.search("room L already has 1 participant(s)")
+        self.assertEqual(agent._unexpected_participants(m, "L"), 1)
