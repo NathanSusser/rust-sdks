@@ -181,7 +181,8 @@ def import_cell(old: Path, root: Path, label: str | None = None) -> Path:
         ptp_b = {"state": "SLAVE", "servo_lines_30s": int(m[-1]), "offset_ns": None}
     w, h = run["width"], run["height"]
     variables = {"codec": lv.get("codec"), "kbps": lv.get("kbps"), "fps": lv.get("fps", 30),
-                 "geometry": f"{w}x{h}" if w and h else None, "bpp": lv.get("bpp"), "vbv_frames": None,
+                 "resolution": f"{w}x{h}" if w and h else None, "width": w, "height": h,
+                 "bpp": lv.get("bpp"), "vbv_frames": None,
                  "padding": None, "target_quality": None, "intra_refresh": None,
                  "pin_bitrate": lv.get("pin_bitrate"), "duration_s": lv.get("duration_s"), "clip": lv.get("clip"),
                  "lead_s": None}

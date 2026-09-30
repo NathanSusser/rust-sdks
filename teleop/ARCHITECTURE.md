@@ -116,10 +116,10 @@ ran — the label is *generated from* the applied values.
 | variable | values | applied via |
 |---|---|---|
 | `codec` | h264, av1 (h265 admitted, not tuned) | `--codec` |
-| `kbps` | integer | `--max-bitrate`, `LK_MAX_START_BITRATE_KBPS` |
-| `fps` | 30 (or 15, 12) | `--fps` |
-| `geometry` | `auto` (from kbps at `bpp`), or `WxH` | `--width --height` |
-| `bpp` | 0.10 default | geometry rule |
+| `resolution` | `auto` (from kbps at `bpp`), or `WxH` (128..1920 per side); `geometry` is a deprecated alias | `--width --height` |
+| `fps` | 30 (or 25, 20, 15, 12, 10) | `--fps` |
+| `bpp` | 0.01..0.5; derives kbps on a fixed resolution (0.10 for `auto`) | kbps / geometry rule |
+| `kbps` | integer; optional, derived from resolution x fps x bpp | `--max-bitrate`, `LK_MAX_START_BITRATE_KBPS` |
 | `vbv_frames` | 1, 5 | `LK_NVENC_VBV_FRAMES` |
 | `padding` | on, off | `LK_NVENC_FILLER` |
 | `target_quality` | off, or QP 1–51 | `LK_NVENC_TARGET_QUALITY` |

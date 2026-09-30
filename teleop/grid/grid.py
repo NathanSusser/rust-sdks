@@ -1,4 +1,4 @@
-"""Grid files: schema, expansion into cells, labels, geometry and the harness invocation.
+"""Grid files: schema, expansion into cells, labels, resolution/rate and the harness invocation.
 
 Standard library plus PyYAML: imported on Host B too (the agent receives cells as dicts, but
 preflight shares the geometry rule).
@@ -6,6 +6,10 @@ preflight shares the geometry rule).
 A label is GENERATED from the values that are applied, never typed. On 2026-09-29 a cell
 labelled `vbv-512kbps` ran at 2500 k because the label and the cap were typed separately;
 here both come from the same Cell.
+
+Rate model: the operator sets resolution, fps and bits-per-pixel; kbps is derived
+(kbps = W*H*fps*bpp/1000). Setting kbps with a fixed resolution derives bpp instead, and
+resolution `auto` keeps the old rule (WxH from kbps/fps/bpp, grid.derive_geometry).
 """
 from __future__ import annotations
 
@@ -29,11 +33,23 @@ THRESHOLD_KEYS = {"owd_p99_ms", "packets_lost"}
 EXPECT_KEYS = {"band", "arfcn", "pci"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,23}$")
 GEOM_RE = re.compile(r"^(\d+)x(\d+)$")
+# Fixed resolution bounds (each side), and the clip every cell publishes: a requested
+# aspect that differs from it is scaled/stretched by the harness, which is allowed but warned.
+RES_MIN, RES_MAX = 128, 1920
+CLIP_W, CLIP_H = 1600, 1300
+ASPECT_TOL = 0.02
+# bpp used by resolution `auto` when the grid does not set one (publish-cell.sh's value).
+AUTO_BPP = 0.10
+KBPS_MIN, KBPS_MAX = 128, 20000
+# Deprecated variable names -> their replacement. The old name is accepted with a warning.
+ALIASES = {"geometry": "resolution"}
+# Set on every Cell by rate resolution (not declared in variables.yaml: never set by a grid).
+DERIVED_VARS = ("width", "height")
 # Variables a cell never labels or passes to the harness, but which the grid may set.
 META_VARS = ("repeats", "lead_s", "cooldown_s")
 # Variables that go into manifest.json "variables" (CONTRACT.md).
-MANIFEST_VARS = ("codec", "kbps", "fps", "geometry", "bpp", "vbv_frames", "padding", "target_quality",
-                 "intra_refresh", "pin_bitrate", "duration_s", "clip", "lead_s")
+MANIFEST_VARS = ("codec", "kbps", "fps", "resolution", "width", "height", "bpp", "vbv_frames", "padding",
+                 "target_quality", "intra_refresh", "pin_bitrate", "duration_s", "clip", "lead_s")
 CAPTURE_TAIL_S = 30   # variables.yaml: capture span = lead_s + duration_s + 30
 # Defaults for variables that variables.yaml declares WITHOUT one (added by control-plane,
 # CONTRACT.md). fps 30 is the ARCHITECTURE §4 default; everything else must be given.
@@ -52,6 +68,11 @@ def _yaml():
 def load_variables(path: str | os.PathLike = VARIABLES_PATH) -> dict:
     with open(path) as f:
         return _yaml().safe_load(f)
+
+
+def _live(variables: dict) -> list[str]:
+    """Declared names a Cell carries: everything but deprecated aliases."""
+    return [k for k, spec in variables.items() if not (spec or {}).get("deprecated")]
 
 
 # ---------------------------------------------------------------- geometry
@@ -133,14 +154,20 @@ def coerce(name: str, v, spec: dict):
         if not 1 <= iv <= 51:
             raise GridError(f"{name}: {iv} outside 1..51")
         return iv
-    if t == "geometry":
+    if t in ("resolution", "geometry"):
         s = str(v).strip().lower()
         if s == "auto":
             return "auto"
         m = GEOM_RE.match(s)
-        if not m or int(m.group(1)) < 16 or int(m.group(2)) < 16:
-            raise GridError(f"{name}: expected 'auto' or WxH, got {v!r}")
-        return f"{int(m.group(1))}x{int(m.group(2))}"
+        if not m:
+            raise GridError(f"{name}: expected 'auto' or WxH (e.g. 1080x1900), got {v!r}")
+        w, h = int(m.group(1)), int(m.group(2))
+        for side, n in (("width", w), ("height", h)):
+            if not RES_MIN <= n <= RES_MAX:
+                raise GridError(f"{name}: {side} {n} outside {RES_MIN}..{RES_MAX} in {v!r}")
+            if n % 2:
+                raise GridError(f"{name}: {side} {n} is odd in {v!r}; the encoder needs even sides")
+        return f"{w}x{h}"
     if t == "path":
         if not isinstance(v, str) or not v.strip():
             raise GridError(f"{name}: expected a path, got {v!r}")
@@ -150,6 +177,60 @@ def coerce(name: str, v, spec: dict):
 
 def _spec_default(spec: dict):
     return spec.get("default")
+
+
+# ---------------------------------------------------------------- rate
+def _desc(vals: dict) -> str:
+    return ", ".join(f"{k}={vals[k]}" for k in ("codec", "resolution", "fps", "bpp", "kbps") if vals.get(k) is not None)
+
+
+def resolve_rate(vals: dict) -> dict:
+    """Fill resolution, width, height, kbps and bpp in place (one cell's values) and return it.
+
+    fixed WxH + bpp   -> kbps = round(W*H*fps*bpp/1000)
+    fixed WxH + kbps  -> bpp = kbps*1000/(W*H*fps), recorded
+    auto + kbps       -> WxH = derive_geometry(kbps, fps, bpp or 0.10)
+    Anything else (both on a fixed WxH, neither, auto without kbps) is rejected."""
+    res = vals.get("resolution") or "auto"
+    fps = int(vals["fps"])
+    kbps, bpp = vals.get("kbps"), vals.get("bpp")
+    if res == "auto":
+        if kbps is None:
+            raise GridError(f"resolution auto needs kbps (it derives WxH from kbps/fps/bpp); set kbps, or "
+                            f"a fixed resolution with bpp ({_desc(vals)})")
+        bpp = AUTO_BPP if bpp is None else float(bpp)
+        w, h = derive_geometry(kbps, fps, bpp)
+    else:
+        w, h = (int(x) for x in GEOM_RE.match(res).groups())
+        if kbps is not None and bpp is not None:
+            raise GridError(f"set bpp or kbps, not both, with a fixed resolution: {res}@{fps} "
+                            f"bpp={bpp} kbps={kbps} (kbps is derived from bpp, or bpp from kbps)")
+        if kbps is None and bpp is None:
+            raise GridError(f"resolution {res} needs bpp (kbps is derived) or kbps (bpp is derived) ({_desc(vals)})")
+        if bpp is not None:
+            bpp = float(bpp)
+            kbps = int(round(w * h * fps * bpp / 1000))
+            if not KBPS_MIN <= kbps <= KBPS_MAX:
+                raise GridError(f"{res}@{fps} at bpp {bpp} derives kbps {kbps}, outside {KBPS_MIN}..{KBPS_MAX}")
+        else:
+            bpp = round(kbps * 1000 / (w * h * fps), 6)
+    vals.update(resolution=res, width=w, height=h, kbps=int(kbps), bpp=bpp)
+    return vals
+
+
+def bpp_tag(bpp: float) -> str:
+    """0.100 -> '0100': three decimals, dot dropped (labels use '-' and '.' is avoided in room names)."""
+    return f"{bpp:.3f}".replace(".", "")
+
+
+def resolution_warnings(w: int, h: int) -> list[str]:
+    out = []
+    if w % 16 or h % 16:
+        out.append(f"resolution {w}x{h}: not a multiple of 16 (the encoder pads to macroblocks)")
+    if abs((w / h) / (CLIP_W / CLIP_H) - 1) > ASPECT_TOL:
+        out.append(f"resolution {w}x{h}: aspect {w / h:.3f} differs from the test clip's {CLIP_W}x{CLIP_H} "
+                   f"({CLIP_W / CLIP_H:.3f}); the clip will be scaled/stretched to fit")
+    return out
 
 
 # ---------------------------------------------------------------- Cell
@@ -165,19 +246,15 @@ class Cell:
 
     @property
     def requested(self) -> tuple[int, int]:
-        g = self.values["geometry"]
-        if g == "auto":
-            return derive_geometry(self.values["kbps"], self.values["fps"], self.values["bpp"])
-        w, h = GEOM_RE.match(g).groups()
-        return int(w), int(h)
+        return int(self.values["width"]), int(self.values["height"])
 
     @property
     def label(self) -> str:
         w, h = self.requested
         prefix = "x" if self.kind == "control" else "c"
         v = self.values
-        return (f"{self.grid_id}-{prefix}{self.index:0{self.index_width}d}-{v['codec']}-{v['kbps']}k-"
-                f"{w}x{h}-v{v['vbv_frames']}-p{1 if v['padding'] else 0}-r{self.repeat}")
+        return (f"{self.grid_id}-{prefix}{self.index:0{self.index_width}d}-{v['codec']}-{w}x{h}-{v['fps']}fps-"
+                f"b{bpp_tag(v['bpp'])}-{v['kbps']}k-v{v['vbv_frames']}-p{1 if v['padding'] else 0}-r{self.repeat}")
 
     @property
     def duration_s(self) -> int:
@@ -250,14 +327,23 @@ class Grid:
     variables: dict
     source: str = ""
     raw: dict = field(default_factory=dict)
+    warnings: list = field(default_factory=list)
 
-    def _resolve(self, overrides: dict) -> dict:
+    def _resolve(self, overrides: dict, *, control: bool = False) -> dict:
         vals = dict(self.defaults)
+        if control and ("kbps" in overrides) != ("bpp" in overrides):
+            # A control cell is a fixed reference: the rate it names replaces the grid's,
+            # so control {kbps: 2500} under defaults {bpp: 0.08} is not "both set".
+            vals.pop("bpp" if "kbps" in overrides else "kbps", None)
         for k, v in overrides.items():
             vals[k] = coerce(k, v, self.variables[k])
-        missing = [k for k in self.variables if k not in vals]
+        optional = [k for k, s in self.variables.items() if (s or {}).get("optional")]
+        missing = [k for k in _live(self.variables) if k not in vals and k not in optional]
         if missing:
             raise GridError(f"no value for {missing} (set in defaults, axes or pairs)")
+        resolve_rate(vals)
+        for k in optional:
+            vals.setdefault(k, None)
         return vals
 
     def expand(self) -> list[Cell]:
@@ -285,7 +371,7 @@ class Grid:
                 ctl_n += 1
                 plan.append(("control", -1, ctl_n))
         width = max(2, len(str(len(plan) - 1)))
-        ctl_vals = self._resolve(self.control["cell"]) if self.control else None
+        ctl_vals = self._resolve(self.control["cell"], control=True) if self.control else None
         cells = []
         for idx, (kind, ci, rep) in enumerate(plan):
             vals = ctl_vals if kind == "control" else resolved[ci]
@@ -346,6 +432,8 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         raise GridError(f"id {gid!r}: lowercase letters, digits and _ only, 1-24 chars "
                         "(it becomes a directory, a room and a file prefix; '-' separates label fields)")
 
+    warns: list[str] = []
+
     def check_names(d: dict, where: str):
         if not isinstance(d, dict):
             raise GridError(f"{where}: must be a mapping")
@@ -353,10 +441,27 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         if bad:
             raise GridError(f"{where}: unknown variable(s) {bad}; declared in variables.yaml: {sorted(variables)}")
 
-    raw_defaults = raw.get("defaults") or {}
+    def unalias(d, where: str):
+        """Rename deprecated names (geometry -> resolution) in one mapping, with a warning."""
+        if not isinstance(d, dict):
+            return d
+        out = {}
+        for k, v in d.items():
+            new = ALIASES.get(k)
+            if new is None:
+                out[k] = v
+                continue
+            if new in d:
+                raise GridError(f"{where}: both {k!r} (deprecated) and {new!r} set; keep {new!r}")
+            warns.append(f"{where}: {k!r} is deprecated, read as {new!r}")
+            out[new] = v
+        return out
+
+    raw_defaults = unalias(raw.get("defaults") or {}, "defaults")
     check_names(raw_defaults, "defaults")
     defaults = {}
-    for name, spec in variables.items():
+    for name in _live(variables):
+        spec = variables[name]
         if name in raw_defaults:
             defaults[name] = coerce(name, raw_defaults[name], spec)
         elif _spec_default(spec) is not None:
@@ -367,7 +472,7 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         raise GridError("use either axes: (cross product) or pairs: (explicit list), not both")
     combos: list[dict] = []
     if "axes" in raw:
-        axes = raw["axes"] or {}
+        axes = unalias(raw["axes"] or {}, "axes")
         check_names(axes, "axes")
         for k, vs in axes.items():
             if not isinstance(vs, list) or not vs:
@@ -380,6 +485,7 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         pairs = raw["pairs"]
         if not isinstance(pairs, list) or not pairs:
             raise GridError("pairs: must be a non-empty list of mappings")
+        pairs = [unalias(p, f"pairs[{i}]") for i, p in enumerate(pairs)]
         for i, p in enumerate(pairs):
             check_names(p, f"pairs[{i}]")
             for k, v in p.items():
@@ -397,14 +503,15 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
         every = control.get("every")
         if isinstance(every, bool) or not isinstance(every, int) or every < 1:
             raise GridError("control.every: must be a positive integer")
-        check_names(control.get("cell") or {}, "control.cell")
-        for k, v in (control.get("cell") or {}).items():
+        ccell = unalias(control.get("cell") or {}, "control.cell")
+        check_names(ccell, "control.cell")
+        for k, v in ccell.items():
             coerce(k, v, variables[k])
         th = control.get("thresholds") or {}
         bad = set(th) - THRESHOLD_KEYS
         if bad:
             raise GridError(f"control.thresholds: unknown key(s) {sorted(bad)}; allowed {sorted(THRESHOLD_KEYS)}")
-        control = {"every": every, "cell": dict(control.get("cell") or {}), "thresholds": dict(th)}
+        control = {"every": every, "cell": dict(ccell), "thresholds": dict(th)}
     order = raw.get("order", "shuffle")
     if order not in ("shuffle", "sequential"):
         raise GridError(f"order: must be shuffle or sequential, got {order!r}")
@@ -422,7 +529,13 @@ def parse(raw: dict, *, variables: dict | None = None, source: str = "", seed: i
     g = Grid(id=gid, description=str(raw.get("description", "")), defaults=defaults, combos=combos,
              order=order, seed=int(seed), expect=dict(expect), control=control, variables=variables,
              source=source, raw=raw)
-    g.expand()  # validates labels are unique and every value resolves
+    cells = g.expand()  # validates labels are unique and every value resolves
+    for c in cells:
+        if c.values["resolution"] != "auto":
+            for w in resolution_warnings(*c.requested):
+                if w not in warns:
+                    warns.append(w)
+    g.warnings = warns
     return g
 
 

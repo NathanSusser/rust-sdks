@@ -52,9 +52,8 @@ control:                        # runs first and every `every` cells; thresholds
 defaults:                       # any declared variable; overridden by the grid axes
   duration_s: 300
   repeats: 3
-  fps: 30
-  bpp: 0.10
-  geometry: auto
+  fps: 30                       # 30, 25, 20, 15, 12, 10 (the 30 fps clip is decimated by ffmpeg -r)
+  resolution: auto              # or WxH; `geometry` is a deprecated alias (warned, read as resolution)
   vbv_frames: 1
   padding: on
   target_quality: off
@@ -71,17 +70,38 @@ expect:                         # gates compare against these (optional)
   band: n41
 ```
 
+**Rate model.** The operator sets `resolution`, `fps` and `bpp`; `kbps` is derived. Per
+cell, after expansion (`grid.resolve_rate()`):
+
+| resolution | bpp | kbps | result |
+|---|---|---|---|
+| `WxH` | set | — | `kbps = round(W*H*fps*bpp/1000)` |
+| `WxH` | — | set | `bpp = kbps*1000/(W*H*fps)`, recorded |
+| `WxH` | set | set | rejected: "set bpp or kbps, not both" |
+| `WxH` | — | — | rejected |
+| `auto` | optional (0.10) | set | W×H from `grid.derive_geometry()` (unchanged: keep 1600:1300, floor to a multiple of 16, cap at 1600×1300, floor at 160×128) |
+| `auto` | any | — | rejected |
+
+"Set" means given in `defaults`, `axes`/`pairs` or `control.cell`; neither variable has a
+default in variables.yaml. A control cell that names exactly one of `kbps`/`bpp` replaces
+the other one inherited from `defaults`. A fixed `WxH` has each side in 128..1920 and even;
+a side not a multiple of 16, or an aspect more than 2% off the clip's 1600:1300 (the harness
+scales/stretches the clip to W×H), is a warning in `Grid.warnings`, not an error. A derived
+kbps outside 128..20000 rejects the grid. Every Cell's `values` carries the resolved
+`resolution`, `width`, `height`, `kbps` and `bpp` (float).
+
 `grid.expand()` yields `Cell` objects: one per (combination × repeat), ordered per
-`order`, plus control cells inserted. Every declared variable has a value in every
-Cell (defaults filled). `Cell.label` is:
+`order`, plus control cells inserted. Every declared variable (except the deprecated
+`geometry`) has a value in every Cell (defaults filled; `kbps`/`bpp` resolved as above),
+plus `width` and `height`. `Cell.label` is:
 
 ```
-<id>-c<NN>-<codec>-<kbps>k-<W>x<H>-v<vbv>-p<0|1>-r<rep>
+<id>-c<NN>-<codec>-<W>x<H>-<fps>fps-b<bpp>-<kbps>k-v<vbv>-p<0|1>-r<rep>
 ```
 
-where W×H is the geometry the cell will request (from `geometry` or derived from
-kbps/fps/bpp with the rule in `grid.derive_geometry()`: keep 1600:1300, floor to a
-multiple of 16, cap at 1600×1300, floor at 160×128). `c<NN>` is the index in run
+where W×H is the resolution the cell will request, `b<bpp>` is bpp to three decimals with
+the dot dropped (0.100 → `b0100`, 0.04 → `b0040`) and `<kbps>` is the applied cap, e.g.
+`bpp_sweep-c03-h264-1600x1300-30fps-b0040-2496k-v1-p1-r1`. `c<NN>` is the index in run
 order (control cells are `x<NN>`). The label is the room name, the cell directory
 name and the file prefix on both hosts.
 
@@ -124,8 +144,8 @@ $RESULTS_ROOT/<grid-id>/
 ```json
 {
   "label": "...", "grid_id": "...", "index": 7, "kind": "cell|control", "repeat": 2,
-  "variables": {codec, kbps, fps, geometry, bpp, vbv_frames, padding, target_quality,
-                intra_refresh, pin_bitrate, duration_s, clip, lead_s},
+  "variables": {codec, kbps, fps, resolution, width, height, bpp, vbv_frames, padding,
+                target_quality, intra_refresh, pin_bitrate, duration_s, clip, lead_s},
   "requested": {"width": 1008, "height": 816},
   "negotiated": {"width", "height", "encoder_implementation", "codec"},
   "epoch": 1790384410,                       # host-clock unix second the publisher fired

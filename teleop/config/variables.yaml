@@ -9,21 +9,33 @@ kbps:
   type: int
   min: 128
   max: 20000
+  optional: true            # derived from resolution/fps/bpp when not set
   applies: harness --max-bitrate (x1000) and LK_MAX_START_BITRATE_KBPS
+  note: >-
+    fixed resolution + bpp -> kbps = round(W*H*fps*bpp/1000); fixed resolution + kbps -> bpp is
+    derived; resolution auto needs kbps. Setting both bpp and kbps on a fixed resolution is rejected.
+    A derived kbps must still land in 128..20000.
 fps:
   type: int
-  values: [30, 15, 12, 10]
+  values: [30, 25, 20, 15, 12, 10]
   applies: harness --fps
-geometry:
-  type: geometry            # "auto" or "WxH"
+resolution:
+  type: resolution          # "auto" or "WxH", each side 128..1920 and even
   default: auto
   applies: harness --width --height ; auto derives from kbps/fps/bpp (grid.derive_geometry)
+  note: >-
+    the clip is 1600x1300; an aspect more than 2% off it is scaled/stretched (warned, not rejected).
+    Sides that are not multiples of 16 are warned.
+geometry:
+  type: geometry
+  deprecated: resolution    # accepted in grid files with a warning and read as `resolution`
+  applies: see resolution
 bpp:
   type: float
-  min: 0.02
+  min: 0.01
   max: 0.5
-  default: 0.10
-  applies: geometry derivation only
+  optional: true            # derived from kbps on a fixed resolution; 0.10 for auto when not set
+  applies: kbps derivation (fixed resolution) or geometry derivation (auto)
 vbv_frames:
   type: int
   min: 1

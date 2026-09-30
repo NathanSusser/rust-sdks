@@ -1,6 +1,7 @@
 """`teleop` -- the one path into the system (python3 -m teleop.grid.cli ...).
 
     grid new <file> --id ID --axis codec=h264,av1 --axis kbps=512,2500 [--set duration_s=60] ...
+    grid new <file> --id ID --set resolution=1080x1900 --set fps=30 --axis bpp=0.04,0.06,0.1   (kbps derived)
     grid check <file> [--local-only]      expand, print the cell table, pre-flight both hosts; arms nothing
     grid run <file> [--resume]
     grid status <grid-id>
@@ -55,7 +56,9 @@ def cmd_grid_new(a) -> int:
                           "thresholds": {"owd_p99_ms": 100, "packets_lost": 0}}
     if a.band:
         doc["expect"] = {"band": a.band}
-    gridmod.parse(doc, source=str(out))   # validate before writing
+    g = gridmod.parse(doc, source=str(out))   # validate before writing
+    for w in g.warnings:
+        print(f"warning: {w}", file=sys.stderr)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         _yaml().safe_dump(doc, f, sort_keys=False, default_flow_style=None)
@@ -66,10 +69,11 @@ def cmd_grid_new(a) -> int:
 # ---------------------------------------------------------------- grid check
 
 def print_table(cells) -> None:
-    print(f"{'idx':>4}  {'kind':<7} {'label':<52} {'WxH':>10} {'dur':>5} {'span':>5}")
+    print(f"{'idx':>4}  {'kind':<7} {'label':<62} {'WxH':>10} {'bpp':>7} {'kbps':>6} {'dur':>5} {'span':>5}")
     for c in cells:
         w, h = c.requested
-        print(f"{c.index:>4}  {c.kind:<7} {c.label:<52} {f'{w}x{h}':>10} {c.duration_s:>5} {c.span_s:>5}")
+        print(f"{c.index:>4}  {c.kind:<7} {c.label:<62} {f'{w}x{h}':>10} {c.values['bpp']:>7.4f} "
+              f"{c.values['kbps']:>6} {c.duration_s:>5} {c.span_s:>5}")
     total = sum(c.duration_s + int(c.values["lead_s"]) + 30 + int(c.values["cooldown_s"]) for c in cells)
     print(f"{len(cells)} cells, ~{total / 3600:.1f} h wall clock (lead + duration + close + cooldown; "
           "excludes mirror and reduction)")
@@ -90,6 +94,8 @@ def cmd_grid_check(a) -> int:
     print(f"grid {g.id}: {g.description}")
     print(f"order {g.order}, seed {g.seed} (a run records its own seed unless the file sets one)"
           + (f", expect {g.expect}" if g.expect else ""))
+    for w in g.warnings:
+        print(f"warning: {w}")
     print_table(cells)
     clips = sorted({c.values["clip"] for c in cells})
     for clip in clips:
@@ -150,7 +156,7 @@ def cmd_grid_status(a) -> int:
           f"{s.get('current')}" + (" STOP requested" if st["stop_requested"] else "")
           + (f"\nPAUSED: {st['paused']}" if st["paused"] else ""))
     for r in st["cells"]:
-        print(f"  {r['index']:>4} {r['label']:<52} {r['status'] or '':<10} {(r['status_reason'] or '')[:80]}")
+        print(f"  {r['index']:>4} {r['label']:<62} {r['status'] or '':<10} {(r['status_reason'] or '')[:80]}")
     return 0
 
 

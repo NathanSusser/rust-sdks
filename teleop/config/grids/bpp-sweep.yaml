@@ -1,0 +1,16 @@
+# Bits-per-pixel sweep at the test clip's native 1600x1300 (no scaling): kbps is derived per
+# cell (1600*1300*25*bpp/1000), so the rate axis is quality-per-pixel, not a bitrate list.
+id: bpp_sweep
+description: h264 1600x1300@25, bpp 0.04..0.14 (kbps derived)
+defaults:
+  resolution: 1600x1300
+  fps: 25
+  duration_s: 300
+  repeats: 3
+  clip: /home/nsusser/teleop-media/depal-face-lower-20260904/depal-face-lower-src-30s.mp4
+axes:
+  codec: [h264]
+  bpp: [0.04, 0.06, 0.08, 0.10, 0.14]
+order: shuffle
+expect:
+  band: n41

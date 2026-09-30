@@ -57,7 +57,8 @@ def make_cell(grid_dir: Path, index: int, codec: str, kbps: int, repeat: int = 1
     rng = np.random.default_rng(seed if seed is not None else index * 7919 + kbps)
     fps = 30
     w, h = _geometry(kbps)
-    variables = {"codec": codec, "kbps": kbps, "fps": fps, "geometry": "auto", "bpp": 0.10, "vbv_frames": 1,
+    variables = {"codec": codec, "kbps": kbps, "fps": fps, "resolution": "auto", "width": w, "height": h,
+                 "bpp": 0.10, "vbv_frames": 1,
                  "padding": "on", "target_quality": "off", "intra_refresh": 0, "pin_bitrate": "on",
                  "duration_s": duration_s, "clip": "/media/clip-src-30s.mp4", "lead_s": 60}
     variables.update(extra_vars or {})
@@ -331,6 +332,10 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(any(r["metric_path"] == "tail.owd_over_100.share" for r in rows))
         self.assertIn("codec", rows[0])
         self.assertIn("kbps", rows[0])
+        # the rate model's variables are grid columns (manifest variables -> metrics.csv)
+        for k in ("bpp", "resolution", "width", "height"):
+            self.assertIn(k, rows[0])
+        self.assertEqual({r["bpp"] for r in rows}, {"0.1"})
         self.assertEqual({r["excluded"] for r in rows if "-c02-" in r["label"]}, {"1"})
 
     def test_grid_one_cell_and_missing_metrics(self):

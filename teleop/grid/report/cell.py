@@ -506,7 +506,7 @@ def _header_lines(c: Cell) -> tuple[list[tuple[str, str, str]], list[tuple[str, 
     idx = c.cfg("index")
     left.append(("grid / cell", f"{c.cfg('grid_id', '–')}  ·  #{idx if idx is not None else '–'}  ·  "
                  f"{c.cfg('kind', '–')}  ·  repeat {c.cfg('repeat', '–')}", S.INK))
-    order = ["codec", "kbps", "fps", "geometry", "bpp", "vbv_frames", "padding", "target_quality",
+    order = ["codec", "kbps", "fps", "resolution", "width", "height", "bpp", "vbv_frames", "padding", "target_quality",
              "intra_refresh", "pin_bitrate", "duration_s"]
     shown = [f"{k}={v[k]}" for k in order if k in v and v[k] is not None]
     unset = [k for k in order if k in v and v[k] is None]
