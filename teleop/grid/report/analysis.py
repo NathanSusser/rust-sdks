@@ -2,11 +2,15 @@
 
     build(grid_dir, cells, axes) -> str        # the page; report.grid.render writes it
 
-Sections: Overview (what was swept, cell status, PTP, band, encoders, a computed plain-language
-line per KPI), KPI curves against bpp (one line per codec x fps = median across repeats, each
-repeat a dot, a statistic selector), a radar per codec x fps, the combo x KPI matrix (sortable,
-colour-scaled per column, linking every combo's summary.pdf and every repeat's report.pdf), and
-every repeat with its flags. Each section has a collapsible "how to read this".
+Sections, in the order a reader needs them: Summary (status facts, what was swept, a ranking of
+every combination for one KPI with a bar per row, an effects table: best and worst, the change
+along the bpp sweep, paired differences for two-valued variables), Trends (one chart per KPI
+against bpp, one line per codec x fps = median across repeats, each repeat a dot; with "clip
+outliers" the axis fits the medians and a dot beyond it is drawn at the edge with its value), a
+radar per codec x fps, the combination x KPI matrix (sortable, tinted per column, linking every
+combination's summary.pdf and every repeat's report.pdf), and every repeat with its flags. The
+statistic (mean, p50, p95, p99, max) is chosen once in the sticky bar and drives every section.
+Each section has a "?" popover explaining how to read it.
 
 Everything shown comes from each repeat's metrics.json (plus manifest.json): the page never
 reads reduced tables, so it renders in well under a second for 60 cells. Medians across repeats
@@ -465,13 +469,18 @@ def kpi_sentences(model: dict, k: dict) -> dict:
 # html
 # ======================================================================================
 
-def _tile(label: str, value: str, sub: str = "", cls: str = "") -> str:
-    return (f'<div class="tile {cls}"><div class="tl">{H.esc(label)}</div><div class="tv">{H.esc(value)}</div>'
-            + (f'<div class="ts">{sub}</div>' if sub else "") + "</div>")
-
-
 def _how(text: str) -> str:
-    return f'<details class="how"><summary>How to read this</summary><div>{text}</div></details>'
+    return f'<details class="how"><summary>?</summary><div>{text}</div></details>'
+
+
+def _sec(id_: str, eyebrow: str, title: str, lede: str, how: str) -> str:
+    return (f'<section id="{id_}"><div class="sec-head"><div class="sec-title"><div class="eyebrow">{eyebrow}</div>'
+            f'<h2>{title}</h2></div><div class="lede">{lede}</div>{_how(how)}</div>')
+
+
+def _fact(label: str, value: str, sub: str = "", cls: str = "") -> str:
+    return (f'<div class="fact {cls}"><div class="fl">{H.esc(label)}</div><div class="fv">{value}</div>'
+            + (f'<div class="fs">{sub}</div>' if sub else "") + "</div>")
 
 
 def overview_html(model: dict, cells) -> str:
@@ -480,27 +489,52 @@ def overview_html(model: dict, cells) -> str:
     plan = model.get("plan") or {}
     planned = plan.get("cells")
     n_rep = ov["repeats"]
-    status_bits = " · ".join(f"{k} {v}" for k, v in sorted(st.items())) or "none"
-    tiles = [
-        _tile("Repeats present", f"{n_rep}" + (f" of {planned}" if planned else ""),
-              H.esc(status_bits) + (f" · {max(0, planned - n_rep)} not run yet" if planned else "")),
-        _tile("OK and counted", f"{sum(1 for cb in model['combos'] for r in cb['repeats'] if r['included'])}",
-              "status OK, not excluded, metrics.json present"),
-        _tile("PTP locked", f"{ov['ptp_locked']} of {ov['with_metrics']}",
-              "repeats with metrics" + (f" · <b class='bad'>{ov['flags'].get('ptp_unlocked', 0)} NOT locked</b>"
-                                        if ov['flags'].get('ptp_unlocked') else ""),
-              "warn" if ov["flags"].get("ptp_unlocked") else ""),
-        _tile("Combinations", f"{len(model['combos'])}",
-              H.esc(" × ".join(f"{a} {len(model['values'].get(a, []))}" for a in model["axes"]) or "single combination")),
+    reps = [r for cb in model["combos"] for r in cb["repeats"]]
+    counted = sum(1 for r in reps if r["included"])
+    flagged = sum(1 for r in reps if set(r["flags"]) & SERIOUS_FLAGS)
+    status_bits = " · ".join(f"{v} {k}" for k, v in sorted(st.items(), key=lambda t: (t[0] != "OK", t[0]))) or "none"
+    if planned and planned > n_rep:
+        status_bits += f" · {planned - n_rep} not run yet"
+    flag_items = [f"{n} {H.esc(FLAG_TEXT.get(f, f))}" for f, n in sorted(ov["flags"].items()) if f in SERIOUS_FLAGS]
+    enc_all_nvenc = all("nvenc" in name.lower() or "nvidia" in name.lower()
+                        for e in ov["encoders"].values() for name in e) if ov["encoders"] else False
+    enc_sub = " · ".join(f"{H.esc(codec or '?')}: " + ", ".join(
+        f"{H.esc(name)} ×{n}" for name, n in sorted(e.items(), key=lambda t: -t[1]))
+        for codec, e in sorted(ov["encoders"].items())) or "–"
+    bands = {"a": Counter(), "b": Counter()}
+    for c in cells:
+        if c.kind == "control":
+            continue
+        for hh in ("a", "b"):
+            b = c.cfg(f"band.{hh}") or {}
+            if b:
+                bands[hh][f"{b.get('band', '?')} · ARFCN {b.get('arfcn', '?')} · PCI {b.get('pci', '?')}"] += 1
+            elif c.metrics is not None:
+                bands[hh]["not recorded"] += 1
+    band_a = bands["a"].most_common(1)[0][0] if bands["a"] else None
+    band_b = bands["b"].most_common(1)[0][0] if bands["b"] else None
+    same_band = band_a and band_a == band_b and len(bands["a"]) == 1 and len(bands["b"]) == 1
+    band_value = H.esc(band_a.split(" · ")[0]) if same_band else ("A ≠ B" if band_a and band_b else "–")
+    band_sub = (H.esc(band_a) + " · both hosts" if same_band else
+                " · ".join(f"Host {hh.upper()}: " + ", ".join(f"{H.esc(k)} ×{n}" for k, n in bands[hh].most_common())
+                           for hh in ("a", "b") if bands[hh]) or "not recorded")
+    facts = [
+        _fact("Repeats", f"{n_rep}" + (f"<small> of {planned}</small>" if planned else ""), H.esc(status_bits),
+              "" if st.get("OK", 0) == n_rep else "warn"),
+        _fact("Counted in medians", f"{counted}", "status OK, not excluded, with metrics"),
+        _fact("Flagged", f"{flagged}", " · ".join(flag_items) or "none", "warn" if flagged else "good"),
+        _fact("PTP locked", f"{ov['ptp_locked']}<small> of {ov['with_metrics']}</small>",
+              ("<b class='bad'>%d not locked</b>" % ov["flags"]["ptp_unlocked"]) if ov["flags"].get("ptp_unlocked")
+              else "repeats with metrics", "warn" if ov["flags"].get("ptp_unlocked") else ""),
+        _fact("Encoder", "NVENC" if enc_all_nvenc else ("mixed" if ov["encoders"] else "–"), enc_sub,
+              "" if enc_all_nvenc else "warn"),
+        _fact("Serving band", band_value, band_sub, "" if same_band else "warn"),
     ]
-    flag_items = [f"{H.esc(FLAG_TEXT.get(f, f))} {n}" for f, n in sorted(ov["flags"].items()) if f in SERIOUS_FLAGS]
-    if flag_items:
-        tiles.append(_tile("Flagged repeats", str(sum(1 for cb in model["combos"] for r in cb["repeats"]
-                                                        if set(r["flags"]) & SERIOUS_FLAGS)),
-                           " · ".join(flag_items), "warn"))
-    swept = "".join(
-        f"<tr><td>{H.esc(a)}</td><td>{H.esc(', '.join(_var_fmt(a, v) for v in model['values'].get(a, [])))}</td></tr>"
-        for a in model["axes"]) or "<tr><td colspan=2>no axes: a single combination</td></tr>"
+    swept = []
+    for a in model["axes"]:
+        chips = "".join(f'<span class="chip{" codec" if a == "codec" else ""}" data-codec="{H.esc(str(v))}">'
+                        f"{H.esc(_var_fmt(a, v))}</span>" for v in model["values"].get(a, []))
+        swept.append(f'<span class="ax"><span class="axn">{H.esc(a)}</span>{chips}</span>')
     const, derived = [], []
     fixed: dict[str, set] = {}
     for c in cells:
@@ -514,30 +548,10 @@ def overview_html(model: dict, cells) -> str:
         vs = [json.loads(x) for x in fixed[k]]
         if len(vs) == 1:
             v = vs[0]
-            const.append(f"{k}={Path(str(v)).name if k == 'clip' else v}")
+            const.append(f"{k} = {Path(str(v)).name if k == 'clip' else v}")
         else:
             nums = [v for v in vs if isinstance(v, (int, float)) and not isinstance(v, bool)]
             derived.append(f"{k} {min(nums):g}–{max(nums):g}" if len(nums) == len(vs) else f"{k} ({len(vs)} values)")
-    enc_rows = []
-    for codec, e in sorted(ov["encoders"].items()):
-        parts = []
-        for name, n in sorted(e.items(), key=lambda t: -t[1]):
-            nv = "nvenc" in name.lower() or "nvidia" in name.lower()
-            parts.append(f"<span class='{'' if nv else 'bad'}'>{H.esc(name)} ×{n}{'' if nv else ' (not NVENC)'}</span>")
-        enc_rows.append(f"<tr><td>{H.esc(codec or '?')}</td><td>{', '.join(parts)}</td></tr>")
-    bands = {"a": Counter(), "b": Counter()}
-    for c in cells:
-        if c.kind == "control":
-            continue
-        for h in ("a", "b"):
-            b = c.cfg(f"band.{h}") or {}
-            if b:
-                bands[h][f"{b.get('band', '?')} · ARFCN {b.get('arfcn', '?')} · PCI {b.get('pci', '?')}"] += 1
-            elif c.metrics is not None:
-                bands[h]["not recorded"] += 1
-    band_rows = "".join(
-        f"<tr><td>Host {h.upper()}</td><td>{', '.join(f'{H.esc(k)} ×{n}' for k, n in bands[h].most_common()) or '–'}</td></tr>"
-        for h in ("a", "b"))
     lines = []
     for ln in ov["kpi_lines"]:
         items = "".join(f"<li>{H.esc(t)}</li>" for t in ln["text"])
@@ -552,28 +566,31 @@ def overview_html(model: dict, cells) -> str:
             lab = (f'<a href="{H.esc(e["report_pdf"])}">{H.esc(e["name"])}</a>' if e["report_pdf"] else H.esc(e["name"]))
             rows.append(f"<tr><td>{lab}</td><td>{H.esc(e['status'])}</td><td class='num'>{H.esc(S.fmt(p99))}</td>"
                         f"<td class='num'>{H.esc(S.fmt(lost))}</td></tr>")
-        ctl = ("<h3>Control cells</h3><table class='t'><thead><tr><th>cell</th><th>status</th>"
+        ctl = ("<h3>Control cells</h3><div class='tbl'><table class='t'><thead><tr><th>cell</th><th>status</th>"
                "<th class='num'>network p99 ms</th><th class='num'>packets lost</th></tr></thead><tbody>"
-               + "".join(rows) + "</tbody></table>")
-    return f"""
-<section id="overview"><h2>Overview</h2>
-{_how("Tiles count the repeat directories found under the grid (layout v2: &lt;combo&gt;/r&lt;n&gt;/). "
-      "A repeat is <b>counted</b> in every median on this page only when its status is OK, it is not excluded and it "
-      "has metrics.json; the toolbar's <i>count INCOMPLETE repeats</i> adds the others to the medians. PTP, band and "
-      "encoder are read from each repeat's manifest and metrics. The KPI lines below are <b>computed</b> from the data "
-      "at p99 (or the value, for scalar KPIs): best and worst combination, the change from the lowest to the highest "
-      "bpp along each codec × fps line, and paired differences for two-valued axes over matched settings. They state "
-      "numbers, not causes.")}
-<div class="tiles">{''.join(tiles)}</div>
-<div class="cols">
-  <div><h3>What was swept</h3><table class="t kv"><tbody>{swept}</tbody></table>
-  <p class="note">fixed: {H.esc(', '.join(const) or '–')}</p>
-  {f'<p class="note">follow from the axes: {H.esc(", ".join(derived))}</p>' if derived else ''}</div>
-  <div><h3>Encoder per codec</h3><table class="t kv"><tbody>{''.join(enc_rows) or '<tr><td>–</td></tr>'}</tbody></table>
-  <h3>Serving band</h3><table class="t kv"><tbody>{band_rows}</tbody></table></div>
-</div>
-<h3>KPIs at p99 <span class="badge">computed from metrics.json</span></h3>
-<div class="klines">{''.join(lines)}</div>
+               + "".join(rows) + "</tbody></table></div>")
+    return _sec(
+        "overview", "Summary", "What won, and what each variable did",
+        "Medians across the counted repeats of every combination, at the statistic chosen in the bar above.",
+        "A repeat is <b>counted</b> in every median on this page only when its status is OK, it is not excluded and "
+        "it has metrics.json; <i>count INCOMPLETE</i> in the bar adds the others. The <b>ranking</b> orders the "
+        "combinations best first for the chosen KPI (a shorter bar is better: the bar is the value, or the shortfall "
+        "from 100 % for the delivered-share KPIs). The <b>effects</b> table is computed from the same medians: the "
+        "best and worst combination, the change from the lowest to the highest bpp along each codec × fps line, and "
+        "for a two-valued variable the median paired difference over matched settings of every other variable, with "
+        "how many of those pairs it won. Numbers, not causes. QP is on each codec's own scale and is never compared "
+        "across codecs.") + f"""
+<div class="facts">{''.join(facts)}</div>
+<div class="swept">{''.join(swept)}</div>
+<p class="note">held constant: {H.esc(' · '.join(const) or '–')}
+{('<br>follow from the axes: ' + H.esc(', '.join(derived))) if derived else ''}</p>
+<div class="sub-head"><h3>Ranking</h3><span class="note" id="rk-note"></span></div>
+<div class="tabs" id="rk-tabs" role="tablist" aria-label="ranking KPI"></div>
+<div id="rk" class="rank-grid"></div>
+<div class="sub-head"><h3>Effects of each variable</h3><span class="badge">computed from metrics.json</span></div>
+<div id="effects" class="tbl"></div>
+<details class="more"><summary>Plain-language summary at p99, for a write-up</summary>
+<div class="klines">{''.join(lines)}</div></details>
 {ctl}
 </section>"""
 
@@ -581,151 +598,217 @@ def overview_html(model: dict, cells) -> str:
 def build(grid_dir, cells, axes, plan: dict | None = None) -> str:
     model = build_model(Path(grid_dir), cells, axes, plan)
     n_rep = model["overview"]["repeats"]
-    sub = (f"{n_rep} repeat{'s' if n_rep != 1 else ''} in {len(model['combos'])} combination"
-           f"{'s' if len(model['combos']) != 1 else ''} · axes: {', '.join(axes) or 'none'} · generated {model['generated']}")
+    def axis_text(a):
+        vs = model["values"].get(a, [])
+        nums = [v for v in vs if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if len(vs) > 3 and len(nums) == len(vs):
+            return f"{a} {min(nums):g}–{max(nums):g} ({len(vs)} values)"
+        return f"{a} {', '.join(str(v) for v in vs)}"
+    swept = " × ".join(axis_text(a) for a in axes)
+    sub = (f"{swept or 'a single combination'} · {n_rep} repeat{'s' if n_rep != 1 else ''} in "
+           f"{len(model['combos'])} combination{'s' if len(model['combos']) != 1 else ''} · generated {model['generated']}")
     body = TOOLBAR + overview_html(model, cells) + SECTIONS + '<div id="tip" role="tooltip"></div>'
-    return H.page(f"Grid {model['grid_id']} — analysis", sub, body, extra_css=CSS,
+    return H.page(f"{model['grid_id']} · analysis", sub, body, extra_css=CSS,
                   script=H.json_script(model, "analysis-data") + f"<script>{JS}</script>")
 
 
 TOOLBAR = """
 <nav class="bar" aria-label="sections and controls">
-  <div class="links"><a href="#overview">Overview</a><a href="#curves">KPI curves</a><a href="#radar">Radar</a>
-    <a href="#matrix">Matrix</a><a href="#repeats">Repeats</a><a href="comparison.html">comparison.html</a></div>
+  <div class="links"><a href="#overview">Summary</a><a href="#curves">Trends</a><a href="#radar">Radar</a>
+    <a href="#matrix">Matrix</a><a href="#repeats">Repeats</a>
+    <span class="dl"><a href="comparison.pdf">PDF</a><a href="metrics.csv">CSV</a><a href="comparison.html">explorer</a></span></div>
   <div class="ctl">
-    <label>statistic <select id="stat"></select></label>
-    <label class="chk"><input type="checkbox" id="incl"> count INCOMPLETE repeats</label>
-    <label>theme <select id="theme"><option value="">auto</option><option value="light">light</option>
+    <span class="lbl">statistic</span><span class="seg" id="stat" role="group" aria-label="statistic"></span>
+    <label class="chk"><input type="checkbox" id="incl"> count INCOMPLETE</label>
+    <label class="chk"><input type="checkbox" id="clip"> clip outliers</label>
+    <label class="lbl">theme <select id="theme"><option value="">auto</option><option value="light">light</option>
       <option value="dark">dark</option></select></label>
   </div>
 </nav>
 """
 
-SECTIONS = """
-<section id="curves"><h2>KPI curves <span id="xname"></span></h2>
-<details class="how"><summary>How to read this</summary><div>
-One chart per KPI of record. The x axis is the swept bpp (other variables fixed per line); the y axis starts at
-zero except for the "% delivered" and "% of target" KPIs, which zoom on the shortfall from 100%. Each <b>line</b> is one
-codec × fps combination and joins the <b>median across that combination's counted repeats</b> at each bpp (the
-larger marker); every <b>small dot</b> is one repeat, hollow when it is not counted (INCOMPLETE, SKIPPED or excluded).
-Hue is the codec, marker shape and dash the frame rate. The <b>statistic</b> selector in the bar above chooses
-which of each repeat's per-frame summary is plotted (mean, p50, p95, p99, max); scalar KPIs (jitter sd, spread,
-fps, packets lost, delivered %) have one value per repeat and ignore it. QP is drawn per codec, never on one axis:
-H.264/H.265 QP is 0–51 and AV1's q-index 0–255. Hover a chart for every line's value at the nearest bpp; click
-near a dot to open that repeat's report.pdf. Lower is better unless the subtitle says otherwise.
-</div></details>
+SECTIONS = _sec(
+    "curves", "Trends", "How each KPI moves with bpp", '<span id="xname"></span>',
+    "One chart per KPI. The x axis is the swept bpp (other variables fixed per line); the y axis starts at zero "
+    "except for the delivered-share KPIs, which zoom on the shortfall from 100 %. Each <b>line</b> joins the median "
+    "across the counted repeats of one codec × fps combination (the larger marker); every <b>small dot</b> is one "
+    "repeat, hollow when it is not counted. Hue is the codec, marker shape and dash the frame rate. With <i>clip "
+    "outliers</i> on, the axis fits the medians and a dot beyond it is drawn at the edge as a small triangle with "
+    "its value, so one bad repeat cannot flatten every line; switch it off to see the full range. The "
+    "<b>statistic</b> in the bar chooses which per-frame summary is plotted; scalar KPIs (jitter sd, spread, "
+    "delivered %, packets lost) have one value per repeat and ignore it. QP is drawn per codec, never on one axis. "
+    "Hover for every line's value at the nearest bpp; click near a dot to open that repeat's report.pdf.") + """
 <div id="legend" class="legend"></div>
 <div id="charts" class="charts"></div>
-<details class="more"><summary>More KPIs (frame size, bitrate, tails, control round trip, codec timing)</summary>
+<details class="more"><summary>More KPIs (frame size, bitrate, spread, tails, packets lost, control round trip, codec timing)</summary>
 <div id="charts-more" class="charts"></div></details>
 <details class="more"><summary>Explore any metric in metrics.json</summary>
 <div class="ctl-row"><label>metric <select id="xp-path"></select></label>
 <label>statistic <select id="xp-stat"></select></label></div>
 <div id="charts-explore" class="charts"></div></details>
 </section>
-
-<section id="radar"><h2>Radar: one polygon per bpp</h2>
-<details class="how"><summary>How to read this</summary><div>
-Pick one codec × fps line. Each polygon is one bpp (darker = higher bpp), its vertices the median across counted
-repeats of seven lower-is-better KPIs. Every spoke is scaled on its own to the values shown: in <b>range</b>
-scaling the worst polygon on that spoke touches the outer ring and the best sits at the centre ring, which
-exaggerates small differences; <b>ratio</b> scaling puts 0 at the centre and the worst value at the ring, so a
-spoke's length is proportional to its value. The table under the radar has the numbers. A smaller polygon is
-better; a missing KPI leaves the outline open at that spoke.
-</div></details>
-<div class="ctl-row"><label>line <select id="radar-series"></select></label>
-<label>scaling <select id="radar-scale"><option value="range">range: best at centre, worst at edge</option>
+""" + _sec(
+    "radar", "Radar", "Seven KPIs at once, one polygon per bpp", "Pick one codec × fps line. A smaller polygon is better.",
+    "Each polygon is one bpp (darker = higher), its vertices the median across counted repeats of seven "
+    "lower-is-better KPIs. Every spoke is scaled on its own to the values shown: in <b>range</b> scaling the worst "
+    "polygon on that spoke touches the outer ring and the best sits at the centre ring, which exaggerates small "
+    "differences; <b>ratio</b> scaling puts 0 at the centre and the worst value at the ring, so a spoke's length "
+    "is proportional to its value. The table under the radar has the numbers. A missing KPI leaves the outline "
+    "open at that spoke.") + """
+<div class="ctl-row"><span class="lbl">line</span><span class="seg" id="radar-series" role="group" aria-label="radar line"></span>
+<label class="lbl">scaling <select id="radar-scale"><option value="range">range: best at centre, worst at edge</option>
 <option value="ratio">ratio: 0 at centre, worst at edge</option></select></label></div>
-<div class="radar-wrap"><div id="radar-svg"></div><div id="radar-legend" class="legend col"></div></div>
-<div id="radar-table"></div>
+<div class="radar-wrap"><div id="radar-svg"></div><div class="radar-side"><div id="radar-legend" class="legend col"></div>
+<div id="radar-table" class="tbl"></div></div></div>
 </section>
-
-<section id="matrix"><h2>Matrix: every combination × KPI</h2>
-<details class="how"><summary>How to read this</summary><div>
-One row per combination; each cell is the median across the counted repeats of the selected statistic (the value,
-for scalar KPIs). Tint marks the worse end within each column (darker = worse; QP within each codec; frame size
-and bitrate are context and untinted), at full strength only where the column's worst is at least 20% off its best
-(for delivered % and % of target: 20% more shortfall from 100); a column that barely varies stays pale. Click a header to sort. The combination links to its summary.pdf (all its
-repeats side by side); r1, r2, r3 link to each repeat's report.pdf; a warning sign marks a repeat with a flag
-(hover it for the reason).
-</div></details>
+""" + _sec(
+    "matrix", "Matrix", "Every combination × every KPI", "Click a column header to sort; tint marks the worse end of each column.",
+    "One row per combination; each cell is the median across the counted repeats of the selected statistic (the "
+    "value, for scalar KPIs). Tint marks the worse end within each column (darker = worse; QP within each codec; "
+    "frame size and bitrate are context and untinted), at full strength only where the column's worst is at least "
+    "20 % off its best (for the delivered-share KPIs: 20 % more shortfall from 100), so a column that barely varies "
+    "stays pale. The combination links to its summary.pdf (all its repeats side by side); r1, r2, r3 link to each "
+    "repeat's report.pdf; ⚠ marks a repeat with a flag (hover it for the reason).") + """
 <div class="ctl-row"><label class="chk"><input type="checkbox" id="mx-more"> more columns</label>
 <span class="scale-key" id="mx-key"></span></div>
-<div id="mx" class="scroll"></div>
+<div id="mx" class="tbl"></div>
 </section>
-
-<section id="repeats"><h2>Every repeat</h2>
-<details class="how"><summary>How to read this</summary><div>
-Each repeat directory found, with its status and flags: <b>not NVENC</b> (the encoder that ran is not NVIDIA's),
-<b>PTP not locked</b> (cross-host network numbers are not trustworthy), <b>codec fallback</b> (the negotiated codec
-differs from the requested one), <b>INCOMPLETE</b>/<b>SKIPPED</b> (not counted in medians). A combination whose
-repeat directory does not exist yet is simply not listed.
-</div></details>
-<div id="rep-table" class="scroll"></div>
+""" + _sec(
+    "repeats", "Repeats", "Every repeat, with its flags", "One row per repeat directory found under the grid.",
+    "Flags: <b>not NVENC</b> (the encoder that ran is not NVIDIA's), <b>PTP not locked</b> (cross-host network "
+    "numbers are not trustworthy), <b>codec fallback</b> (the negotiated codec differs from the requested one), "
+    "<b>INCOMPLETE</b>/<b>SKIPPED</b> (not counted in medians). A planned repeat whose directory does not exist "
+    "yet is not listed. Hover a flag for the recorded reason.") + """
+<div class="ctl-row"><label class="lbl">show <select id="rep-filter"><option value="all">all repeats</option>
+<option value="flagged">flagged only</option><option value="excluded">not counted only</option></select></label></div>
+<div id="rep-table" class="tbl"></div>
 </section>
 """
 
 CSS = """
-nav.bar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
-  justify-content: space-between; background: var(--surface); border-bottom: 1px solid var(--grid); padding: 8px 16px; }
-nav.bar .links a { margin-right: 12px; text-decoration: none; font-weight: 600; font-size: 13px; }
+main { max-width: 1280px; padding: 0 16px 56px; }
+main > section { background: transparent; border: 0; border-radius: 0; padding: 0; margin: 0 0 48px; overflow: visible;
+  scroll-margin-top: 60px; }
+.sec-head { display: flex; align-items: flex-end; gap: 10px 24px; flex-wrap: wrap; border-bottom: 1px solid var(--base);
+  padding: 0 0 10px; margin: 0 0 16px; }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h2 { font-size: 19px; font-weight: 650; margin: 2px 0 0; letter-spacing: -.01em; text-wrap: balance; }
+.sec-head .lede { color: var(--ink2); font-size: 12.5px; flex: 1 1 260px; max-width: 640px; padding-bottom: 2px; }
+h3 { font-size: 13px; font-weight: 650; margin: 0; color: var(--ink); }
+.sub-head { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 8px; }
+details.how { margin-left: auto; position: relative; font-size: 12.5px; color: var(--ink2); }
+details.how summary { cursor: pointer; list-style: none; width: 22px; height: 22px; border: 1px solid var(--base);
+  border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700;
+  color: var(--ink2); background: var(--surface); }
+details.how summary::-webkit-details-marker { display: none; }
+details.how[open] summary { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+details.how > div { position: absolute; right: 0; top: 28px; z-index: 7; width: min(600px, 88vw); background: var(--surface);
+  border: 1px solid var(--base); border-radius: 8px; padding: 12px 14px; box-shadow: 0 8px 28px rgba(0,0,0,.16); line-height: 1.5; }
+details.more { margin-top: 16px; font-size: 13px; }
+details.more summary { cursor: pointer; font-weight: 600; color: var(--ink2); }
+details.more[open] summary { margin-bottom: 10px; }
+nav.bar { position: sticky; top: 0; z-index: 6; background: var(--surface); border-bottom: 1px solid var(--grid);
+  margin: 0 -16px 28px; padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+nav.bar .links { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+nav.bar .links a { text-decoration: none; font-weight: 600; font-size: 13px; color: var(--ink2); }
+nav.bar .links a:hover { color: var(--ink); }
+nav.bar .dl { display: inline-flex; gap: 10px; margin-left: 8px; padding-left: 14px; border-left: 1px solid var(--grid); }
+nav.bar .dl a { font-weight: 500; color: var(--s1); }
 nav.bar .ctl, .ctl-row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; font-size: 12px; color: var(--ink2); }
-.ctl-row { margin: 8px 0 12px; }
-select { font: inherit; padding: 3px 6px; background: var(--surface); color: var(--ink); border: 1px solid var(--base);
-  border-radius: 4px; max-width: 320px; }
-label.chk { display: inline-flex; gap: 4px; align-items: center; }
-section { scroll-margin-top: 56px; }
-h2 .sub, #xname { color: var(--ink2); font-weight: 400; font-size: 13px; }
-details.how { margin: 0 0 12px; font-size: 12.5px; color: var(--ink2); }
-details.how summary { cursor: pointer; color: var(--s1); font-weight: 600; }
-details.how > div { margin-top: 6px; max-width: 900px; }
-details.more { margin-top: 16px; }
-details.more summary { cursor: pointer; font-weight: 600; }
-.badge { font-size: 11px; font-weight: 600; color: var(--ink2); border: 1px solid var(--base); border-radius: 10px;
-  padding: 1px 8px; vertical-align: middle; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin: 8px 0 12px; }
-.tile { border: 1px solid var(--grid); border-radius: 6px; padding: 10px 12px; background: var(--page); }
-.tile.warn { border-left: 4px solid var(--warn); }
-.tile .tl { font-size: 12px; color: var(--ink2); }
-.tile .tv { font-size: 24px; font-weight: 600; margin: 2px 0; }
-.tile .ts { font-size: 11.5px; color: var(--ink2); }
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px 24px; }
-.klines { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 8px 16px; }
-.kline { border-left: 3px solid var(--base); padding: 2px 0 2px 10px; }
-.kline.empty { opacity: .7; }
-.kline .kh { font-weight: 600; font-size: 13px; }
-.kline ul { margin: 2px 0 0; padding-left: 18px; font-size: 12.5px; }
-.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--ink2); margin: 4px 0 10px; }
-.legend.col { flex-direction: column; }
+nav.bar .ctl { margin-left: auto; }
+.ctl-row { margin: 0 0 12px; }
+.lbl { font-size: 12px; color: var(--ink2); }
+select { font: inherit; font-size: 12px; padding: 3px 6px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--base); border-radius: 5px; max-width: 320px; }
+label.chk { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.seg { display: inline-flex; border: 1px solid var(--base); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.seg button { font: inherit; font-size: 12px; padding: 4px 10px; border: 0; background: transparent; color: var(--ink2);
+  cursor: pointer; font-variant-numeric: tabular-nums; }
+.seg button + button { border-left: 1px solid var(--grid); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.seg button:focus-visible, .tabs button:focus-visible { outline: 2px solid var(--s1); outline-offset: -2px; }
+.badge { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--grid); border-radius: 10px; padding: 1px 8px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 20px; margin: 0 0 16px; }
+.fact { border-left: 3px solid var(--grid); padding: 2px 0 2px 10px; min-width: 0; }
+.fact.warn { border-left-color: var(--warn); }
+.fact.good { border-left-color: var(--good); }
+.fact .fl { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.fact .fv { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin: 1px 0; line-height: 1.2; }
+.fact .fv small { font-size: 13px; font-weight: 500; color: var(--ink2); }
+.fact .fs { font-size: 11.5px; color: var(--ink2); overflow-wrap: anywhere; }
+.swept { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 12.5px; margin: 0 0 4px; }
+.swept .ax { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.swept .axn { color: var(--muted); font-weight: 600; margin-right: 2px; }
+.chip { display: inline-block; border: 1px solid var(--base); border-radius: 999px; padding: 0 8px; font-size: 11.5px;
+  line-height: 18px; color: var(--ink); background: var(--surface); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.chip.codec { font-weight: 650; border-color: currentColor; }
+.chips { display: inline-flex; gap: 4px; align-items: center; flex-wrap: nowrap; white-space: nowrap; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.tabs button { font: inherit; font-size: 12px; border: 1px solid var(--base); background: var(--surface); color: var(--ink2);
+  border-radius: 999px; padding: 3px 11px; cursor: pointer; }
+.tabs button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.rank-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 8px 32px; }
+.rank-grid > div { min-width: 0; overflow-x: auto; }
+.rank-grid h4 { margin: 0 0 4px; font-size: 12.5px; color: var(--ink2); font-weight: 600; }
+table.rank { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+table.rank td { padding: 5px 8px; border-bottom: 1px solid var(--grid); vertical-align: middle; white-space: nowrap; }
+table.rank td.n { color: var(--muted); width: 1%; text-align: right; }
+table.rank td.c { width: 1%; }
+table.rank td.b { width: 32%; min-width: 120px; }
+.rbar { height: 9px; background: var(--grid); border-radius: 2px; overflow: hidden; }
+.rbar i { display: block; height: 100%; border-radius: 2px; background: var(--s1); }
+table.rank td.v { text-align: right; font-weight: 650; width: 1%; padding-left: 12px; }
+table.rank td.r { color: var(--muted); font-size: 11.5px; }
+table.rank td.r a { color: var(--ink2); text-decoration: none; border-bottom: 1px dotted var(--base); }
+table.rank td.r a:hover { color: var(--s1); border-bottom-color: var(--s1); }
+table.rank .nc { text-decoration: line-through; color: var(--muted); }
+table.rank tr.best td.v { color: var(--good); }
+table.rank td.n .pdf { color: var(--s1); text-decoration: none; font-size: 11px; }
+table.fx { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+table.fx th { text-align: left; font-weight: 600; color: var(--ink2); font-size: 11.5px; padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--base); vertical-align: bottom; white-space: nowrap; }
+table.fx th small, table.fx td.k small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+table.fx td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--grid); vertical-align: top; white-space: nowrap; }
+table.fx td.k { font-weight: 650; }
+table.fx .v { font-weight: 650; }
+table.fx .sub { color: var(--ink2); font-size: 11.5px; display: block; margin-top: 2px; }
+.wins { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink2); margin-top: 3px; }
+.wins i { display: inline-block; width: 64px; height: 6px; border-radius: 3px; background: var(--grid); position: relative; overflow: hidden; }
+.wins i b { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ink2); }
+.tbl { overflow-x: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--ink2); margin: 0 0 12px; }
+.legend.col { flex-direction: column; gap: 4px; }
 .legend .item { display: inline-flex; align-items: center; gap: 6px; }
-.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; }
-.card { border: 1px solid var(--grid); border-radius: 6px; padding: 8px 10px 4px; background: var(--surface); min-width: 0; }
-.card h4 { margin: 0; font-size: 13px; }
-.card .cs { font-size: 11.5px; color: var(--ink2); margin: 1px 0 4px; }
-.card .facets { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 4px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+.card { border: 1px solid var(--grid); border-radius: 8px; padding: 10px 12px 6px; background: var(--surface); min-width: 0; }
+.card h4 { margin: 0; font-size: 13px; font-weight: 650; }
+.card .cs { font-size: 11.5px; color: var(--ink2); margin: 1px 0 6px; }
+.card .facets { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px; }
 .card .ft { font-size: 11.5px; color: var(--ink2); text-align: center; margin-top: 2px; }
 .card.wide { grid-column: span 2; }
-@media (max-width: 820px) { .card.wide { grid-column: auto; } }
+@media (max-width: 800px) { .card.wide { grid-column: auto; } }
+.card .clipnote { font-size: 11px; color: var(--muted); margin: 2px 0 0; }
 svg.ch { width: 100%; height: auto; display: block; overflow: visible; touch-action: none; }
 svg.ch text { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 svg.ch text.lab { fill: var(--ink2); font-size: 10px; }
+svg.ch text.clipv { fill: var(--ink2); font-size: 9px; }
 svg.ch .gl { stroke: var(--grid); stroke-width: 1; }
 svg.ch .ax { stroke: var(--base); stroke-width: 1; }
 svg.ch .xh { stroke: var(--ink2); stroke-width: 1; opacity: .6; }
 svg.ch .nodata { fill: var(--muted); font-size: 12px; }
 #tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--base);
   border-radius: 6px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.18); display: none;
-  font-variant-numeric: tabular-nums; max-width: 420px; z-index: 10; }
+  font-variant-numeric: tabular-nums; max-width: 440px; z-index: 10; }
 #tip .th { font-weight: 600; margin-bottom: 4px; color: var(--ink2); }
 #tip .tr { display: grid; grid-template-columns: 26px 1fr auto; gap: 2px 6px; align-items: center; }
 #tip .tv { font-weight: 700; text-align: right; }
 #tip .tn { grid-column: 2 / 4; color: var(--ink2); font-size: 11px; margin-bottom: 3px; }
-.radar-wrap { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
-#radar-svg { flex: 1 1 420px; max-width: 560px; }
+.radar-wrap { display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: flex-start; }
+#radar-svg { flex: 1 1 380px; max-width: 540px; }
+.radar-side { flex: 1 1 300px; min-width: 0; }
 #radar-svg svg text { fill: var(--ink2); font-size: 11px; }
 #radar-svg svg .ring { fill: none; stroke: var(--grid); }
 #radar-svg svg .spoke { stroke: var(--base); }
-.scroll { overflow-x: auto; }
 table.mx { border-collapse: separate; border-spacing: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
 table.mx th, table.mx td { padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 table.mx th { position: sticky; top: 0; background: var(--surface); color: var(--ink2); font-weight: 600;
@@ -737,12 +820,25 @@ table.mx th[aria-sort="ascending"]::after { content: " ▲"; font-size: 9px; }
 table.mx th[aria-sort="descending"]::after { content: " ▼"; font-size: 9px; }
 table.mx td.v { text-align: right; }
 table.mx td.v.hot { color: #fff; }
+table.mx tr.grp td { background: var(--panel); color: var(--ink2); font-weight: 600; font-size: 11px; letter-spacing: .04em;
+  text-transform: uppercase; padding: 3px 8px; }
 .reps a, .reps span { margin-right: 6px; }
 .flag { color: var(--crit); font-weight: 700; cursor: help; }
 .scale-key { display: inline-flex; align-items: center; gap: 6px; }
 .scale-key i { display: inline-block; width: 90px; height: 10px; border-radius: 2px;
   background: linear-gradient(90deg, rgba(42,120,214,0), rgba(42,120,214,.62)); }
+.klines { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 8px 16px; }
+.kline { border-left: 3px solid var(--grid); padding: 2px 0 2px 10px; }
+.kline.empty { opacity: .7; }
+.kline .kh { font-weight: 600; font-size: 12.5px; }
+.kline ul { margin: 2px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink2); }
 .muted { color: var(--muted); }
+@media (max-width: 720px) {
+  .rank-grid { grid-template-columns: 1fr; }
+  nav.bar .ctl { margin-left: 0; }
+  details.how > div { right: auto; left: 0; }
+  .klines { grid-template-columns: 1fr; }
+}
 """
 
 JS = r"""
@@ -800,6 +896,13 @@ function fval(v, unit) {
   if (unit === 'QP') return fnum(v);
   return fnum(v) + (unit ? ' ' + unit : '');
 }
+function fdiff(d, unit) {
+  if (!isNum(d)) return '–';
+  const sign = d >= 0 ? '+' : '−', a = Math.abs(d);
+  if (unit === 'share') return sign + (100 * a).toFixed(2) + ' pp';
+  if (unit === '%') return sign + a.toFixed(2) + ' pp';
+  return sign + fnum(a) + (unit && unit !== 'QP' ? ' ' + unit : '');
+}
 function stepDecimals(step) {
   if (!(step > 0)) return 0;
   let d = 0; while (d < 6 && Math.abs(Math.round(step * Math.pow(10, d)) - step * Math.pow(10, d)) > 1e-6) d++;
@@ -818,7 +921,7 @@ function varFmt(a, v) {
   return a + ' ' + v;
 }
 const KPI = {}; D.kpis.forEach(k => { KPI[k.id] = k; });
-const ST = {stat: prefs.stat || 'p99', incl: !!prefs.incl};
+const ST = {stat: prefs.stat || 'p99', incl: !!prefs.incl, clip: prefs.clip !== false};
 
 function kpiPath(k, codec) { return (k.id === 'qp') ? (D.qp_path[codec] || k.path) : k.path; }
 function repVal(rep, k, stat, codec) {
@@ -829,6 +932,8 @@ function counted(rep) { return rep.has && (ST.incl || rep.included); }
 function comboVal(cb, k, stat) { return median(cb.repeats.filter(counted).map(r => repVal(r, k, stat, cb.codec))); }
 function statOf(k) { return k.kind === 'summary' ? ST.stat : 'value'; }
 function statLabel(k, stat) { return k.kind === 'summary' ? (stat || ST.stat) : 'value'; }
+const codecs = [...new Set(D.combos.map(cb => cb.codec))];
+const better = (k) => k.better === 'higher' ? 'higher is better' : k.better === 'lower' ? 'lower is better' : 'context, not scored';
 
 // ---- series: every swept axis except x; hue = first series axis, shape/dash = second
 const X = D.x;
@@ -853,6 +958,11 @@ const series = [];
   });
 })();
 const DASH = ['', '6 4', '2 3', '8 3 2 3'];
+function seriesOf(cb) { return series.find(sr => sr.key === serKey(cb.vars)); }
+function codecColor(codec) {
+  if (D.codec_axis) { const i = (D.values[D.codec_axis] || []).indexOf(codec); if (i >= 0 && i < 8 && SA[0] === D.codec_axis) return `var(--s${i + 1})`; }
+  const sr = series.find(q => q.combos.some(cb => cb.codec === codec)); return sr ? sr.color : 'var(--s1)';
+}
 function marker(parent, shape, x, y, r, attrs) {
   if (shape === 1) return s('rect', Object.assign({x: x - r, y: y - r, width: 2 * r, height: 2 * r, rx: 1}, attrs), parent);
   if (shape === 2) return s('path', Object.assign({d: `M${x},${y - r * 1.2}L${x + r * 1.1},${y + r * 0.8}L${x - r * 1.1},${y + r * 0.8}Z`}, attrs), parent);
@@ -866,6 +976,19 @@ function lineKey(sr, w) {
   marker(sv, sr.shape, (w || 26) / 2, 6, 3.5, {fill: sr.color, stroke: 'var(--surface)', 'stroke-width': 1});
   return sv;
 }
+// a combination as chips: the codec coloured by its hue, the other axes plain
+function chips(cb) {
+  const w = h('span', {class: 'chips'});
+  D.axes.forEach(a => {
+    const v = cb.vars[a]; if (v == null) return;
+    const c = h('span', {class: 'chip' + (a === D.codec_axis ? ' codec' : ''), text: varFmt(a, v)});
+    if (a === D.codec_axis) c.style.color = codecColor(String(v));
+    w.append(c);
+  });
+  if (!w.childElementCount) w.append(h('span', {class: 'chip', text: cb.label}));
+  return w;
+}
+document.querySelectorAll('.swept .chip.codec').forEach(c => { c.style.color = codecColor(c.dataset.codec); });
 
 // ---- tooltip
 const tip = $('tip');
@@ -902,11 +1025,20 @@ function yDomain(vals, k) {
   if (cap100) t = t.filter(x => x <= 100 + 1e-9);
   return t;
 }
+// with "clip outliers": the axis fits the medians (plus 60 % of their span, at least half their
+// size) and any dot beyond it is drawn at the edge, so one bad repeat cannot flatten every line
+function clipWindow(meds, k) {
+  if (!ST.clip || !meds.length) return null;
+  const lo = Math.min(...meds), hi = Math.max(...meds);
+  const pctOfTarget = k.unit === '%' && k.better === 'higher';
+  const room = 0.6 * Math.max(hi - lo, pctOfTarget ? (100 - lo) : Math.abs(hi) * 0.5, 1e-9);
+  return {hi: pctOfTarget ? Infinity : hi + room, lo: pctOfTarget ? lo - room : -Infinity};
+}
 
 // ---- one chart: KPI statistic against x, a line per series, a dot per repeat
 function chart(k, stat, combos, opts) {
   opts = opts || {};
-  const W = 420, H = 230, m = {l: 46, r: 12, t: 10, b: 30};
+  const W = 420, H = 230, m = {l: 46, r: 12, t: 14, b: 30};
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
   const sv = document.createElementNS(SVGNS, 'svg');
   sv.setAttribute('viewBox', `0 0 ${W} ${H}`); sv.setAttribute('class', 'ch'); sv.setAttribute('role', 'img');
@@ -922,14 +1054,14 @@ function chart(k, stat, combos, opts) {
     const i = xs.indexOf(v); return xs.length === 1 ? m.l + pw / 2 : m.l + 14 + (pw - 28) * i / (xs.length - 1);
   };
   const pts = [];      // {sr, x, med, reps:[{rep, v}]}
-  const all = [];
+  const all = [], meds = [];
   sers.forEach(sr => {
     xs.forEach(xv => {
       const cb = sr.combos.find(c => combos.includes(c) && (X ? c.vars[X] === xv : c.name === xv));
       if (!cb) return;
       const reps = cb.repeats.filter(r => r.has).map(r => ({rep: r, cb, v: repVal(r, k, stat, cb.codec)})).filter(q => isNum(q.v));
       const med = median(reps.filter(q => counted(q.rep)).map(q => q.v));
-      reps.forEach(q => all.push(q.v)); if (isNum(med)) all.push(med);
+      reps.forEach(q => all.push(q.v)); if (isNum(med)) { all.push(med); meds.push(med); }
       pts.push({sr, xv, cb, med, reps});
     });
   });
@@ -937,7 +1069,9 @@ function chart(k, stat, combos, opts) {
     stxt(sv, W / 2, H / 2, opts.empty || 'no data', {'text-anchor': 'middle', class: 'nodata'});
     return sv;
   }
-  const ticks = yDomain(all, k), lo = ticks[0], hi = ticks[ticks.length - 1];
+  const win = clipWindow(meds, k);
+  const fit = win ? all.filter(v => v <= win.hi && v >= win.lo).concat(meds) : all;
+  const ticks = yDomain(fit, k), lo = ticks[0], hi = ticks[ticks.length - 1];
   const dec = stepDecimals(ticks.length > 1 ? ticks[1] - ticks[0] : 1);
   const YP = (v) => m.t + ph - ph * (v - lo) / ((hi - lo) || 1);
   ticks.forEach(t => {
@@ -962,19 +1096,35 @@ function chart(k, stat, combos, opts) {
     ps.forEach(p => { if (!p) { pen = false; return; } d += (pen ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1); pen = true; });
     if (d) s('path', {d, fill: 'none', stroke: sr.color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'stroke-dasharray': DASH[sr.shape] || null}, sv);
   });
-  // repeat dots, then the median markers on top
+  // repeat dots (a dot beyond the axis sits at the edge as a triangle with its value), then the medians on top
   const dots = [];
+  let clipped = 0;
+  const clipLabels = [];        // [x, up] of every value label drawn at an edge
   pts.forEach(p => {
     const n = p.reps.length;
     p.reps.forEach((q, j) => {
-      const x = XP(p.xv) + dodge(p.sr) + (n > 1 ? (j - (n - 1) / 2) * 2.2 : 0), y = YP(q.v);
+      const x = XP(p.xv) + dodge(p.sr) + (n > 1 ? (j - (n - 1) / 2) * 2.2 : 0);
       const hollow = !q.rep.included;
-      marker(sv, p.sr.shape, x, y, 2.6, hollow ? {fill: 'var(--surface)', stroke: p.sr.color, 'stroke-width': 1.2}
-        : {fill: p.sr.color, 'fill-opacity': 0.55, stroke: 'var(--surface)', 'stroke-width': 1});
+      const style = hollow ? {fill: 'var(--surface)', stroke: p.sr.color, 'stroke-width': 1.2}
+        : {fill: p.sr.color, 'fill-opacity': 0.55, stroke: 'var(--surface)', 'stroke-width': 1};
+      let y = YP(q.v);
+      if (q.v > hi + 1e-9 || q.v < lo - 1e-9) {
+        clipped++;
+        const up = q.v > hi;
+        y = up ? m.t + 4 : m.t + ph - 4;
+        const r = 3.4;
+        s('path', Object.assign({d: up ? `M${x},${y - r}L${x + r},${y + r}L${x - r},${y + r}Z` : `M${x},${y + r}L${x + r},${y - r}L${x - r},${y - r}Z`}, style), sv);
+        const k2 = clipLabels.filter(c => c[1] === up && Math.abs(c[0] - x) < 36).length;
+        clipLabels.push([x, up]);
+        stxt(sv, x + 5, y + 3 + k2 * 9 * (up ? 1 : -1), fnum(q.v), {class: 'clipv'});
+      } else {
+        marker(sv, p.sr.shape, x, y, 2.6, style);
+      }
       dots.push({x, y, q, p});
     });
   });
-  pts.forEach(p => { if (isNum(p.med)) marker(sv, p.sr.shape, XP(p.xv) + dodge(p.sr), YP(p.med), 4.2, {fill: p.sr.color, stroke: 'var(--surface)', 'stroke-width': 2}); });
+  pts.forEach(p => { if (isNum(p.med)) marker(sv, p.sr.shape, XP(p.xv) + dodge(p.sr), YP(Math.min(hi, Math.max(lo, p.med))), 4.2, {fill: p.sr.color, stroke: 'var(--surface)', 'stroke-width': 2}); });
+  sv.dataset.clipped = clipped;
   // crosshair + tooltip + click-through
   const xh = s('line', {class: 'xh', y1: m.t, y2: m.t + ph, x1: -10, x2: -10, visibility: 'hidden'}, sv);
   const hit = s('rect', {x: m.l, y: m.t, width: pw, height: ph, fill: 'transparent', style: 'cursor: crosshair'}, sv);
@@ -1008,10 +1158,9 @@ function chart(k, stat, combos, opts) {
 
 function card(k, stat, host, wide) {
   const c = h('div', {class: 'card' + (wide ? ' wide' : '')});
-  const better = k.better === 'higher' ? 'higher is better' : k.better === 'lower' ? 'lower is better' : 'context, not scored';
   c.append(h('h4', {text: `${k.label} · ${statLabel(k, stat)}`}));
-  c.append(h('div', {class: 'cs', text: `${k.unit === 'share' ? 'share of frames' : k.unit} · ${better}`, title: k.help}));
-  const codecs = [...new Set(D.combos.map(cb => cb.codec))];
+  c.append(h('div', {class: 'cs', text: `${k.unit === 'share' ? 'share of frames' : k.unit} · ${better(k)}`, title: k.help}));
+  let clipped = 0;
   if (k.per_codec && codecs.length > 1) {
     const f = h('div', {class: 'facets'});
     codecs.forEach(cd => {
@@ -1019,17 +1168,23 @@ function card(k, stat, host, wide) {
       const wrap = h('div');
       const path = kpiPath(k, cd);
       const src = (k.id === 'qp' && path === 'encoder.qp') ? ' · per second (A): no per-frame QP' : '';
-      wrap.append(chart(k, stat, cbs, {empty: `no ${k.label} for ${cd}`}), h('div', {class: 'ft', text: `${cd} · ${D.qp_scale[cd] || 'QP'}${src}`}));
+      const sv = chart(k, stat, cbs, {empty: `no ${k.label} for ${cd}`});
+      clipped += +(sv.dataset.clipped || 0);
+      wrap.append(sv, h('div', {class: 'ft', text: `${cd} · ${D.qp_scale[cd] || 'QP'}${src}`}));
       f.append(wrap);
     });
     c.append(f);
   } else {
     if (k.per_codec && codecs.length === 1) c.querySelector('.cs').textContent += ` · ${D.qp_scale[codecs[0]] || ''}`;
-    c.append(chart(k, stat, D.combos));
+    const sv = chart(k, stat, D.combos);
+    clipped += +(sv.dataset.clipped || 0);
+    c.append(sv);
   }
+  if (clipped) c.append(h('div', {class: 'clipnote', text: `${clipped} repeat${clipped > 1 ? 's' : ''} beyond the axis, drawn at the edge with the value (hover for detail)`}));
   host.append(c);
 }
 
+const FEATURED = ['e2e', 'owd', 'jit_ia', 'qp', 'c_owd', 'fps'];
 function renderLegend() {
   const L = $('legend'); L.replaceChildren();
   series.forEach(sr => L.append(h('span', {class: 'item'}, lineKey(sr, 30), sr.label)));
@@ -1037,14 +1192,18 @@ function renderLegend() {
   s('circle', {cx: 6, cy: 6, r: 3.5, fill: 'var(--surface)', stroke: 'var(--ink2)', 'stroke-width': 1.2}, hol);
   const sol = document.createElementNS(SVGNS, 'svg'); sol.setAttribute('width', 12); sol.setAttribute('height', 12);
   s('circle', {cx: 6, cy: 6, r: 3, fill: 'var(--ink2)', 'fill-opacity': 0.55}, sol);
-  L.append(h('span', {class: 'item'}, sol, 'one repeat'), h('span', {class: 'item'}, hol, 'repeat not counted'));
-  $('xname').textContent = X ? `against ${X}` : '(no numeric axis: one point per combination)';
+  const big = document.createElementNS(SVGNS, 'svg'); big.setAttribute('width', 12); big.setAttribute('height', 12);
+  s('circle', {cx: 6, cy: 6, r: 4.2, fill: 'var(--ink2)', stroke: 'var(--surface)', 'stroke-width': 2}, big);
+  L.append(h('span', {class: 'item'}, big, 'median of counted repeats'), h('span', {class: 'item'}, sol, 'one repeat'),
+           h('span', {class: 'item'}, hol, 'repeat not counted'));
+  $('xname').textContent = X ? `One line per ${SA.join(' × ') || 'combination'} against ${X}. Lower is better unless a card says otherwise.`
+    : 'No numeric axis: one point per combination.';
 }
-
 function renderCharts() {
   const host = $('charts'), more = $('charts-more');
   host.replaceChildren(); more.replaceChildren();
-  D.kpis.forEach(k => card(k, ST.stat, k.primary ? host : more, k.per_codec && new Set(D.combos.map(cb => cb.codec)).size > 1));
+  const order = FEATURED.filter(id => KPI[id]).concat(D.kpis.map(k => k.id).filter(id => !FEATURED.includes(id)));
+  order.forEach(id => { const k = KPI[id]; card(k, ST.stat, FEATURED.includes(id) ? host : more, k.per_codec && codecs.length > 1); });
   renderExplore();
 }
 
@@ -1055,7 +1214,7 @@ function renderExplore() {
   const meta = D.paths.find(q => q.path === p);
   const k = {id: 'xp', path: p, label: meta && meta.name ? meta.name : p, unit: '', kind: meta ? meta.kind : 'value', better: null, per_codec: /qp/.test(p), help: 'metrics key ' + p};
   const st = $('xp-stat').value || 'p99';
-  card(k, k.kind === 'summary' ? st : 'value', host, k.per_codec && new Set(D.combos.map(cb => cb.codec)).size > 1);
+  card(k, k.kind === 'summary' ? st : 'value', host, k.per_codec && codecs.length > 1);
 }
 (function () {
   const ps = $('xp-path'), ss = $('xp-stat');
@@ -1065,6 +1224,151 @@ function renderExplore() {
   ss.value = 'p99';
   ps.addEventListener('change', renderExplore); ss.addEventListener('change', renderExplore);
 })();
+
+// ---- effects: best/worst, the x-axis sweep per line, paired differences for two-valued axes
+// (the same arithmetic as the Python kpi_sentences, at the statistic the viewer chose)
+function effects(k) {
+  const stat = statOf(k);
+  const groups = (k.per_codec && D.codec_axis) ? codecs : [null];
+  return groups.map(grp => {
+    const cbs = D.combos.filter(cb => grp == null || cb.codec === grp);
+    const vals = cbs.map(cb => ({cb, v: comboVal(cb, k, stat)})).filter(q => isNum(q.v));
+    const out = {group: grp, n: vals.length, best: null, worst: null, x: null, pairs: []};
+    if (!vals.length) return out;
+    const sign = k.better === 'higher' ? -1 : 1;
+    const sorted = vals.slice().sort((a, b) => sign * (a.v - b.v));
+    out.best = sorted[0]; out.worst = sorted[sorted.length - 1];
+    if (X && xVals.length > 1) {
+      const deltas = [];
+      [...new Set(vals.map(q => serKey(q.cb.vars)))].forEach(key => {
+        const pts = new Map(); vals.filter(q => serKey(q.cb.vars) === key).forEach(q => pts.set(q.cb.vars[X], q.v));
+        const have = xVals.filter(xv => pts.has(xv));
+        if (have.length >= 2) deltas.push({x0: have[0], x1: have[have.length - 1], d: pts.get(have[have.length - 1]) - pts.get(have[0])});
+      });
+      if (deltas.length) out.x = {x0: deltas[0].x0, x1: deltas[0].x1, lo: Math.min(...deltas.map(d => d.d)), hi: Math.max(...deltas.map(d => d.d)), n: deltas.length};
+    }
+    SA.forEach(a => {
+      if (k.per_codec && a === D.codec_axis) return;
+      const av = (D.values[a] || []).filter(v => vals.some(q => q.cb.vars[a] === v));
+      if (av.length !== 2) return;
+      const others = D.axes.filter(b => b !== a);
+      const keyOf = cb => JSON.stringify(others.map(b => cb.vars[b]));
+      const pa = new Map(), pb = new Map();
+      vals.forEach(q => { if (q.cb.vars[a] === av[0]) pa.set(keyOf(q.cb), q.v); else if (q.cb.vars[a] === av[1]) pb.set(keyOf(q.cb), q.v); });
+      const ds = []; pa.forEach((v, key) => { if (pb.has(key)) ds.push(pb.get(key) - v); });
+      if (!ds.length) return;
+      const wins = ds.filter(d => k.better === 'higher' ? d > 0 : d < 0).length;
+      out.pairs.push({axis: a, a: av[0], b: av[1], med: median(ds), wins, n: ds.length});
+    });
+    return out;
+  });
+}
+function pairAxes() {
+  return SA.filter(a => (D.values[a] || []).length === 2).map(a => ({axis: a, a: D.values[a][0], b: D.values[a][1]}));
+}
+function winsBar(wins, n, who) {
+  const w = h('span', {class: 'wins'});
+  const i = h('i'); const b = h('b'); b.style.width = (100 * wins / n).toFixed(0) + '%'; i.append(b);
+  w.append(i, `${who} better in ${wins} of ${n}`);
+  return w;
+}
+function renderEffects() {
+  const host = $('effects'); host.replaceChildren();
+  const pax = pairAxes();
+  const t = h('table', {class: 'fx'});
+  const hr = h('tr', {}, h('th', {text: 'KPI'}), h('th', {}, 'Best', h('small', {text: 'combination · value'})),
+    h('th', {}, 'Worst', h('small', {text: 'and how far off the best'})));
+  if (X && xVals.length > 1) hr.append(h('th', {}, `${X} ${xVals[0]} → ${xVals[xVals.length - 1]}`, h('small', {text: 'change along each line'})));
+  pax.forEach(p => hr.append(h('th', {}, `${varFmt(p.axis, p.b)} vs ${varFmt(p.axis, p.a)}`, h('small', {text: 'median over matched settings'}))));
+  t.append(h('thead', {}, hr));
+  const tb = h('tbody');
+  D.kpis.filter(k => k.primary).forEach(k => {
+    effects(k).forEach(e => {
+      const tr = h('tr');
+      const name = k.label + (e.group != null ? ` · ${e.group}` : '');
+      const sub = `${statLabel(k)} · ${better(k)}` + (e.group != null ? ` · ${D.qp_scale[e.group] || ''}` : '');
+      tr.append(h('td', {class: 'k', title: k.help}, name, h('small', {text: sub})));
+      if (!e.best) {
+        tr.append(h('td', {class: 'muted', colspan: 2 + (X && xVals.length > 1 ? 1 : 0) + pax.length, text: 'no data in any counted repeat'}));
+        tb.append(tr); return;
+      }
+      const bestTd = h('td', {}, chips(e.best.cb), h('span', {class: 'sub'}, h('span', {class: 'v', text: fval(e.best.v, k.unit)})));
+      const ratio = (k.better === 'lower' && e.best.v > 0) ? e.worst.v / e.best.v : null;
+      const worstTd = h('td', {}, chips(e.worst.cb), h('span', {class: 'sub'}, h('span', {class: 'v', text: fval(e.worst.v, k.unit)}),
+        e.worst !== e.best ? ` · ${fdiff(e.worst.v - e.best.v, k.unit)}${ratio && isFinite(ratio) && ratio >= 1.005 ? ', ' + ratio.toFixed(2) + '×' : ''}` : ' · same combination'));
+      tr.append(bestTd, worstTd);
+      if (X && xVals.length > 1) {
+        if (e.x) {
+          const same = Math.abs(e.x.hi - e.x.lo) < 1e-12;
+          tr.append(h('td', {}, h('span', {class: 'v', text: same ? fdiff(e.x.lo, k.unit) : `${fdiff(e.x.lo, k.unit)} to ${fdiff(e.x.hi, k.unit)}`}),
+            h('span', {class: 'sub', text: `${X} ${e.x.x0} → ${e.x.x1}, ${e.x.n} line${e.x.n !== 1 ? 's' : ''}`})));
+        } else tr.append(h('td', {class: 'muted', text: '–'}));
+      }
+      pax.forEach(p => {
+        const pr = e.pairs.find(q => q.axis === p.axis);
+        if (!pr) { tr.append(h('td', {class: 'muted', text: k.per_codec && p.axis === D.codec_axis ? 'not comparable across codecs' : '–'})); return; }
+        tr.append(h('td', {}, h('span', {class: 'v', text: fdiff(pr.med, k.unit)}), h('br'), winsBar(pr.wins, pr.n, varFmt(pr.axis, pr.b))));
+      });
+      tb.append(tr);
+    });
+  });
+  t.append(tb); host.append(t);
+}
+
+// ---- ranking: every combination best first for one KPI, a bar per row (shorter is better)
+const RK = {kpi: (prefs.rk && KPI[prefs.rk]) ? prefs.rk : 'e2e'};
+function renderRankTabs() {
+  const tabs = $('rk-tabs'); tabs.replaceChildren();
+  D.kpis.filter(k => k.primary).forEach(k => {
+    const b = h('button', {type: 'button', role: 'tab', 'aria-pressed': String(k.id === RK.kpi), text: k.label, title: k.help});
+    b.addEventListener('click', () => { RK.kpi = k.id; prefs.rk = k.id; savePrefs(); renderRankTabs(); renderRanking(); });
+    tabs.append(b);
+  });
+}
+function renderRanking() {
+  const host = $('rk'); host.replaceChildren();
+  const k = KPI[RK.kpi] || KPI.e2e; const stat = statOf(k);
+  const pct = k.unit === '%' && k.better === 'higher';
+  const groups = (k.per_codec && D.codec_axis) ? codecs : [null];
+  $('rk-note').textContent = `${k.label}, ${statLabel(k)}: ${better(k)}. Bar = ${pct ? 'shortfall from 100 %' : 'the value'}; shorter is better. Names link to summary.pdf, r1 r2 r3 to each report.pdf.`;
+  groups.forEach(grp => {
+    const cbs = D.combos.filter(cb => grp == null || cb.codec === grp);
+    const rows = cbs.map(cb => ({cb, v: comboVal(cb, k, stat), n: cb.repeats.filter(counted).length}));
+    const sign = k.better === 'higher' ? -1 : 1;
+    rows.sort((a, b) => { if (!isNum(a.v) && !isNum(b.v)) return 0; if (!isNum(a.v)) return 1; if (!isNum(b.v)) return -1; return sign * (a.v - b.v); });
+    const vs = rows.map(r => r.v).filter(isNum);
+    const barOf = (v) => {
+      if (!isNum(v) || !vs.length) return 0;
+      if (pct) { const mx = Math.max(...vs.map(x => 100 - x)); return mx > 0 ? (100 - v) / mx : 0; }
+      const mx = Math.max(...vs.map(Math.abs)); return mx > 0 ? Math.abs(v) / mx : 0;
+    };
+    const box = h('div');
+    if (grp != null) box.append(h('h4', {text: `${grp} · ${D.qp_scale[grp] || 'QP'}`}));
+    const t = h('table', {class: 'rank'});
+    const tb = h('tbody');
+    rows.forEach((r, i) => {
+      const tr = h('tr', {class: i === 0 && isNum(r.v) ? 'best' : null});
+      const name = r.cb.summary_pdf ? h('a', {href: r.cb.summary_pdf, class: 'pdf', title: r.cb.name + ' summary.pdf', text: 'pdf'}) : null;
+      tr.append(h('td', {class: 'n'}, isNum(r.v) ? String(i + 1) : '–'), h('td', {class: 'c'}, chips(r.cb)));
+      const bar = h('div', {class: 'rbar'}); const fill = h('i'); fill.style.width = (100 * barOf(r.v)).toFixed(1) + '%';
+      fill.style.background = codecColor(r.cb.codec); bar.append(fill);
+      tr.append(h('td', {class: 'b'}, bar), h('td', {class: 'v', text: fval(r.v, k.unit), title: `median of ${r.n} counted repeat(s)`}));
+      const reps = h('td', {class: 'r'});
+      r.cb.repeats.forEach((rep, j) => {
+        const v = repVal(rep, k, stat, r.cb.codec);
+        const txt = `r${rep.n} ${rep.has ? fnum(v) : '—'}`;
+        const el = rep.report_pdf ? h('a', {href: rep.report_pdf, text: txt, title: rep.label}) : h('span', {text: txt, title: rep.label});
+        if (!rep.included) { el.classList.add('nc'); el.title += ' — not counted (' + rep.status + ')'; }
+        if (j) reps.append(' · ');
+        reps.append(el);
+      });
+      (r.cb.missing || []).forEach(n => reps.append(' · ', h('span', {class: 'muted', text: `r${n} ?`, title: 'planned, not run yet'})));
+      tr.append(reps, h('td', {class: 'n'}, name || ''));
+      tb.append(tr);
+    });
+    t.append(tb); box.append(t); host.append(box);
+  });
+}
 
 // ---- radar
 const RAMP_LIGHT = ['#86b6ef', '#6da7ec', '#5598e7', '#3987e5', '#2a78d6', '#256abf', '#1c5cab', '#184f95', '#104281'];
@@ -1080,9 +1384,17 @@ function rampColor(i, n) {
   const lo = n <= 5 ? 1 : 0, hi = n <= 5 ? 7 : 8;
   return R[Math.round(lo + (hi - lo) * i / (n - 1))];
 }
+const RD = {series: (prefs.radar && series.some(q => q.key === prefs.radar)) ? prefs.radar : (series[0] || {}).key};
+function renderRadarSeg() {
+  const seg = $('radar-series'); seg.replaceChildren();
+  series.forEach(sr => {
+    const b = h('button', {type: 'button', 'aria-pressed': String(sr.key === RD.series)}, lineKey(sr, 22), ' ' + sr.label);
+    b.addEventListener('click', () => { RD.series = sr.key; prefs.radar = sr.key; savePrefs(); renderRadarSeg(); renderRadar(); });
+    seg.append(b);
+  });
+}
 function renderRadar() {
-  const sel = $('radar-series');
-  const sr = series.find(q => q.key === sel.value) || series[0];
+  const sr = series.find(q => q.key === RD.series) || series[0];
   const host = $('radar-svg'), leg = $('radar-legend'), tab = $('radar-table');
   host.replaceChildren(); leg.replaceChildren(); tab.replaceChildren();
   if (!sr) { host.append(h('p', {class: 'note', text: 'no combination'})); return; }
@@ -1151,11 +1463,7 @@ function renderRadar() {
   t.append(tb); tab.append(t);
 }
 (function () {
-  const sel = $('radar-series');
-  series.forEach(sr => sel.append(new Option(sr.label, sr.key)));
-  if (prefs.radar && series.some(q => q.key === prefs.radar)) sel.value = prefs.radar;
   $('radar-scale').value = prefs.radarScale || 'range';
-  sel.addEventListener('change', () => { prefs.radar = sel.value; savePrefs(); renderRadar(); });
   $('radar-scale').addEventListener('change', () => { prefs.radarScale = $('radar-scale').value; savePrefs(); renderRadar(); });
 })();
 
@@ -1211,7 +1519,7 @@ function renderMatrix() {
   }
   const t = h('table', {class: 'mx'});
   const hr = h('tr');
-  const th0 = h('th', {class: 'l', text: 'combination'}); th0.addEventListener('click', () => { MX.sort = null; renderMatrix(); });
+  const th0 = h('th', {class: 'l', text: 'combination', title: 'click to restore the grid order'}); th0.addEventListener('click', () => { MX.sort = null; renderMatrix(); });
   hr.append(th0, h('th', {class: 'l', text: 'repeats'}));
   cols.forEach((k, j) => {
     const th = h('th', {title: k.help}, k.label, h('span', {class: 'u', text: `${statLabel(k)} · ${k.unit === 'share' ? '%' : k.unit}`}));
@@ -1221,10 +1529,17 @@ function renderMatrix() {
   });
   t.append(h('thead', {}, hr));
   const tb = h('tbody');
+  let lastGrp = null;
   rows.forEach(r => {
+    const grp = SA[0] ? varFmt(SA[0], r.cb.vars[SA[0]]) : null;
+    if (MX.sort == null && grp != null && grp !== lastGrp) {
+      const g = h('tr', {class: 'grp'}, h('td', {colspan: cols.length + 2, text: grp}));
+      tb.append(g); lastGrp = grp;
+    }
     const tr = h('tr');
-    const name = r.cb.summary_pdf ? h('a', {href: r.cb.summary_pdf, text: r.cb.label, title: r.cb.name + ' summary.pdf'})
-      : r.cb.summary_html ? h('a', {href: r.cb.summary_html, text: r.cb.label}) : h('span', {text: r.cb.label, title: r.cb.name});
+    const name = r.cb.summary_pdf ? h('a', {href: r.cb.summary_pdf, title: r.cb.name + ' summary.pdf'}, chips(r.cb))
+      : r.cb.summary_html ? h('a', {href: r.cb.summary_html}, chips(r.cb)) : chips(r.cb);
+    if (name.tagName === 'A') name.style.textDecoration = 'none';
     tr.append(h('td', {class: 'l'}, name), h('td', {class: 'l'}, repLinks(r.cb)));
     cols.forEach((k, j) => {
       const b = bad(k, j, r);
@@ -1246,18 +1561,23 @@ $('mx-more').addEventListener('change', renderMatrix);
 
 // ---- every repeat
 function renderRepeats() {
+  const filt = $('rep-filter').value;
   const t = h('table', {class: 't'});
   t.append(h('thead', {}, h('tr', {}, ...['combination', 'repeat', 'status', 'flags', 'e2e p99', 'network p99', 'control network p99', 'encoder', 'report', 'label'].map((x, i) => h('th', {class: (i >= 4 && i <= 6) ? 'num' : null, text: x})))));
   const tb = h('tbody');
-  const all = D.combos.flatMap(cb => cb.repeats.map(r => ({cb, r}))).concat(D.controls.map(r => ({cb: {label: 'control ' + r.name, codec: ''}, r})));
+  const all = D.combos.flatMap(cb => cb.repeats.map(r => ({cb, r}))).concat(D.controls.map(r => ({cb: {label: 'control ' + r.name, codec: '', vars: {}}, r})));
+  let shown = 0;
   all.forEach(({cb, r}) => {
-    const fl = r.flags.map(f => D.flag_text[f] || f).join(', ');
     const serious = r.flags.some(f => D.serious_flags.includes(f));
+    if (filt === 'flagged' && !serious) return;
+    if (filt === 'excluded' && r.included) return;
+    shown++;
+    const fl = r.flags.map(f => D.flag_text[f] || f).join(', ');
     const links = h('span', {class: 'reps'});
     if (r.report_pdf) links.append(h('a', {href: r.report_pdf, text: 'pdf'}));
     if (r.report_html) links.append(h('a', {href: r.report_html, text: 'html'}));
     const tr = h('tr', {class: r.included ? null : 'excluded'},
-      h('td', {text: cb.label}), h('td', {text: r.n == null ? '' : 'r' + r.n}), h('td', {class: r.status === 'OK' ? null : 'bad', text: r.status}),
+      h('td', {}, cb.vars && Object.keys(cb.vars).length ? chips(cb) : cb.label), h('td', {text: r.n == null ? '' : 'r' + r.n}), h('td', {class: r.status === 'OK' ? null : 'bad', text: r.status}),
       h('td', {class: serious ? 'bad' : null, text: fl || '–', title: r.reasons.join('; ')}),
       h('td', {class: 'num', text: fval(repVal(r, KPI.e2e, 'p99', cb.codec), 'ms')}),
       h('td', {class: 'num', text: fval(repVal(r, KPI.owd, 'p99', cb.codec), 'ms')}),
@@ -1265,25 +1585,38 @@ function renderRepeats() {
       h('td', {class: /nvenc|nvidia/i.test(r.encoder) ? null : 'bad', text: r.encoder}), h('td', {}, links), h('td', {class: 'muted', text: r.label}));
     tb.append(tr);
   });
+  if (!shown) tb.append(h('tr', {}, h('td', {colspan: 10, class: 'muted', text: 'no repeat matches this filter'})));
   t.append(tb);
   $('rep-table').replaceChildren(t);
 }
+$('rep-filter').addEventListener('change', renderRepeats);
 
 // ---- toolbar
+function renderStatSeg() {
+  const seg = $('stat'); seg.replaceChildren();
+  D.stats.forEach(x => {
+    const b = h('button', {type: 'button', 'aria-pressed': String(x === ST.stat), text: x});
+    b.addEventListener('click', () => { ST.stat = x; prefs.stat = x; savePrefs(); renderStatSeg(); renderAll(); });
+    seg.append(b);
+  });
+}
 (function () {
-  const ss = $('stat');
-  D.stats.forEach(x => ss.append(new Option(x, x)));
-  ss.value = D.stats.includes(ST.stat) ? ST.stat : 'p99';
-  ss.addEventListener('change', () => { ST.stat = ss.value; prefs.stat = ST.stat; savePrefs(); renderAll(); });
+  if (!D.stats.includes(ST.stat)) ST.stat = 'p99';
   const inc = $('incl'); inc.checked = ST.incl;
   inc.addEventListener('change', () => { ST.incl = inc.checked; prefs.incl = ST.incl; savePrefs(); renderAll(); });
+  const cl = $('clip'); cl.checked = ST.clip;
+  cl.addEventListener('change', () => { ST.clip = cl.checked; prefs.clip = ST.clip; savePrefs(); renderCharts(); });
   const th = $('theme'); th.value = prefs.theme || '';
   const apply = () => { if (th.value) document.documentElement.setAttribute('data-theme', th.value); else document.documentElement.removeAttribute('data-theme'); };
   apply();
   th.addEventListener('change', () => { prefs.theme = th.value; savePrefs(); apply(); renderRadar(); renderMatrix(); });
   if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { renderRadar(); renderMatrix(); });
+  // one open "?" at a time
+  document.querySelectorAll('details.how').forEach(d => d.addEventListener('toggle', () => {
+    if (d.open) document.querySelectorAll('details.how[open]').forEach(o => { if (o !== d) o.open = false; });
+  }));
 })();
-function renderAll() { renderLegend(); renderCharts(); renderRadar(); renderMatrix(); renderRepeats(); }
+function renderAll() { renderStatSeg(); renderRankTabs(); renderRanking(); renderEffects(); renderLegend(); renderCharts(); renderRadarSeg(); renderRadar(); renderMatrix(); renderRepeats(); }
 renderAll();
 })();
 """

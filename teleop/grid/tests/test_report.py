@@ -611,6 +611,9 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreaterEqual(dom.count('class="ch"'), n_codec)
         self.assertLessEqual(dom.count('class="ch"'), n_codec + 2)
         self.assertEqual(dom.count('<table class="mx">'), 1)
+        self.assertEqual(dom.count('<table class="fx">'), 1)                        # the effects table
+        self.assertGreaterEqual(dom.count('<table class="rank">'), 1)               # the ranking
+        self.assertIn('class="rbar"', dom)
         self.assertEqual(dom.count('class="ring"'), 4)                              # the radar's four rings
         self.assertIn("gsynth-c", dom)                                              # the repeats table
         self.assertGreater(n_kpi, 10)
