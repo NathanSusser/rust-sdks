@@ -304,7 +304,8 @@ class Agent:
         rx_frames = int(rx) if control_log and rx is not None and \
             harness_supports(sub, "--control-buffer-frames", self.grid_dir) else None
         envs, argv = subscriber_command(sub, url, self.label, self.role, self.host_dir, self.cfg["display"], args,
-                                        control_log=control_log, control_buffer_frames=rx_frames)
+                                        control_log=control_log, control_buffer_frames=rx_frames,
+                                        rust_log=self.cfg.get("subscriber_rust_log") or "info")
         # Over ssh the subscriber inherits no XAUTHORITY and Xwayland refuses it; see display.py.
         xauth, how = find_xauthority(self.cfg)
         if xauth:
@@ -587,14 +588,15 @@ CONTROL_SUB_LOG = "control.csv"           # hostb/: the subscriber's --control-l
 
 def subscriber_command(sub: Path, url: str, label: str, role: str, host_dir: Path, display: str,
                        args: dict, *, control_log: bool = False,
-                       control_buffer_frames: int | None = None) -> tuple[dict, list[str]]:
+                       control_buffer_frames: int | None = None,
+                       rust_log: str = "info") -> tuple[dict, list[str]]:
     """(env, argv) for B's subscriber. The decoder's per-frame log (LK_DECODER_FRAME_LOG,
     hostb/frames-qp.csv) is ALWAYS requested: a subscriber built before it existed ignores the
     variable, and reduce treats the file as optional. The control log (hostb/control.csv) is
     requested only when `control_log` -- the caller has seen --control-log in THIS binary's
     --help -- because an unknown flag makes clap refuse to start at all; likewise
     --control-buffer-frames (the grid's control_rx_buffer), and only together with the log."""
-    env = {"DISPLAY": display, "RUST_LOG": "info",
+    env = {"DISPLAY": display, "RUST_LOG": rust_log,
            "LK_DECODER_FRAME_LOG": str(Path(host_dir) / "frames-qp.csv")}
     argv = [str(sub), "--url", url, "--room-name", label, "--identity", f"host-{role}-{label}",
             "--low-latency", "--display-timestamp", "--log-csv", str(Path(host_dir) / "subscriber.csv")]

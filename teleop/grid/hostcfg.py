@@ -43,6 +43,10 @@ OPTIONAL = {
     # Host B: explicit X authorization file for the subscriber's window. Normally found from
     # the running desktop session instead (display.py), since GNOME's changes at every login.
     "xauthority": str,
+    # Host B: RUST_LOG for the subscriber (default "info"). "info,livekit::rtc_engine=debug"
+    # writes every SDP offer/answer to subscriber.log, which is how codec negotiation
+    # failures are diagnosed instead of guessed.
+    "subscriber_rust_log": str,
 }
 OPTIONAL_DEFAULTS = {"b_keep_after_pull": False}
 PATH_KEYS = ("diag_venv_python", "credentials_env", "results_root", "repo", "peer_repo")
