@@ -117,9 +117,14 @@ class PtpB(unittest.TestCase):
         self.assertIn("LISTENING", r["detail"])
 
     def test_large_offset_fails(self):
-        r = preflight.gate_ptp_b(ptp_b_fake(journal=servo_journal(30, offset=50000)).ctx(CFG_B))
+        r = preflight.gate_ptp_b(ptp_b_fake(journal=servo_journal(30, offset=500000)).ctx(CFG_B))
         self.assertFalse(r["pass"])
         self.assertIn("offset", r["detail"])
+
+    def test_software_timestamping_offset_passes(self):
+        # 13 us skipped a smoke cell on 2026-09-30; A timestamps PTP in software.
+        r = preflight.gate_ptp_b(ptp_b_fake(journal=servo_journal(30, offset=13347)).ctx(CFG_B))
+        self.assertTrue(r["pass"], r["detail"])
 
     def test_no_pmc_uses_journal_state_and_says_so(self):
         f = ptp_b_fake(pmc=None)
@@ -579,3 +584,20 @@ class AgentReply(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XauthorityDiscovery(unittest.TestCase):
+    """The first smoke cell died because the ssh-launched subscriber had no XAUTHORITY."""
+
+    def test_explicit_override_wins(self):
+        import tempfile
+        from teleop.grid.display import find_xauthority
+        with tempfile.NamedTemporaryFile() as f:
+            path, how = find_xauthority({"xauthority": f.name})
+            self.assertEqual(path, f.name)
+            self.assertIn("host.yaml", how)
+
+    def test_missing_override_falls_through(self):
+        from teleop.grid.display import find_xauthority
+        path, how = find_xauthority({"xauthority": "/nonexistent/xauth"})
+        self.assertNotEqual(path, "/nonexistent/xauth")

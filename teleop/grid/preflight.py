@@ -15,6 +15,7 @@ import glob
 import http.client
 import json
 import os
+import shutil
 import re
 import socket
 import ssl
@@ -202,7 +203,7 @@ def gate_ptp_b(ctx: Ctx) -> dict:
         fails.append(f"phc2sys servo s{sv['phc2sys_last_servo']} (still acquiring; may step the clock)")
     if offset_ns is None and sv["last_offset_ns"] is not None:
         offset_ns = float(sv["last_offset_ns"])
-    max_off = float(g.get("max_offset_ns", 10000))
+    max_off = float(g.get("max_offset_ns", 100000))
     if offset_ns is None:
         fails.append("offset unknown (no pmc, no servo line)")
     else:
@@ -700,6 +701,24 @@ def gate_display(ctx: Ctx) -> dict:
     sock = f"/tmp/.X11-unix/X{m[1]}"
     if not os.path.exists(sock):
         return result("display", False, f"no X server socket {sock}")
+    # A socket is not a connection: the first smoke cell passed this gate and then died on
+    # "Authorization required" because the agent had no XAUTHORITY. Open a real connection
+    # with the same authorization file the subscriber will be given.
+    from .display import find_xauthority  # noqa: PLC0415
+    xauth, how = find_xauthority(ctx.cfg)
+    probe = shutil.which("xdpyinfo") or shutil.which("xset")
+    if probe:
+        env = {"DISPLAY": disp, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        if xauth:
+            env["XAUTHORITY"] = xauth
+        try:
+            r = subprocess.run([probe, "-display", disp] + (["q"] if probe.endswith("xset") else []),
+                               env=env, capture_output=True, text=True, timeout=8)
+            ok, err = r.returncode == 0, (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
+        except (OSError, subprocess.TimeoutExpired) as e:
+            ok, err = False, [str(e)]
+        if not ok:
+            return result("display", False, f"cannot open {disp} with XAUTHORITY={xauth} ({how}): {err[0]}")
     rc, out, _ = ctx.run(["loginctl", "list-sessions", "--no-legend"], 5)
     locked = None
     for line in out.splitlines():
@@ -710,7 +729,8 @@ def gate_display(ctx: Ctx) -> dict:
         if v.strip() in ("yes", "no"):
             locked = v.strip() == "yes"
             break
-    return result("display", True, f"{disp} present; session locked={locked}", locked=locked)
+    return result("display", True, f"{disp} opens with {xauth or 'no XAUTHORITY'} ({how}); session locked={locked}",
+                  locked=locked, xauthority=xauth)
 
 
 # ---------------------------------------------------------------- run

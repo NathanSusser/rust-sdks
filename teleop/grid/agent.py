@@ -50,6 +50,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 from . import capture, hostcfg
+from .display import find_xauthority
 from .capture import Captures, read_json, spawn_detached, start_ticks, verify_pid, write_json_atomic
 from .grid import ID_RE
 
@@ -304,6 +305,11 @@ class Agent:
             harness_supports(sub, "--control-buffer-frames", self.grid_dir) else None
         envs, argv = subscriber_command(sub, url, self.label, self.role, self.host_dir, self.cfg["display"], args,
                                         control_log=control_log, control_buffer_frames=rx_frames)
+        # Over ssh the subscriber inherits no XAUTHORITY and Xwayland refuses it; see display.py.
+        xauth, how = find_xauthority(self.cfg)
+        if xauth:
+            envs["XAUTHORITY"] = xauth
+        xauth_note = f"{xauth} ({how})" if xauth else how
         base = self._base_env()
         ca = self.repo / ".livekit-demo" / "corp-ca.pem"
         if "SSL_CERT_FILE" not in base and ca.is_file():
@@ -315,7 +321,7 @@ class Agent:
         b64 = base64.b64encode(json.dumps(launch).encode()).decode()
         largv = [sys.executable, "-m", "teleop.grid.agent", "_launch", "--label", self.label, "--json", b64]
         proc = {"pid": None, "kind": "subscriber", "fired_at": None, "argv": argv,
-                "control_log": control_log, "control_buffer_frames": rx_frames,
+                "control_log": control_log, "control_buffer_frames": rx_frames, "xauthority": xauth_note,
                 "cell": {k: v for k, v in args.items() if k != "cell_dir"},
                 "signature": [["teleop.grid.agent", "_launch", self.label], ["--room-name", self.label]]}
         pid = spawn_detached(largv, log, env=base, cwd=capture.CODE_ROOT)

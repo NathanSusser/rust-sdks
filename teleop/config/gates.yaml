@@ -12,7 +12,10 @@ ptp_b:
   link_speed_mbps: 1000
   ptp4l_state: SLAVE
   min_servo_lines_30s: 20
-  max_offset_ns: 10000
+  # A timestamps PTP in software (its cable NIC has no hardware clock), so single-sample
+  # offsets of 10-30 us are normal; 13 us skipped a smoke cell on 2026-09-30. Against
+  # 20-500 ms latencies, 100 us is under 0.5 % of the smallest figure.
+  max_offset_ns: 100000
 ptp_a:
   ptp4l_state: MASTER
 clock_offset:

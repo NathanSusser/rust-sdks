@@ -40,6 +40,9 @@ OPTIONAL = {
     # added by control plane v2: read on A (the orchestrator). true = do not purge B's copy of
     # a cell after A has pulled and verified it. Default false: Host B keeps nothing.
     "b_keep_after_pull": bool,
+    # Host B: explicit X authorization file for the subscriber's window. Normally found from
+    # the running desktop session instead (display.py), since GNOME's changes at every login.
+    "xauthority": str,
 }
 OPTIONAL_DEFAULTS = {"b_keep_after_pull": False}
 PATH_KEYS = ("diag_venv_python", "credentials_env", "results_root", "repo", "peer_repo")
