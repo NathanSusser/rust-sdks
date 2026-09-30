@@ -18,7 +18,10 @@
 #define WEBRTC_FFMPEG_H265_DECODER_IMPL_H_
 
 #include <api/video_codecs/video_decoder.h>
+#include <common_video/h265/h265_bitstream_parser.h>
 #include <common_video/include/video_frame_buffer_pool.h>
+
+#include <optional>
 
 struct AVBufferRef;
 struct AVCodecContext;
@@ -58,7 +61,9 @@ class FfmpegH265DecoderImpl : public VideoDecoder {
   DecoderInfo GetDecoderInfo() const override;
 
  private:
-  int32_t DeliverFrame(AVFrame* frame, const EncodedImage& input_image);
+  int32_t DeliverFrame(AVFrame* frame,
+                       const EncodedImage& input_image,
+                       std::optional<uint8_t> qp);
 
   const FfmpegApi* api_;
   AVCodecContext* context_ = nullptr;
@@ -70,6 +75,9 @@ class FfmpegH265DecoderImpl : public VideoDecoder {
 
   DecodedImageCallback* decoded_complete_callback_ = nullptr;
   VideoFrameBufferPool buffer_pool_;
+  // FFmpeg does not export QP; parse it from the slice header as libwebrtc's
+  // own H.264 decoder does.
+  H265BitstreamParser h265_parser_;
 };
 
 }  // namespace webrtc

@@ -16,6 +16,8 @@
 
 #include "livekit/video_decoder_factory.h"
 
+#include "livekit/decoder_frame_log.h"
+
 #include <modules/video_coding/codecs/av1/av1_svc_config.h>
 #include "api/environment/environment.h"
 #include "api/video_codecs/av1_profile.h"
@@ -151,6 +153,11 @@ VideoDecoderFactory::CodecSupport VideoDecoderFactory::QueryCodecSupport(
 }
 
 std::unique_ptr<webrtc::VideoDecoder> VideoDecoderFactory::Create(
+    const webrtc::Environment& env, const webrtc::SdpVideoFormat& format) {
+  return WrapDecoderForFrameLog(CreateUnwrapped(env, format));
+}
+
+std::unique_ptr<webrtc::VideoDecoder> VideoDecoderFactory::CreateUnwrapped(
     const webrtc::Environment& env, const webrtc::SdpVideoFormat& format) {
   for (const auto& factory : factories_) {
     for (const auto& supported_format : factory->GetSupportedFormats()) {

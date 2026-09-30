@@ -26,7 +26,7 @@ use cxx::{SharedPtr, UniquePtr};
 use livekit_runtime::Stream;
 use parking_lot::Mutex;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
-use webrtc_sys::video_track as sys_vt;
+use webrtc_sys::{decoder_frame_log::ffi as sys_dfl, video_track as sys_vt};
 
 use super::{packet_trailer::SubscribeTimingStage, video_frame::new_video_frame_buffer};
 use crate::{
@@ -153,6 +153,14 @@ impl sys_vt::VideoSink for VideoTrackObserver {
             frame.decode_finish_timestamp_us(),
             packet_trailer_handler.as_ref(),
         );
+
+        if sys_dfl::decoder_frame_log_enabled() {
+            let (frame_id, capture_us) = frame_metadata
+                .as_ref()
+                .map(|m| (m.frame_id.unwrap_or(0), m.user_timestamp.unwrap_or(0)))
+                .unwrap_or((0, 0));
+            sys_dfl::decoder_frame_log_on_sink(frame.timestamp(), frame_id, capture_us);
+        }
 
         self.frame_queue.push(VideoFrame {
             rotation: frame.rotation().into(),

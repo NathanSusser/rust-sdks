@@ -56,6 +56,7 @@ fn main() {
         "src/apm.rs",
         "src/audio_mixer.rs",
         "src/packet_trailer.rs",
+        "src/decoder_frame_log.rs",
     ];
 
     if is_desktop {
@@ -94,6 +95,7 @@ fn main() {
         "src/frame_cryptor.cpp",
         "src/global_task_queue.cpp",
         "src/prohibit_libsrtp_initialization.cpp",
+        "src/decoder_frame_log.cpp",
         "src/apm.cpp",
         "src/audio_mixer.cpp",
         "src/av1_bitstream.cpp",

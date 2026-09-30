@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <span>
 
 #include <api/video/color_space.h>
 #include <api/video/i420_buffer.h>
@@ -301,8 +302,16 @@ int32_t FfmpegH265DecoderImpl::Decode(const EncodedImage& input_image,
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
+  h265_parser_.ParseBitstream(
+      std::span<const uint8_t>(input_image.data(), input_image.size()));
+  std::optional<uint8_t> qp;
+  if (std::optional<int> slice_qp = h265_parser_.GetLastSliceQp();
+      slice_qp && *slice_qp >= 0 && *slice_qp <= 255) {
+    qp = static_cast<uint8_t>(*slice_qp);
+  }
+
   while ((ret = api_->avcodec_receive_frame(context_, frame_)) == 0) {
-    int32_t result = DeliverFrame(frame_, input_image);
+    int32_t result = DeliverFrame(frame_, input_image, qp);
     api_->av_frame_unref(frame_);
     if (result != WEBRTC_VIDEO_CODEC_OK) {
       return result;
@@ -317,7 +326,8 @@ int32_t FfmpegH265DecoderImpl::Decode(const EncodedImage& input_image,
 }
 
 int32_t FfmpegH265DecoderImpl::DeliverFrame(AVFrame* frame,
-                                            const EncodedImage& input_image) {
+                                            const EncodedImage& input_image,
+                                            std::optional<uint8_t> qp) {
   const AVFrame* src = frame;
   if (frame->format == AV_PIX_FMT_VAAPI) {
     api_->av_frame_unref(sw_frame_);
@@ -386,8 +396,7 @@ int32_t FfmpegH265DecoderImpl::DeliverFrame(AVFrame* frame,
         static_cast<ColorSpace::RangeID>(frame->color_range)));
   }
   VideoFrame decoded_frame = builder.build();
-  decoded_complete_callback_->Decoded(decoded_frame, std::nullopt,
-                                      std::nullopt);
+  decoded_complete_callback_->Decoded(decoded_frame, std::nullopt, qp);
   return WEBRTC_VIDEO_CODEC_OK;
 }
 

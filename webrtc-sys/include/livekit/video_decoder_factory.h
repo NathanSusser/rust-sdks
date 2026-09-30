@@ -34,6 +34,9 @@ class VideoDecoderFactory : public webrtc::VideoDecoderFactory {
       const webrtc::Environment& env, const webrtc::SdpVideoFormat& format) override;
 
  private:
+  std::unique_ptr<webrtc::VideoDecoder> CreateUnwrapped(
+      const webrtc::Environment& env, const webrtc::SdpVideoFormat& format);
+
   std::vector<std::unique_ptr<webrtc::VideoDecoderFactory>> factories_;
   const bool internal_h264_decoder_works_;
   // System FFmpeg (VA-API or software) H265 decoder is loadable.
