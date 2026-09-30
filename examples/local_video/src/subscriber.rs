@@ -26,6 +26,7 @@ use std::{
 };
 
 mod codec_display;
+mod control_rx;
 mod frame_log;
 mod subscriber_timing;
 mod user_data;
@@ -448,6 +449,23 @@ struct Args {
     /// frame leaves a hole, the hole is itself data, and alignment to the fixture holds.
     #[arg(long, default_value_t = 30)]
     sample_every: u32,
+
+    /// Receive the teleop control stream and log one CSV row per sample to PATH.
+    ///
+    /// Subscribes to the `teleop-control` data track (and the legacy data-channel topic of
+    /// the same name) published by `teleop-harness`, and echoes probe samples back so the
+    /// publisher can measure round trip.
+    #[arg(long, value_name = "PATH")]
+    control_log: Option<PathBuf>,
+
+    /// Receive queue depth for the control data track, in frames.
+    ///
+    /// Frames that arrive while the queue is full are dropped by the SDK and never logged.
+    /// At 200 Hz a depth of 1 (the harness's stale-command policy) discarded 26% of samples
+    /// on a loss-free path, so the default is deep enough to log what the network delivered;
+    /// pass 1 to model the policy instead.
+    #[arg(long, default_value_t = 64, requires = "control_log")]
+    control_buffer_frames: usize,
 }
 
 /// One sampled decoded frame, handed to the writer task.
@@ -2212,6 +2230,11 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         info!("End-to-end encryption activated");
     }
 
+    let control_rx = match args.control_log.as_deref() {
+        Some(path) => Some(control_rx::ControlReceiver::create(room.clone(), path, args.control_buffer_frames)?),
+        None => None,
+    };
+
     // Shared YUV buffer for UI/GPU
     let shared = Arc::new(Mutex::new(SharedYuv {
         room_name: args.room_name.clone(),
@@ -2306,6 +2329,20 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
                         &channel_history_events,
                         &subscriber_timing_events,
                     );
+                }
+                RoomEvent::DataTrackPublished(track)
+                    if track.info().name() == control_rx::CONTROL_NAME =>
+                {
+                    if let Some(rx) = control_rx.clone() {
+                        tokio::spawn(rx.run_data_track(track));
+                    }
+                }
+                RoomEvent::DataReceived { payload, topic, .. }
+                    if topic.as_deref() == Some(control_rx::CONTROL_NAME) =>
+                {
+                    if let Some(rx) = control_rx.as_ref() {
+                        rx.on_payload(&payload, control_rx::Transport::DataChannel).await;
+                    }
                 }
                 _ => {}
             }
